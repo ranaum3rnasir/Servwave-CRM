@@ -72,7 +72,7 @@ describe('POST /api/copilot/token (Gemini Live)', () => {
 
 describe('buildVoiceInstruction', () => {
   it('forces every CRM question through ask_servy and forbids answering from memory', () => {
-    const text = buildVoiceInstruction({ userName: 'Ran', role: 'ADMIN', orgName: 'Alpha HVAC' });
+    const text = buildVoiceInstruction({ userName: 'Art', role: 'ADMIN', orgName: 'Alpha HVAC' });
     expect(text).toContain('ask_servy');
     expect(text).toMatch(/never answer.*from your own memory/i);
     expect(text).toContain('Servy');

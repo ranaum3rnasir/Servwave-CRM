@@ -194,8 +194,8 @@ async function listWithSearch(
     }
   }
   // Keep only the best tier: records matching ALL the words beat partial hits
-  // ("Art Nakamura" returns just Art Nakamura, not every "ran" substring like
-  // "Branch"). Partial hits only surface when nothing matches every word.
+  // ("Art Nakamura" returns just Art Nakamura, not every "art" substring like
+  // "Bartlett"). Partial hits only surface when nothing matches every word.
   const all = [...ranked.values()];
   const bestHits = all.reduce((m, e) => Math.max(m, e.hits), 0);
   const items = all.filter((e) => e.hits === bestHits).map((e) => e.item).slice(0, 20);

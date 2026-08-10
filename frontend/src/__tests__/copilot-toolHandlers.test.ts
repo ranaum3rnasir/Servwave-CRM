@@ -28,28 +28,28 @@ describe('handleToolCall — reads', () => {
   });
 
   it('multi-word fallback keeps only records matching ALL words', async () => {
-    const ranNakamura = { id: 'c1', customer_number: 'C00001', first_name: 'Ran', last_name: 'Nakamura', phone: '5550001111' };
-    const ranRan = { id: 'c2', customer_number: 'C00002', first_name: 'Ran', last_name: 'Ran', phone: '5550002222' };
-    const branch = { id: 'c3', customer_number: 'C00003', first_name: 'Chase', last_name: 'Branch', phone: '5550003333' };
+    const artNakamura = { id: 'c1', customer_number: 'C00001', first_name: 'Art', last_name: 'Nakamura', phone: '5550001111' };
+    const artArt = { id: 'c2', customer_number: 'C00002', first_name: 'Art', last_name: 'Art', phone: '5550002222' };
+    const bartlett = { id: 'c3', customer_number: 'C00003', first_name: 'Chase', last_name: 'Bartlett', phone: '5550003333' };
     // Full-string "Art Nakamura" matches nothing (first/last are separate fields)…
     mockApi.get.mockResolvedValueOnce({ data: { customers: [] } } as never);
-    // …"Ran" substring-matches three records, "Nakamura" matches one.
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura, ranRan, branch] } } as never);
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura] } } as never);
+    // …"Art" substring-matches three records, "Nakamura" matches one.
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura, artArt, bartlett] } } as never);
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura] } } as never);
 
     const out = await handleToolCall('query_crm', { resource: 'customers', query: 'Art Nakamura' });
     expect(out.kind).toBe('immediate');
     if (out.kind === 'immediate') {
       expect(out.output).toContain('Art Nakamura');
       expect(out.output).not.toContain('C00002');
-      expect(out.output).not.toContain('Branch');
+      expect(out.output).not.toContain('Bartlett');
     }
   });
 
   it('multi-word fallback falls back to partial hits when nothing matches all words', async () => {
-    const ranRan = { id: 'c2', customer_number: 'C00002', first_name: 'Ran', last_name: 'Ran', phone: '5550002222' };
+    const artArt = { id: 'c2', customer_number: 'C00002', first_name: 'Art', last_name: 'Art', phone: '5550002222' };
     mockApi.get.mockResolvedValueOnce({ data: { customers: [] } } as never); // full string
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranRan] } } as never); // "Ran"
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artArt] } } as never); // "Art"
     mockApi.get.mockResolvedValueOnce({ data: { customers: [] } } as never); // "Smith"
     const out = await handleToolCall('query_crm', { resource: 'customers', query: 'Ran Smith' });
     expect(out.kind).toBe('immediate');
@@ -75,7 +75,7 @@ describe('handleToolCall — conversational required-field collection', () => {
 
   it('create_lead with a resolved customer but no service_request asks for the work', async () => {
     mockApi.get.mockResolvedValueOnce({
-      data: { customers: [{ id: 'c1', customer_number: 'C00001', first_name: 'Ran', last_name: 'Nakamura' }] },
+      data: { customers: [{ id: 'c1', customer_number: 'C00001', first_name: 'Art', last_name: 'Nakamura' }] },
     } as never);
     const out = await handleToolCall('create_lead', { customer_name: 'Nakamura' });
     expect(out.kind).toBe('error');
@@ -145,11 +145,11 @@ describe('handleToolCall — conversational required-field collection', () => {
 });
 
 describe('handleToolCall — create_lead resolves customer_name itself', () => {
-  const ranNakamura = { id: 'c1', customer_number: 'C00001', first_name: 'Ran', last_name: 'Nakamura', phone: '5550001111' };
-  const ranRan = { id: 'c2', customer_number: 'C00002', first_name: 'Ran', last_name: 'Ran', phone: '5550002222' };
+  const artNakamura = { id: 'c1', customer_number: 'C00001', first_name: 'Art', last_name: 'Nakamura', phone: '5550001111' };
+  const artArt = { id: 'c2', customer_number: 'C00002', first_name: 'Art', last_name: 'Art', phone: '5550002222' };
 
   it('exactly one match → cards with the resolved customer_id (no interrogation)', async () => {
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura] } } as never);
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura] } } as never);
     const out = await handleToolCall('create_lead', { customer_name: 'Nakamura', service_request: 'AC broken' });
     expect(out.kind).toBe('approval');
     if (out.kind === 'approval') {
@@ -162,16 +162,16 @@ describe('handleToolCall — create_lead resolves customer_name itself', () => {
 
   it('uses the multi-word ranked search ("Art Nakamura" finds the right person)', async () => {
     mockApi.get.mockResolvedValueOnce({ data: { customers: [] } } as never); // full string
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura, ranRan] } } as never); // "Ran"
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura] } } as never); // "Nakamura"
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura, artArt] } } as never); // "Art"
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura] } } as never); // "Nakamura"
     const out = await handleToolCall('create_lead', { customer_name: 'Art Nakamura', service_request: 'AC broken' });
     expect(out.kind).toBe('approval');
     if (out.kind === 'approval') expect(out.action.payload.customer_id).toBe('c1');
   });
 
   it('multiple matches → lists them and asks which (with their ids for the re-call)', async () => {
-    mockApi.get.mockResolvedValueOnce({ data: { customers: [ranNakamura, ranRan] } } as never);
-    const out = await handleToolCall('create_lead', { customer_name: 'Ran', service_request: 'AC broken' });
+    mockApi.get.mockResolvedValueOnce({ data: { customers: [artNakamura, artArt] } } as never);
+    const out = await handleToolCall('create_lead', { customer_name: 'Art', service_request: 'AC broken' });
     expect(out.kind).toBe('error');
     if (out.kind === 'error') {
       expect(out.output).toContain('C00001');
@@ -332,7 +332,7 @@ describe('commitAction — executes only the pinned payload', () => {
     mockApi.post.mockRejectedValueOnce({
       response: {
         status: 409,
-        data: { error: 'duplicate', existing: { id: 'c9', customer_number: 'C00012', first_name: 'Ran', last_name: 'Nakamura', email: 'r@x.com', is_active: true } },
+        data: { error: 'duplicate', existing: { id: 'c9', customer_number: 'C00012', first_name: 'Art', last_name: 'Nakamura', email: 'r@x.com', is_active: true } },
       },
     });
     const res = await commitAction(leadAction());

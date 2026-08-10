@@ -55,7 +55,7 @@ const adminAbility = buildAbility([{ action: 'manage', subject: 'all' }]);
 
 const CUSTOMER = {
   id: 'cust-1',
-  first_name: 'Ran',
+  first_name: 'Art',
   last_name: 'Nakamura',
   company_name: null,
   email: CUSTOMER_EMAIL,

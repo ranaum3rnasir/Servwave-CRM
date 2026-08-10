@@ -124,8 +124,8 @@ describe('InboxPage - a sender with no display name', () => {
     renderInbox();
     await screen.findByText(NAMELESS_ADDRESS);
 
-    // getInitials('info@servwave.com') -> 'RA'. The bug rendered '?' here.
-    expect(screen.getAllByText('RA').length).toBeGreaterThan(0);
+    // getInitials('info@servwave.com') -> 'IN'. The bug rendered '?' here.
+    expect(screen.getAllByText('IN').length).toBeGreaterThan(0);
     expect(screen.queryByText('?')).not.toBeInTheDocument();
   });
 

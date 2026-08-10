@@ -50,7 +50,7 @@ beforeEach(() => {
   p.phoneNumber.update.mockResolvedValue({});
   p.phoneNumber.updateMany.mockResolvedValue({ count: 0 });
   p.user.count.mockResolvedValue(1);
-  p.user.findFirst.mockResolvedValue({ first_name: 'Ran', last_name: 'Nakamura' });
+  p.user.findFirst.mockResolvedValue({ first_name: 'Art', last_name: 'Nakamura' });
   p.userPhoneNumber.deleteMany.mockResolvedValue({ count: 0 });
   p.userPhoneNumber.createMany.mockResolvedValue({ count: 1 });
 

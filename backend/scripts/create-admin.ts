@@ -5,8 +5,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ADMIN_EMAIL = 'info@servwave.com';
-const ALPHA_ORG_ID = '00000000-0000-0000-0000-000000000001';
+// Override with ADMIN_EMAIL to create a different account.
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'info@servwave.com';
+const ADMIN_FIRST_NAME = process.env.ADMIN_FIRST_NAME || 'Demo';
+const ADMIN_LAST_NAME = process.env.ADMIN_LAST_NAME || 'Admin';
+const DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001';
 
 /** Generate a strong random password (>= 20 chars, mixed alphabet). */
 function generatePassword(): string {
@@ -68,10 +71,10 @@ async function main() {
       data: {
         id: supabaseUserId,
         email: ADMIN_EMAIL,
-        first_name: 'Ran',
-        last_name: 'Nakamura',
+        first_name: ADMIN_FIRST_NAME,
+        last_name: ADMIN_LAST_NAME,
         role: 'ADMIN',
-        organization_id: ALPHA_ORG_ID,
+        organization_id: DEMO_ORG_ID,
       },
     });
 
@@ -79,7 +82,7 @@ async function main() {
     console.log(`  Email:    ${ADMIN_EMAIL}`);
     console.log(`  Password: ${password}`);
     console.log('  Role:     ADMIN');
-    console.log(`  Org:      ${ALPHA_ORG_ID}`);
+    console.log(`  Org:      ${DEMO_ORG_ID}`);
     console.log('  (Google sign-in links by confirmed email; password is a fallback.)');
   } catch (err) {
     console.error('create-admin failed:', err);
