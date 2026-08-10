@@ -1,0 +1,239 @@
+/* =============================================================================
+   ServWave Design System - tokens-v2.css
+   The CRM UI kit's palette, ported from crm-ui-kit/src/app/globals.css.
+
+   WHY A SECOND FILE
+   The v2 presentation layer (frontend/src/pages/v2) runs on the kit's token
+   names, which follow shadcn/ui (--card, --muted, --ring) rather than
+   ServWave's (--surface, --text-secondary, --border-color). Keeping them here
+   rather than merged into tokens.css means the whole v2 layer rolls back by
+   deleting this file and its import - which is the point of the parallel-layer
+   migration.
+
+   FORMAT
+   The kit authored these as hex. They are stored here as SPACE-SEPARATED RGB
+   CHANNELS to match tokens.css, so Tailwind's `rgb(var(--token) /
+   <alpha-value>)` mapping keeps opacity modifiers (bg-card/50) working.
+   Non-colour tokens (shadows, radius, pre-composed rgb()) stay verbatim.
+
+   NAME COLLISIONS - resolved, do not reintroduce
+     --primary     kit #0c2d3a is byte-identical to tokens.css --ocean-800,
+                   so the app's token is reused and NOT redefined here.
+     --background   } owned by tokens.css with different meanings; the kit's
+     --border       } equivalents are deliberately not ported. Kit components
+     --surface      } read --card / --border-color instead.
+     --muted       tokens.css renamed its foreground primitive to
+                   --neutral-500 to free this name for the kit's background.
+     --secondary   the app's is a legacy grey; the kit's tonal teal is ported
+                   as --tonal so both survive.
+   ============================================================================= */
+
+:root {
+  /* radius - the kit's 10px, distinct from ServWave's 6px --radius-card */
+  --radius: 0.625rem;
+
+  /* surfaces
+     NOTE the `kit-` prefix on background/card/popover.
+
+     `card` and `popover` MUST be prefixed: both are already boxShadow keys in
+     the app's Tailwind config, and Tailwind's boxShadow and boxShadowColor core
+     plugins share the `shadow-` namespace. A colour of the same name emits a
+     second `.shadow-card` rule that wins and rewrites the shadow's colour.
+
+     `kit-background` is prefixed for symmetry, not necessity. The app's
+     `background` key is {light,dark} with no DEFAULT, and adding one would be
+     safe - bare `bg-background` has ZERO call sites. (An earlier revision of
+     this comment claimed 856; that was a bad grep. `\bbg-background\b` treats
+     the hyphen as a word boundary, so it was counting `bg-background-light`,
+     which is a live, registered, resolving class with 854 sites.) */
+  --kit-background: 255 255 255;   /* #ffffff */
+  --foreground: 20 27 32;          /* #141b20 */
+  --app: 238 242 244;              /* #eef2f4  canvas the panel floats on */
+  --column: 240 243 245;           /* #f0f3f5  kanban column bed */
+  --column-active: 228 237 240;    /* #e4edf0 */
+  --card: 255 255 255;             /* #ffffff */
+  --card-foreground: 20 27 32;     /* #141b20 */
+  --popover: 255 255 255;          /* #ffffff */
+  --popover-foreground: 20 27 32;  /* #141b20 */
+
+  /* brand - --primary itself comes from tokens.css (--ocean-800) */
+  --primary-foreground: 255 255 255; /* #ffffff */
+  --primary-hover: 9 34 44;          /* #09222c  dark surfaces cannot hover via opacity */
+  --tonal: 226 241 244;              /* #e2f1f4  subordinate actions */
+  --tonal-foreground: 11 95 117;     /* #0b5f75 */
+  --tonal-hover: 211 234 239;        /* #d3eaef */
+
+  /* livelier teal: focus rings, links, active + selected */
+  --brand: 14 116 144;             /* #0e7490 */
+  --brand-foreground: 255 255 255; /* #ffffff */
+  --brand-subtle: 226 241 244;     /* #e2f1f4 */
+  --brand-emphasis: 11 95 117;     /* #0b5f75 */
+
+  /* neutrals - shadcn's --accent is a hover background, not the brand colour */
+  --muted: 244 247 249;            /* #f4f7f9 */
+  --muted-foreground: 74 87 96;    /* #4a5760 */
+  --subtle-foreground: 139 152 160;/* #8b98a0  placeholders, meta, disabled */
+  --accent: 244 247 249;           /* #f4f7f9 */
+  --accent-foreground: 20 27 32;   /* #141b20 */
+
+  --destructive: 226 68 92;            /* #e2445c */
+  --destructive-foreground: 255 255 255;
+  --destructive-hover: 201 57 79;      /* #c9394f */
+
+  /* controls - --input is deliberately darker than the app's divider colour */
+  --input: 199 207 210;            /* #c7cfd2 */
+  --input-hover: 74 87 96;         /* #4a5760 */
+  --ring: 14 116 144;              /* #0e7490 */
+  --selected: 234 245 247;         /* #eaf5f7  selected table rows */
+
+  /* status - solid fills, white text, all clear AA */
+  --status-green: 13 150 104;      /* #0d9668 */
+  --status-blue: 37 99 201;        /* #2563c9 */
+  --status-amber: 192 124 20;      /* #c07c14 */
+  --status-red: 204 51 72;         /* #cc3348 */
+  --status-purple: 112 72 196;     /* #7048c4 */
+  --status-slate: 91 107 115;      /* #5b6b73 */
+
+  /* status - soft tints for chips and banners */
+  --status-green-subtle: 227 244 236;   --status-green-emphasis: 10 122 81;
+  --status-blue-subtle: 230 237 250;    --status-blue-emphasis: 31 82 171;
+  --status-amber-subtle: 249 239 220;   --status-amber-emphasis: 142 92 13;
+  --status-red-subtle: 251 233 236;     --status-red-emphasis: 173 43 61;
+  --status-purple-subtle: 238 233 250;  --status-purple-emphasis: 87 51 153;
+  --status-slate-subtle: 238 241 243;   --status-slate-emphasis: 71 85 92;
+
+  /* sidebar - no fill of its own; it sits directly on --app */
+  --sidebar-foreground: 34 50 58;         /* #22323a */
+  --sidebar-muted-foreground: 91 112 120; /* #5b7078 */
+  --sidebar-subtle-foreground: 139 160 168;
+  --sidebar-accent: rgb(12 45 58 / 0.055);
+  --sidebar-ring: 14 116 144;
+
+  /* scrollbars - pre-composed like --sidebar-accent, because a scrollbar thumb
+     is a tint of the ink colour rather than a palette entry of its own. */
+  --scroll: rgb(12 45 58 / 0.20);
+  --scroll-hover: rgb(12 45 58 / 0.34);
+
+
+  /* Kanban work types - filled 16px blocks. Identifiable peripherally by
+     shape; the colour is secondary reinforcement. */
+  --worktype-emergency: 229 73 58;     /* #e5493a */
+  --worktype-maintenance: 47 125 225;  /* #2f7de1 */
+  --worktype-installation: 31 157 99;  /* #1f9d63 */
+  --worktype-inspection: 129 85 214;   /* #8155d6 */
+
+  /* Kanban priority - the glyph encodes direction, so this survives colour
+     blindness; the colour only reinforces it. */
+  --priority-highest: 207 46 32;   /* #cf2e20 */
+  --priority-high: 229 118 42;     /* #e5762a */
+  --priority-medium: 192 124 20;   /* #c07c14 */
+  --priority-low: 75 127 209;      /* #4b7fd1 */
+
+  /* Card label chips - dark text on a light tint; white-on-colour loses
+     legibility at the 11px a label chip wants to be. */
+  --label-warranty-bg: 231 222 251;   --label-warranty-fg: 92 60 170;
+  --label-contract-bg: 214 233 248;   --label-contract-fg: 31 92 150;
+  --label-parts-bg: 251 232 207;      --label-parts-fg: 138 85 16;
+  --label-callback-bg: 251 220 220;   --label-callback-fg: 163 46 38;
+  --label-afterhours-bg: 213 240 227; --label-afterhours-fg: 17 107 70;
+
+  /* Avatar tints - deterministic per name. Deliberately desaturated: bright
+     generated colours beside solid status labels turn a table into confetti. */
+  --avatar-tint-1: 42 111 127;  /* #2a6f7f */
+  --avatar-tint-2: 63 125 90;   /* #3f7d5a */
+  --avatar-tint-3: 138 90 43;   /* #8a5a2b */
+  --avatar-tint-4: 76 106 160;  /* #4c6aa0 */
+  --avatar-tint-5: 122 90 134;  /* #7a5a86 */
+  --avatar-tint-6: 90 107 115;  /* #5a6b73 */
+
+
+  /* elevation - authored as --elevation-* and mapped to shadow-* in tailwind
+     config; authoring them as --shadow-* here would be silently overridden by
+     Tailwind's own defaults */
+  --elevation-xs: 0 1px 1px rgb(12 45 58 / 0.07);
+  --elevation-sm: 0 1px 2px rgb(12 45 58 / 0.07), 0 1px 3px rgb(12 45 58 / 0.04);
+  --elevation-md: 0 2px 6px rgb(12 45 58 / 0.10), 0 1px 2px rgb(12 45 58 / 0.06);
+  --elevation-lg: 0 8px 22px rgb(12 45 58 / 0.13), 0 2px 6px rgb(12 45 58 / 0.07);
+  --elevation-canvas: 0 1px 2px rgb(12 45 58 / 0.05), 0 6px 18px rgb(12 45 58 / 0.06);
+  --elevation-card: 0 1px 1px rgb(12 45 58 / 0.18), 0 0 1px rgb(12 45 58 / 0.22);
+  --elevation-card-hover: 0 3px 8px rgb(12 45 58 / 0.16), 0 0 1px rgb(12 45 58 / 0.25);
+  --elevation-popover: 0 6px 18px rgb(12 45 58 / 0.14), 0 2px 5px rgb(12 45 58 / 0.07);
+  --elevation-modal: 0 20px 50px rgb(12 45 58 / 0.24), 0 5px 14px rgb(12 45 58 / 0.12);
+  --elevation-rail: 14px 0 40px rgb(8 26 34 / 0.28);
+}
+
+.dark {
+  --kit-background: 7 15 19;       /* #070f13 */
+  --foreground: 230 237 239;       /* #e6edef */
+  --app: 7 15 19;                  /* #070f13 */
+  --column: 16 29 35;              /* #101d23 */
+  --column-active: 22 48 58;       /* #16303a */
+  --card: 16 29 35;                /* #101d23 */
+  --card-foreground: 230 237 239;
+  --popover: 16 33 40;             /* #102128 */
+  --popover-foreground: 230 237 239;
+
+  --primary-foreground: 255 255 255;
+  --primary-hover: 35 135 157;     /* #23879d */
+  --tonal: 20 51 61;               /* #14333d */
+  --tonal-foreground: 121 207 224; /* #79cfe0 */
+  --tonal-hover: 26 63 74;         /* #1a3f4a */
+
+  --brand: 42 162 186;             /* #2aa2ba */
+  --brand-foreground: 255 255 255;
+  --brand-subtle: 19 51 61;        /* #13333d */
+  --brand-emphasis: 127 211 228;   /* #7fd3e4 */
+
+  --muted: 23 48 58;               /* #17303a */
+  --muted-foreground: 149 164 170; /* #95a4aa */
+  --subtle-foreground: 113 130 138;/* #71828a */
+  --accent: 23 48 58;              /* #17303a */
+  --accent-foreground: 230 237 239;
+
+  --destructive: 226 68 92;
+  --destructive-foreground: 255 255 255;
+  --destructive-hover: 201 57 79;
+
+  --input: 44 74 86;               /* #2c4a56 */
+  --input-hover: 125 145 154;      /* #7d919a */
+  --ring: 42 162 186;              /* #2aa2ba */
+  --selected: 18 54 66;            /* #123642 */
+
+  --status-green: 18 172 120;      /* #12ac78 */
+  --status-blue: 61 125 221;       /* #3d7ddd */
+  --status-amber: 209 144 31;      /* #d1901f */
+  --status-red: 220 68 89;         /* #dc4459 */
+  --status-purple: 134 89 214;     /* #8659d6 */
+  --status-slate: 109 127 136;     /* #6d7f88 */
+
+  /* dark tints are alpha-composited off the solid fill rather than a second
+     opaque ramp, so they sit on any surface */
+  --status-green-subtle: 18 172 120;
+  --status-blue-subtle: 61 125 221;
+  --status-amber-subtle: 209 144 31;
+  --status-red-subtle: 220 68 89;
+  --status-purple-subtle: 134 89 214;
+  --status-slate-subtle: 109 127 136;
+
+  --sidebar-foreground: 214 226 230;
+  --sidebar-muted-foreground: 142 161 169;
+  --sidebar-subtle-foreground: 104 126 135;
+  --sidebar-accent: rgb(255 255 255 / 0.05);
+  --sidebar-ring: 42 162 186;
+
+  --scroll: rgb(255 255 255 / 0.17);
+  --scroll-hover: rgb(255 255 255 / 0.30);
+
+
+
+  --elevation-xs: 0 1px 2px rgb(0 0 0 / 0.4);
+  --elevation-sm: 0 1px 3px rgb(0 0 0 / 0.45);
+  --elevation-md: 0 6px 18px rgb(0 0 0 / 0.55);
+  --elevation-lg: 0 18px 40px rgb(0 0 0 / 0.65);
+  --elevation-canvas: 0 1px 3px rgb(0 0 0 / 0.5);
+  --elevation-card: 0 1px 1px rgb(0 0 0 / 0.5), 0 0 1px rgb(0 0 0 / 0.6);
+  --elevation-card-hover: 0 3px 10px rgb(0 0 0 / 0.55);
+  --elevation-popover: 0 10px 30px rgb(0 0 0 / 0.6);
+  --elevation-modal: 0 24px 60px rgb(0 0 0 / 0.7);
+  --elevation-rail: 14px 0 40px rgb(0 0 0 / 0.5);
+}

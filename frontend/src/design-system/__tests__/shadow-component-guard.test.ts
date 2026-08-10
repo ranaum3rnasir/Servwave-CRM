@@ -1,0 +1,285 @@
+/* =============================================================================
+   ServWave shared-component library — shadow-component guard (regression fence)
+   -----------------------------------------------------------------------------
+   Enforces invariant I2: "no concept has two implementations (one shared, one
+   local)". It exists because of a real bug: `src/components/communication/
+   phone/shared.tsx` exported a hand-rolled `Toggle` (raw `<button role="switch">`,
+   no focus ring, no disabled state, `rounded-full` instead of the `rounded-pill`
+   token) that quietly duplicated `src/components/ui/switch.tsx`. Nothing failed
+   loudly - the app just grew two toggle switches that drift independently.
+
+   WHAT IT DOES
+     1. Walks src/components/**, src/pages/**, src/features/**, excluding
+        src/components/ui/** (the primitives themselves), __tests__ dirs, and
+        test/spec files (*.test.ts(x), *.spec.ts(x)).
+     2. Finds exported components whose name contains Button, Modal, Dialog,
+        Toggle, or Switch - i.e. names that claim to BE one of those concepts.
+     3. For each, checks whether the file actually composes the matching shared
+        primitive (imports it from components/ui AND renders its JSX tag) rather
+        than reimplementing the concept from raw markup.
+     4. A component that doesn't compose the primitive is a violation UNLESS its
+        name+file pair is in ALLOWLIST below, each entry carrying an honest,
+        specific reason.
+
+   CONCEPT MAPPING (why Dialog and Modal share one bucket)
+     `ui/modal.tsx` is documented as composing `ui/dialog.tsx` ("Composes ui/
+     dialog rather than replacing it; reach for the raw Dialog primitives only
+     when a surface needs a layout this does not cover"). A component named
+     "...Dialog" that renders <Modal>, or one named "...Modal" that renders
+     <Dialog> directly, is NOT a shadow implementation - it is correctly reaching
+     for the shared surface at whichever layer fits. So Modal and Dialog check
+     against the SAME primitive/tag pair: {modal, dialog} / {<Modal>, <Dialog>}.
+     `ui/confirm-dialog.tsx` composes `ui/dialog.tsx` the same way, for the
+     confirm-flavored case (icon badge, Cancel/Confirm footer, loading state) -
+     it joins the same bucket: {modal, dialog, confirm-dialog} / {<Modal>,
+     <Dialog>, <ConfirmDialog>}.
+
+     Toggle checks against {switch, toggle-group} / {<Switch>, <ToggleGroup>}.
+     No ui/toggle-group.tsx exists in this codebase yet - the alternation is
+     kept so the guard doesn't need editing the day one is added; until then
+     `switch` is the only real target for a "Toggle"-named export.
+
+   SEEDING THE ALLOWLIST
+     Run against the real tree at seed time, ALLOWLIST contains every current
+     instance that doesn't compose its primitive - including genuine pre-
+     existing duplicates, not just false positives. The point is a green fence
+     from day one that shrinks as entries get consolidated or deleted, not a
+     retroactive cleanup gate. See each entry's reason for which kind it is.
+
+   KNOWN LIMITATION
+     The detection regex (below, verbatim from the spec) matches `export const
+     use<...>Toggle` the same as a component - it doesn't distinguish hooks from
+     components. No such hook exists in the tree today (checked at seed time);
+     if one is ever added, allowlist it rather than widening the regex, so the
+     allowlist keeps a record of every exception instead of the regex quietly
+     losing precision.
+   ============================================================================= */
+import { describe, it, expect } from 'vitest';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Repo-root-relative anchor: this file lives at
+// frontend/src/design-system/__tests__/, so frontend/src is two levels up.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SRC = resolve(HERE, '..', '..');
+const UI_DIR = join(SRC, 'components', 'ui');
+
+/** Recursively list .ts/.tsx files under a dir, skipping components/ui,
+ *  __tests__ dirs, and test/spec files. */
+function walk(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    if (name === '__tests__') return [];
+    if (p === UI_DIR) return [];
+    if (statSync(p).isDirectory()) return walk(p);
+    if (/\.(test|spec)\.(ts|tsx)$/.test(p)) return [];
+    return /\.(ts|tsx)$/.test(p) ? [p] : [];
+  });
+}
+
+/** Strip line + block comments so a commented-out `<Dialog>` or import doesn't
+ *  false-negative a violation (and a commented-out export name doesn't false-
+ *  positive one).
+ *
+ *  Line comments are stripped FIRST, deliberately - not tokens-guard.test.ts's
+ *  order. A line comment can itself contain a stray comment-opener-looking
+ *  substring (e.g. a URL path segment ending in "/*"); running the block-
+ *  comment regex first treats that as a real comment opener and swallows
+ *  everything up to the next unrelated comment-closer in the file, silently
+ *  deleting real code (this actually happened here: it ate the Modal render
+ *  in two inventory dialogs and produced false violations). Stripping line
+ *  comments first removes the fake opener before the block regex sees it. */
+function stripComments(src: string): string {
+  return src
+    .replace(/(^|[^:])\/\/.*$/gm, '$1') // keep the `:` of `http://`-style strings
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+const ROOTS = ['components', 'pages', 'features']
+  .map((d) => join(SRC, d))
+  .filter(existsSync);
+
+/** Exported-name pattern, verbatim from the spec. */
+const NAME_RE =
+  /export\s+(default\s+)?(function|const)\s+(\w*(?:Button|Modal|Dialog|Toggle|Switch)\w*)/g;
+
+type Concept = 'Button' | 'Modal' | 'Dialog' | 'Toggle' | 'Switch';
+
+const CONCEPT_PRIMITIVES: Record<Concept, { primitives: string[]; tags: string[] }> = {
+  Button: { primitives: ['button'], tags: ['Button'] },
+  Modal: { primitives: ['modal', 'dialog', 'confirm-dialog'], tags: ['Modal', 'Dialog', 'ConfirmDialog'] },
+  Dialog: { primitives: ['modal', 'dialog', 'confirm-dialog'], tags: ['Modal', 'Dialog', 'ConfirmDialog'] },
+  Toggle: { primitives: ['toggle-group', 'switch'], tags: ['ToggleGroup', 'Switch'] },
+  Switch: { primitives: ['switch'], tags: ['Switch'] },
+};
+
+/** Which of the five concepts appear as substrings of an exported name. */
+function conceptsInName(name: string): Concept[] {
+  return (Object.keys(CONCEPT_PRIMITIVES) as Concept[]).filter((c) => name.includes(c));
+}
+
+function importsPrimitive(code: string, primitive: string): boolean {
+  return new RegExp(`from\\s+['"]@/components/ui/${primitive}['"]`).test(code);
+}
+
+/** A JSX open/self-close of `tag`, e.g. `<Dialog>`/`<Dialog `/`<Dialog/>` -
+ *  but NOT `<DialogContent>` (word-boundary via the trailing char class). */
+function rendersTag(code: string, tag: string): boolean {
+  return new RegExp(`<${tag}[\\s/>]`).test(code);
+}
+
+/** Compliant if, for at least one concept present in the name, the file both
+ *  imports the matching primitive AND renders the matching tag. */
+function isCompliant(code: string, name: string): boolean {
+  return conceptsInName(name).some((concept) => {
+    const { primitives, tags } = CONCEPT_PRIMITIVES[concept];
+    return primitives.some((p) => importsPrimitive(code, p)) && tags.some((t) => rendersTag(code, t));
+  });
+}
+
+interface Match {
+  file: string; // absolute path
+  name: string;
+  compliant: boolean;
+}
+
+function findMatches(): Match[] {
+  const matches: Match[] = [];
+  for (const file of ROOTS.flatMap(walk)) {
+    const code = stripComments(readFileSync(file, 'utf8'));
+    NAME_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NAME_RE.exec(code))) {
+      const name = m[3]!;
+      matches.push({ file, name, compliant: isCompliant(code, name) });
+    }
+  }
+  return matches;
+}
+
+function relFile(file: string): string {
+  return relative(SRC, file).split('\\').join('/'); // posix-normalize on Windows
+}
+
+// --- the allowlist -------------------------------------------------------------
+// Seeded from the current tree (see file header). Every entry: exported name,
+// its file (relative to frontend/src), and a one-line honest reason - either
+// "this is a deliberately different variant, not a duplicate" or "this is real
+// debt, not yet consolidated".
+
+interface AllowlistEntry {
+  name: string;
+  file: string; // relative to frontend/src
+  reason: string;
+}
+
+const ALLOWLIST: AllowlistEntry[] = [
+  {
+    name: 'SendInvoiceDialog',
+    file: 'components/invoices/SendInvoiceDialog.tsx',
+    reason:
+      'renders as a slide-over via ui/sheet (itself Radix-Dialog-based), not the centered Dialog/Modal - a genuinely different variant (side panel), not a duplicate concept',
+  },
+  {
+    name: 'AddStepButton',
+    file: 'components/workflows/AddStepButton.tsx',
+    reason:
+      "Popover-trigger control with three bespoke visual treatments (rail dot / dashed empty well / dashed inline chip) outside Button's variant vocabulary; composes Popover, not a hand-rolled dialog - not a duplicate of the Button primitive",
+  },
+];
+
+// --- the guard ----------------------------------------------------------------
+
+describe('shadow-component guard (no concept has two implementations - I2)', () => {
+  const matches = findMatches();
+
+  it('scans a non-trivial, expected set of concept-named exports', () => {
+    expect(matches.length).toBeGreaterThan(20);
+    // sanity: known compliant and known-allowlisted instances are both present
+    expect(matches.some((m) => m.name === 'CancelEstimateDialog')).toBe(true);
+    expect(matches.some((m) => m.name === 'ManageDirectoryModal')).toBe(true);
+  });
+
+  it('every allowlist entry points at a real export in a real file', () => {
+    const bad = ALLOWLIST.filter(({ file, name }) => {
+      const abs = join(SRC, file);
+      if (!existsSync(abs)) return true;
+      return !matches.some((m) => m.file === abs && m.name === name);
+    });
+    expect(bad).toEqual([]);
+  });
+
+  it('every allowlist entry is still needed (would otherwise be flagged)', () => {
+    // Catches stale entries: if a file gets fixed to compose its primitive,
+    // its allowlist entry should be deleted, not left as dead weight. This is
+    // the mechanism that makes the fence "shrink over time".
+    const stillViolating = new Set(
+      matches.filter((m) => !m.compliant).map((m) => `${relFile(m.file)}::${m.name}`),
+    );
+    const stale = ALLOWLIST.filter((a) => !stillViolating.has(`${a.file}::${a.name}`));
+    expect(stale).toEqual([]);
+  });
+
+  it('no non-allowlisted export shadow-implements a shared ui/ primitive', () => {
+    const allowed = new Set(ALLOWLIST.map((a) => `${a.file}::${a.name}`));
+    const violations = matches
+      .filter((m) => !m.compliant)
+      .filter((m) => !allowed.has(`${relFile(m.file)}::${m.name}`))
+      .map((m) => `${relFile(m.file)}: ${m.name}`);
+    expect(violations).toEqual([]);
+  });
+});
+
+// --- asserted examples (lock the regexes themselves) --------------------------
+
+describe('shadow-component-guard helpers (asserted examples)', () => {
+  it('NAME_RE captures Button/Modal/Dialog/Toggle/Switch exports, function or const, default or named', () => {
+    const cases: [string, string][] = [
+      ['export function SaveButton() {}', 'SaveButton'],
+      ['export const ConfirmModal = () => {}', 'ConfirmModal'],
+      ['export default function CancelDialog() {}', 'CancelDialog'],
+      ['export const useIsOpen = () => {}', ''], // no concept keyword -> not captured
+    ];
+    for (const [src, expected] of cases) {
+      NAME_RE.lastIndex = 0;
+      const m = NAME_RE.exec(src);
+      expect(m?.[3] ?? '').toBe(expected);
+    }
+  });
+
+  it('conceptsInName finds every concept substring present, even hook-like names', () => {
+    expect(conceptsInName('SaveButton')).toEqual(['Button']);
+    expect(conceptsInName('ArchiveDialog')).toEqual(['Dialog']);
+    // documents the known limitation from the file header: substring match, no
+    // hook/component distinction.
+    expect(conceptsInName('useFooToggle')).toEqual(['Toggle']);
+  });
+
+  it('rendersTag requires a word boundary, so it does not match compound tags', () => {
+    expect(rendersTag('<Dialog open={o}>', 'Dialog')).toBe(true);
+    expect(rendersTag('<Dialog/>', 'Dialog')).toBe(true);
+    expect(rendersTag('<DialogContent>', 'Dialog')).toBe(false);
+  });
+
+  it('isCompliant accepts Modal composing ui/dialog directly and Dialog-named composing ui/modal', () => {
+    const usesDialogDirectly = `
+      import { Dialog, DialogContent } from '@/components/ui/dialog';
+      export function ThingModal() { return <Dialog><DialogContent /></Dialog>; }
+    `;
+    expect(isCompliant(usesDialogDirectly, 'ThingModal')).toBe(true);
+
+    const usesModalWrapper = `
+      import { Modal } from '@/components/ui/modal';
+      export function ThingDialog() { return <Modal title="t">x</Modal>; }
+    `;
+    expect(isCompliant(usesModalWrapper, 'ThingDialog')).toBe(true);
+
+    const handRolled = `
+      export function ThingDialog() {
+        return <div className="fixed inset-0"><div role="dialog">x</div></div>;
+      }
+    `;
+    expect(isCompliant(handRolled, 'ThingDialog')).toBe(false);
+  });
+});

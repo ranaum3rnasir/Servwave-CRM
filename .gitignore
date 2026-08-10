@@ -1,0 +1,119 @@
+# Dependencies (match dirs AND symlinks named node_modules at any depth)
+node_modules
+
+# Build outputs
+dist/
+build/
+storybook-static/
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.*
+.mcp.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+
+# Vite
+frontend/.vite/
+
+# Credentials
+CREDENTIALS.md
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/mcp-send-email/
+
+# Codex / auth token + MCP-config files (machine-local; may hold live API keys —
+# e.g. RESEND_API_KEY in .codex/config.toml). Never commit. (F-57)
+.codex/
+auth.json
+codex-auth.json
+
+# Claude Code runtime locks (machine-local, never commit)
+.claude/scheduled_tasks.lock
+.claude/*.lock
+
+# Project knowledge base — machine-local working files (codebase map, pipeline
+# status, fix-agent state). Referenced repo-relative as `memory/` on every OS.
+# Restore/sync content separately; un-ignore here if you want it synced via git.
+memory/
+
+# Obsidian vault — its own git repo, canonical copy lives as a SIBLING of this
+# repo at ../Vault/ALPHA_CRM_VAULT. Ignore any in-repo copy so it never gets
+# committed (and to avoid a nested/embedded git repo inside the app repo).
+Vault/
+# Playwright reports & test artifacts
+frontend/playwright-report/
+frontend/playwright-report-api/
+frontend/test-results/
+frontend/e2e/test-results-api/
+
+# Spec documents & plans (reference only)
+
+# Screenshots
+frontend/e2e/Screenshots/
+
+# Superpowers brainstorm sessions
+.superpowers/
+
+# Windows crash dumps
+bash.exe.stackdump
+*.stackdump
+
+# Claude worktrees state
+.claude/worktrees/
+
+# gitleaks scan output (config is committed; reports are local-only)
+gitleaks-report.json
+
+# Example files
+examples/
+
+# B&G import cleaned data (real customer PII — never commit)
+
+# ─── Customer / client PII — NEVER commit real customer data ─────────────────
+# Onboarding & migration work (ServiceCore, B&G, Alpha Doors, Talon, …) produces
+# raw vendor exports and ETL "staged" files full of names / addresses / phones /
+# emails. Ignore by file TYPE so PII is caught no matter which folder it lands in.
+# Source code never uses these extensions, so this hides nothing legitimate:
+#   • spreadsheets (.xlsx/.xls/.csv) are always data dumps, never code
+#   • *_staged.json = the load-ready ETL output (full PII payload)
+# If you ever truly need to commit a real fixture, whitelist that ONE path below
+# with a trailing "!" rule, e.g.:  !backend/src/__fixtures__/sample.csv
+*.xlsx
+*.xls
+*.csv
+*_staged.json
+# ETL/import working dirs (raw exports + any transformed PII output)
+md_files/plans/onboarding/**/talon-etl/*.json
+**/Service Core Reports/
+# ─── Agent + tooling scratch output (generated, never source) ────────────────
+# These accumulate in the primary checkout and masquerade as uncommitted work.
+# Measured 2026-08-05: ~1,050 untracked files, 41 MB, none of it source.
+.playwright-mcp/
+.vercel/
+**/.impeccable/
+.org-email-toggle-preview
+# Vendored duplicate skill trees. The canonical copy Claude Code loads from is
+# .claude/skills/ - these two are byte-identical mirrors of it.
+.agents/
+.github/skills/
+# Screenshots dropped at the repo root during UI work.
+/*.png

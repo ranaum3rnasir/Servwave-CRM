@@ -1,0 +1,975 @@
+import { Request, Response } from 'express';
+import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import { prisma } from '../lib/prisma';
+import { logger } from '../lib/logger';
+import { parsePagination, buildPaginationMeta, parseSortParams, respondInvalidSort } from '../lib/pagination';
+import { PRICE_BOOK_ITEM_SORT_FIELDS } from '../lib/sortFields';
+import { tenantWhere } from '../lib/tenant';
+import { logAudit } from '../lib/audit';
+import { canSeePricing } from '../lib/permissions/enforce';
+import { emitBackorderIfFlipped } from '../services/notifications/inventoryEmit';
+// Brand/item-group reads stay on inv-catalog; the write handlers moved here (P0 §D2)
+// and reuse its row mappers so both sides keep emitting the same camelCase shape.
+import { mapBrand, mapItemGroup } from './inv-catalog.controller';
+
+// Hybrid-delete usage gate, DERIVED not hardcoded: every table that references a
+// price-book item is a *list* relation on the PriceBookItem model (belongs-to
+// relations like category/vendor are isList:false and correctly excluded). Reading
+// them from Prisma's schema metadata means a future feature that connects items to
+// a new table is counted automatically - nothing here to update by hand.
+const ITEM_REFERENCING_RELATIONS = Prisma.dmmf.datamodel.models
+  .find((m) => m.name === 'PriceBookItem')!
+  .fields.filter((f) => f.kind === 'object' && f.isList)
+  .map((f) => f.name);
+
+const itemCountSelect = Object.fromEntries(
+  ITEM_REFERENCING_RELATIONS.map((name) => [name, true]),
+) as Record<string, true>;
+
+// ─── Zod Schemas ───────────────────────────────────────
+
+export const createCategorySchema = z.object({
+  name: z.string().min(1, 'Name is required').max(100),
+  parent_id: z.string().uuid().nullable().optional(),
+  sort_order: z.number().int().min(0).optional(),
+  trade: z.string().max(50).nullable().optional(),
+  description: z.string().max(1000).nullable().optional(),
+  photo_url: z.string().max(2000000).nullable().optional(),
+});
+
+export const updateCategorySchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  parent_id: z.string().uuid().nullable().optional(),
+  sort_order: z.number().int().min(0).optional(),
+  is_active: z.boolean().optional(),
+  trade: z.string().max(50).nullable().optional(),
+  description: z.string().max(1000).nullable().optional(),
+  photo_url: z.string().max(2000000).nullable().optional(),
+});
+
+// Superset item fields (P0 §D1): price-book is the SINGLE catalog write path,
+// absorbing the inventory item vocabulary. snake_case keys = column names.
+const itemSupersetFields = {
+  sku: z.string().max(100).nullable().optional(),
+  mpn: z.string().max(100).nullable().optional(),
+  model_number: z.string().max(100).nullable().optional(),
+  upc: z.string().max(100).nullable().optional(),
+  brand_id: z.string().uuid().nullable().optional(),
+  vendor_id: z.string().uuid().nullable().optional(),
+  trade: z.string().max(50).nullable().optional(),
+  kind: z.string().max(50).nullable().optional(),
+  uom: z.string().max(50).nullable().optional(),
+  sell_price: z.number().min(0).nullable().optional(),
+  list_price: z.number().min(0).nullable().optional(),
+  serialized: z.boolean().optional(),
+  hazmat: z.boolean().optional(),
+  status: z.string().max(50).nullable().optional(),
+  visibility: z.string().max(50).nullable().optional(),
+  customer_name: z.string().max(200).nullable().optional(),
+  customer_description: z.string().max(5000).nullable().optional(),
+  key_features: z.array(z.string()).nullable().optional(),
+  photo_url: z.string().max(2000000).nullable().optional(), // data-URI photos — NO .url(), unlike image_url
+  track_inventory: z.boolean().optional(),
+};
+
+export const createItemSchema = z.object({
+  name: z.string().min(1, 'Name is required').max(200),
+  description: z.string().max(5000).nullable().optional(),
+  image_url: z.string().url().max(500).nullable().optional(),
+  type: z.enum(['SERVICE', 'MATERIAL']).optional(),
+  category_id: z.string().uuid().nullable().optional(),
+  unit_cost: z.number().min(0).nullable().optional(),
+  unit_price: z.number().min(0).optional(),
+  taxable: z.boolean().optional(),
+  ...itemSupersetFields,
+}).refine((b) => b.unit_price != null || b.sell_price != null, {
+  message: 'unit_price or sell_price is required',
+  path: ['unit_price'],
+});
+
+export const updateItemSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  description: z.string().max(5000).nullable().optional(),
+  image_url: z.string().url().max(500).nullable().optional(),
+  type: z.enum(['SERVICE', 'MATERIAL']).optional(),
+  category_id: z.string().uuid().nullable().optional(),
+  unit_cost: z.number().min(0).nullable().optional(),
+  unit_price: z.number().min(0).optional(),
+  taxable: z.boolean().optional(),
+  is_active: z.boolean().optional(),
+  sort_order: z.number().int().min(0).optional(),
+  ...itemSupersetFields,
+});
+
+// ─── Shared helpers ────────────────────────────────────
+
+// SRVW-90: `kind` is the single catalog control the inventory dialog exposes
+// (material/service/labor/bundle/fee); `type` is its SERVICE|MATERIAL
+// projection, the column estimates/invoices/jobs actually key on. Deriving it
+// in exactly one place keeps the two columns from contradicting each other.
+// Only the literal 'material' bills as a part - null, unknown strings, bundle
+// and fee all fall to SERVICE, which is the schema default today.
+export function typeForKind(kind: string | null | undefined): 'SERVICE' | 'MATERIAL' {
+  return kind === 'material' ? 'MATERIAL' : 'SERVICE';
+}
+
+// Duplicate SKU (@@unique([organization_id, sku])) → 409 instead of a 500 (QA-106).
+function isUniqueViolation(err: unknown): boolean {
+  return (err as { code?: string })?.code === 'P2002';
+}
+
+function respondSkuConflict(res: Response) {
+  res.status(409).json({
+    error: 'SKU already exists',
+    details: [{ field: 'sku', message: 'An item with this SKU already exists' }],
+  });
+}
+
+// Tenant-scoped FK guards for the absorbed item fields. Returns false after
+// responding 404 when a referenced row is outside the requesting org.
+async function guardItemFks(req: Request, res: Response): Promise<boolean> {
+  if (req.body.category_id) {
+    const category = await prisma.priceBookCategory.findFirst({
+      where: { id: req.body.category_id, ...tenantWhere(req) },
+    });
+    if (!category) {
+      res.status(404).json({ error: 'Category not found' });
+      return false;
+    }
+  }
+  if (req.body.brand_id) {
+    const brand = await prisma.brand.findFirst({
+      where: { id: req.body.brand_id, ...tenantWhere(req) },
+    });
+    if (!brand) {
+      res.status(404).json({ error: 'Brand not found' });
+      return false;
+    }
+  }
+  if (req.body.vendor_id) {
+    const vendor = await prisma.vendor.findFirst({
+      where: { id: req.body.vendor_id, ...tenantWhere(req) },
+    });
+    if (!vendor) {
+      res.status(404).json({ error: 'Vendor not found' });
+      return false;
+    }
+  }
+  return true;
+}
+
+// Cost stripping (P0 §D7): unit_cost/list_price are internal cost/margin data,
+// gated by the same canSeePricing (`read Invoice`) predicate as job-lines.
+// unit_price/sell_price are customer-facing selling prices — NEVER stripped.
+function stripItemCost<T extends Record<string, unknown>>(item: T, req: Request): T {
+  if (canSeePricing(req)) return item;
+  const out: Record<string, unknown> = { ...item };
+  delete out.unit_cost;
+  delete out.list_price;
+  return out as T;
+}
+
+// ─── Category Handlers ─────────────────────────────────
+
+export async function listCategories(req: Request, res: Response) {
+  try {
+    const categories: any = await prisma.priceBookCategory.findMany({
+      where: tenantWhere(req),
+      orderBy: [{ sort_order: 'asc' }, { name: 'asc' }],
+      include: {
+        _count: { select: { items: true } },
+      },
+    });
+
+    res.json({ data: categories });
+  } catch (err) {
+    logger.error('Failed to list categories:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function createCategory(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+
+    if (req.body.parent_id) {
+      const parent = await prisma.priceBookCategory.findFirst({
+        where: { id: req.body.parent_id, ...tenantWhere(req) },
+      });
+      if (!parent) {
+        res.status(404).json({ error: 'Parent category not found' });
+        return;
+      }
+    }
+
+    const category = await prisma.priceBookCategory.create({
+      data: {
+        name: req.body.name,
+        parent_id: req.body.parent_id ?? null,
+        sort_order: req.body.sort_order ?? 0,
+        trade: req.body.trade ?? null,
+        description: req.body.description ?? null,
+        photo_url: req.body.photo_url ?? null,
+        organization_id: orgId,
+      },
+    });
+
+    void logAudit({
+      req,
+      action: 'pricebook.category_created',
+      resourceType: 'PriceBookCategory',
+      resourceId: category.id,
+    });
+
+    res.status(201).json({ data: category });
+  } catch (err) {
+    logger.error('Failed to create category:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function updateCategory(req: Request, res: Response) {
+  try {
+    const existing = await prisma.priceBookCategory.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Category not found' });
+      return;
+    }
+
+    if (req.body.parent_id && req.body.parent_id === (req.params.id as string)) {
+      res.status(400).json({ error: 'Category cannot be its own parent' });
+      return;
+    }
+
+    if (req.body.parent_id) {
+      const parent = await prisma.priceBookCategory.findFirst({
+        where: { id: req.body.parent_id, ...tenantWhere(req) },
+      });
+      if (!parent) {
+        res.status(404).json({ error: 'Parent category not found' });
+        return;
+      }
+    }
+
+    // updateMany with id+org filter is atomic (single query) — no TOCTOU window.
+    const updateResult = await prisma.priceBookCategory.updateMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      data: req.body,
+    });
+    if (updateResult.count === 0) {
+      res.status(404).json({ error: 'Category not found' });
+      return;
+    }
+    const category = await prisma.priceBookCategory.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+
+    void logAudit({
+      req,
+      action: 'pricebook.category_updated',
+      resourceType: 'PriceBookCategory',
+      resourceId: req.params.id as string,
+      metadata: { fields: Object.keys(req.body) },
+    });
+
+    res.json({ data: category });
+  } catch (err) {
+    logger.error('Failed to update category:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteCategory(req: Request, res: Response) {
+  try {
+    const existing: any = await prisma.priceBookCategory.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      include: { _count: { select: { items: true, children: true } } },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Category not found' });
+      return;
+    }
+
+    if (existing._count.items > 0) {
+      res.status(400).json({ error: 'Cannot delete category with items' });
+      return;
+    }
+
+    if (existing._count.children > 0) {
+      res.status(400).json({ error: 'Cannot delete category with subcategories' });
+      return;
+    }
+
+    // deleteMany with id+org filter is atomic — no TOCTOU window between the
+    // existence/_count check and the delete.
+    await prisma.priceBookCategory.deleteMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+    void logAudit({
+      req,
+      action: 'pricebook.category_deleted',
+      resourceType: 'PriceBookCategory',
+      resourceId: req.params.id as string,
+    });
+
+    res.json({ message: 'Category deleted' });
+  } catch (err) {
+    logger.error('Failed to delete category:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── Item Handlers ──────────────────────────────────────
+
+export async function listItems(req: Request, res: Response) {
+  try {
+    const { page, limit, skip } = parsePagination(req.query as { page?: string; limit?: string });
+    const sort = parseSortParams(req.query as any, PRICE_BOOK_ITEM_SORT_FIELDS, 'sort_order', 'asc');
+    if (!sort.ok) {
+      respondInvalidSort(res, sort);
+      return;
+    }
+    const orderBy = sort.orderBy;
+
+    const where: any = { ...tenantWhere(req) };
+
+    if (req.query.type) {
+      const typeStr = typeof req.query.type === 'string' ? req.query.type : '';
+      const types = Array.isArray(req.query.type) ? req.query.type : [typeStr];
+      const validTypes = types.filter((t: any) => typeof t === 'string' && ['SERVICE', 'MATERIAL'].includes(t));
+      if (validTypes.length > 0) {
+        where.type = { in: validTypes as ('SERVICE' | 'MATERIAL')[] };
+      }
+    }
+
+    if (req.query.category_id) {
+      where.category_id = typeof req.query.category_id === 'string' ? req.query.category_id : '';
+    }
+
+    if (req.query.brand_id) {
+      where.brand_id = typeof req.query.brand_id === 'string' ? req.query.brand_id : '';
+    }
+
+    if (req.query.track_inventory !== undefined) {
+      where.track_inventory = req.query.track_inventory === 'true';
+    }
+
+    if (req.query.is_active !== undefined) {
+      where.is_active = req.query.is_active === 'true';
+    }
+
+    if (req.query.search) {
+      const search = typeof req.query.search === 'string' ? req.query.search : '';
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        { sku: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      prisma.priceBookItem.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        include: {
+          category: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.priceBookItem.count({ where }),
+    ]);
+
+    res.json({
+      data: items.map((i) => stripItemCost(i as Record<string, unknown>, req)),
+      meta: buildPaginationMeta(total, { page, limit, skip }),
+    });
+  } catch (err) {
+    logger.error('Failed to list items:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function searchItems(req: Request, res: Response) {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    if (!q) {
+      res.json({ data: [] });
+      return;
+    }
+
+    const where: any = {
+      ...tenantWhere(req),
+      is_active: true,
+      OR: [
+        { name: { contains: q, mode: 'insensitive' } },
+        { description: { contains: q, mode: 'insensitive' } },
+      ],
+    };
+
+    if (req.query.type) {
+      const validTypes = ['SERVICE', 'MATERIAL'];
+      const typeStr = typeof req.query.type === 'string' ? req.query.type : '';
+      if (validTypes.includes(typeStr)) {
+        where.type = typeStr;
+      }
+    }
+
+    if (req.query.category_id) {
+      where.category_id = typeof req.query.category_id === 'string' ? req.query.category_id : '';
+    }
+
+    const items = await prisma.priceBookItem.findMany({
+      where,
+      take: 30,
+      orderBy: { name: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        image_url: true,
+        type: true,
+        unit_cost: true,
+        unit_price: true,
+        taxable: true,
+        category: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json({ data: items.map((i) => stripItemCost(i as Record<string, unknown>, req)) });
+  } catch (err) {
+    logger.error('Failed to search items:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function createItem(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const body = req.body as z.infer<typeof createItemSchema>;
+
+    if (!(await guardItemFks(req, res))) return;
+
+    // Price mirror rule (P0 §D1): the catalog selling price lives in BOTH
+    // unit_price (legacy NOT-NULL column, read by estimates/invoices) and
+    // sell_price (inventory vocabulary). Whichever side the client sends is
+    // mirrored into the other; both sent → both as-is.
+    const unitPrice = body.unit_price ?? body.sell_price;
+    const sellPrice = body.sell_price ?? body.unit_price;
+
+    const item = await prisma.priceBookItem.create({
+      data: {
+        name: body.name,
+        description: body.description ?? null,
+        image_url: body.image_url ?? null,
+        type: body.type ?? typeForKind(body.kind),
+        category_id: body.category_id ?? null,
+        unit_cost: body.unit_cost ?? null,
+        unit_price: unitPrice as number,
+        sell_price: sellPrice,
+        taxable: body.taxable ?? true,
+        sku: body.sku ?? null,
+        mpn: body.mpn ?? null,
+        model_number: body.model_number ?? null,
+        upc: body.upc ?? null,
+        brand_id: body.brand_id ?? null,
+        vendor_id: body.vendor_id ?? null,
+        trade: body.trade ?? null,
+        kind: body.kind ?? null,
+        uom: body.uom ?? null,
+        list_price: body.list_price ?? null,
+        serialized: body.serialized ?? false,
+        hazmat: body.hazmat ?? false,
+        status: body.status ?? null,
+        visibility: body.visibility ?? null,
+        customer_name: body.customer_name ?? null,
+        customer_description: body.customer_description ?? null,
+        key_features: body.key_features ?? undefined,
+        photo_url: body.photo_url ?? null,
+        track_inventory: body.track_inventory ?? false,
+        organization_id: orgId,
+      },
+      include: {
+        category: { select: { id: true, name: true } },
+      },
+    });
+
+    // inventory.backorder on create — fire if created with on_backorder status.
+    emitBackorderIfFlipped(orgId, req.user!.id, item.id, item.name, null, body.status ?? null);
+
+    void logAudit({
+      req,
+      action: 'pricebook.item_created',
+      resourceType: 'PriceBookItem',
+      resourceId: item.id,
+    });
+
+    res.status(201).json({ data: item });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      respondSkuConflict(res);
+      return;
+    }
+    logger.error('Failed to create item:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function getItem(req: Request, res: Response) {
+  try {
+    const item = await prisma.priceBookItem.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      include: {
+        category: { select: { id: true, name: true } },
+      },
+    });
+
+    if (!item) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
+
+    // Single-item read must not leak what the list hides (P0 §D7).
+    res.json({ data: stripItemCost(item as Record<string, unknown>, req) });
+  } catch (err) {
+    logger.error('Failed to get item:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function updateItem(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const existing = await prisma.priceBookItem.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
+
+    if (!(await guardItemFks(req, res))) return;
+
+    const body = req.body as z.infer<typeof updateItemSchema>;
+
+    // Explicit data build (no raw req.body passthrough) — needed for the price
+    // mirror rule. Keys are already column names.
+    const data: Record<string, unknown> = {};
+    const passthrough = [
+      'name', 'description', 'image_url', 'type', 'category_id', 'unit_cost',
+      'taxable', 'is_active', 'sort_order',
+      'sku', 'mpn', 'model_number', 'upc', 'brand_id', 'vendor_id', 'trade', 'kind', 'uom',
+      'list_price', 'serialized', 'hazmat', 'status', 'visibility',
+      'customer_name', 'customer_description', 'key_features', 'photo_url',
+      'track_inventory',
+    ] as const;
+    for (const key of passthrough) {
+      if ((body as Record<string, unknown>)[key] !== undefined) {
+        data[key] = (body as Record<string, unknown>)[key];
+      }
+    }
+    // SRVW-90: repoint `type` whenever the caller moves `kind`, so correcting the
+    // one control the dialog exposes also corrects the column estimates key on.
+    // Guarded on a non-empty string: a PATCH that omits kind, or clears it to
+    // null, must never move type. An explicit `type` in the body still wins -
+    // the passthrough above already wrote it.
+    let derivedType: 'SERVICE' | 'MATERIAL' | null = null;
+    if (body.type === undefined && typeof body.kind === 'string' && body.kind !== '') {
+      derivedType = typeForKind(body.kind);
+      data.type = derivedType;
+    }
+
+    // Mirror rule: one selling price sent → write both; both sent → as-is;
+    // neither → touch neither. Nulls never mirror (unit_price is NOT NULL).
+    if (body.unit_price !== undefined) data.unit_price = body.unit_price;
+    if (body.sell_price !== undefined) data.sell_price = body.sell_price;
+    if (body.sell_price != null && body.unit_price === undefined) data.unit_price = body.sell_price;
+    if (body.unit_price != null && body.sell_price === undefined) data.sell_price = body.unit_price;
+
+    // updateMany with id+org filter is atomic — no TOCTOU window.
+    const updateResult = await prisma.priceBookItem.updateMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      data,
+    });
+    if (updateResult.count === 0) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
+    const item = await prisma.priceBookItem.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      include: {
+        category: { select: { id: true, name: true } },
+      },
+    });
+
+    // inventory.backorder — fire only on flip INTO on_backorder; fire-and-forget.
+    emitBackorderIfFlipped(
+      orgId,
+      req.user!.id,
+      req.params.id as string,
+      item?.name ?? existing.name,
+      (existing as { status?: string | null }).status ?? null,
+      body.status ?? null,
+    );
+
+    void logAudit({
+      req,
+      action: 'pricebook.item_updated',
+      resourceType: 'PriceBookItem',
+      resourceId: req.params.id as string,
+      // `fields` lists only what the client sent, so a kind-derived `type` write
+      // would otherwise be invisible in the trail (SRVW-90).
+      metadata: {
+        fields: Object.keys(req.body),
+        ...(derivedType ? { derived: { type: derivedType } } : {}),
+      },
+    });
+
+    res.json({ data: item });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      respondSkuConflict(res);
+      return;
+    }
+    logger.error('Failed to update item:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteItem(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const item = await prisma.priceBookItem.findFirst({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true, sku: true, name: true, _count: { select: itemCountSelect } },
+    });
+    if (!item) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
+
+    const referenceCount = Object.values(item._count as Record<string, number>)
+      .reduce((sum, n) => sum + n, 0);
+
+    if (referenceCount === 0) {
+      // Nothing references it - safe to truly remove. stock_balances (if any) cascade.
+      await prisma.priceBookItem.deleteMany({ where: { id, ...tenantWhere(req) } });
+      void logAudit({ req, action: 'pricebook.item_deleted', resourceType: 'PriceBookItem', resourceId: id });
+      res.json({ mode: 'deleted', message: 'Item deleted' });
+      return;
+    }
+
+    // Referenced somewhere - archive so history and item-grouped reports stay intact.
+    await prisma.priceBookItem.updateMany({ where: { id, ...tenantWhere(req) }, data: { is_active: false } });
+    void logAudit({ req, action: 'pricebook.item_deactivated', resourceType: 'PriceBookItem', resourceId: id, metadata: { reference_count: referenceCount } });
+    res.json({ mode: 'archived', message: 'Item archived', referenceCount });
+  } catch (err) {
+    logger.error('Failed to delete item:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── Brand Handlers (moved from inv-catalog — P0 §D2; camelCase upsert bodies,
+// {brand} envelope preserved so the inventory dialogs keep their payloads) ────
+
+export const upsertBrandSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1, 'Name is required').max(200),
+  logoUrl: z.string().max(2000000).nullable().optional(),
+  website: z.string().max(500).nullable().optional(),
+  description: z.string().max(2000).nullable().optional(),
+  defaultMarkupPct: z.number().min(0).nullable().optional(),
+  defaultVendorId: z.string().uuid().nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export async function upsertBrand(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const body = req.body as z.infer<typeof upsertBrandSchema>;
+    if (body.defaultVendorId) {
+      const vendor = await prisma.vendor.findFirst({ where: { id: body.defaultVendorId, ...tenantWhere(req) } });
+      if (!vendor) { res.status(404).json({ error: 'Vendor not found' }); return; }
+    }
+    const data: any = {
+      name: body.name, logo_url: body.logoUrl ?? null, website: body.website ?? null,
+      description: body.description ?? null, default_markup_pct: body.defaultMarkupPct ?? null,
+      default_vendor_id: body.defaultVendorId ?? null, is_active: body.isActive ?? true,
+    };
+    if (body.id) {
+      const result = await prisma.brand.updateMany({ where: { id: body.id, ...tenantWhere(req) }, data });
+      if (result.count === 0) { res.status(404).json({ error: 'Brand not found' }); return; }
+      const brand = await prisma.brand.findFirst({ where: { id: body.id, ...tenantWhere(req) } });
+
+      void logAudit({
+        req,
+        action: 'pricebook.brand_updated',
+        resourceType: 'Brand',
+        resourceId: body.id,
+        metadata: { fields: Object.keys(req.body) },
+      });
+
+      res.json({ brand: mapBrand(brand) });
+      return;
+    }
+    const brand = await prisma.brand.create({ data: { ...data, organization_id: orgId } });
+
+    void logAudit({
+      req,
+      action: 'pricebook.brand_created',
+      resourceType: 'Brand',
+      resourceId: brand.id,
+    });
+
+    res.status(201).json({ brand: mapBrand(brand) });
+  } catch (err) {
+    logger.error('Failed to upsert brand:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteBrand(req: Request, res: Response) {
+  try {
+    const existing: any = await prisma.brand.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      include: { _count: { select: { items: true } } },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Brand not found' });
+      return;
+    }
+
+    if (existing._count.items > 0) {
+      res.status(400).json({ error: 'Cannot delete brand with items' });
+      return;
+    }
+
+    // deleteMany with id+org filter is atomic — no TOCTOU window.
+    await prisma.brand.deleteMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+
+    void logAudit({
+      req,
+      action: 'pricebook.brand_deleted',
+      resourceType: 'Brand',
+      resourceId: req.params.id as string,
+    });
+
+    res.json({ message: 'Brand deleted' });
+  } catch (err) {
+    logger.error('Failed to delete brand:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── Item Group Handlers (moved from inv-catalog — P0 §D2) ───────────────────
+
+export const upsertItemGroupSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1, 'Name is required').max(200),
+  description: z.string().max(2000).nullable().optional(),
+  photoUrl: z.string().max(2000000).nullable().optional(),
+  groupType: z.string().min(1).max(50),
+  flatRatePriceOverride: z.number().min(0).nullable().optional(),
+  isActive: z.boolean().optional(),
+  lines: z.array(z.object({
+    itemId: z.string().uuid().nullable().optional(),
+    name: z.string().min(1).max(300),
+    quantity: z.number().min(0),
+    priceOverride: z.number().min(0).nullable().optional(),
+    costOverride: z.number().min(0).nullable().optional(),
+    notes: z.string().max(1000).nullable().optional(),
+  })).optional(),
+});
+
+export async function upsertItemGroup(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const body = req.body as z.infer<typeof upsertItemGroupSchema>;
+    const baseData: any = {
+      name: body.name, description: body.description ?? null, photo_url: body.photoUrl ?? null,
+      group_type: body.groupType, flat_rate_price_override: body.flatRatePriceOverride ?? null,
+      is_active: body.isActive ?? true,
+    };
+    const linesCreate = (body.lines ?? []).map((l) => ({
+      item_id: l.itemId ?? null, name: l.name, quantity: l.quantity,
+      price_override: l.priceOverride ?? null, cost_override: l.costOverride ?? null,
+      notes: l.notes ?? null, organization_id: orgId,
+    }));
+    const include = { lines: { orderBy: { created_at: 'asc' as const } } };
+
+    if (body.id) {
+      const exists = await prisma.itemGroup.findFirst({ where: { id: body.id, ...tenantWhere(req) }, select: { id: true } });
+      if (!exists) { res.status(404).json({ error: 'Item group not found' }); return; }
+      if (body.lines !== undefined) {
+        await prisma.itemGroupLine.deleteMany({ where: { group_id: body.id, ...tenantWhere(req) } });
+      }
+      const group = await prisma.itemGroup.update({
+        where: { id: body.id },
+        data: { ...baseData, ...(body.lines !== undefined ? { lines: { create: linesCreate } } : {}) },
+        include,
+      });
+
+      void logAudit({
+        req,
+        action: 'pricebook.item_group_updated',
+        resourceType: 'ItemGroup',
+        resourceId: body.id,
+        metadata: { fields: Object.keys(req.body) },
+      });
+
+      res.json({ itemGroup: mapItemGroup(group) });
+      return;
+    }
+    const group = await prisma.itemGroup.create({
+      data: { ...baseData, organization_id: orgId, lines: { create: linesCreate } },
+      include,
+    });
+
+    void logAudit({
+      req,
+      action: 'pricebook.item_group_created',
+      resourceType: 'ItemGroup',
+      resourceId: group.id,
+    });
+
+    res.status(201).json({ itemGroup: mapItemGroup(group) });
+  } catch (err) {
+    logger.error('Failed to upsert item group:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteItemGroup(req: Request, res: Response) {
+  try {
+    // Lines cascade via the FK; groups are compositions, so no in-use guard.
+    const result = await prisma.itemGroup.deleteMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+    if (result.count === 0) {
+      res.status(404).json({ error: 'Item group not found' });
+      return;
+    }
+
+    void logAudit({
+      req,
+      action: 'pricebook.item_group_deleted',
+      resourceType: 'ItemGroup',
+      resourceId: req.params.id as string,
+    });
+
+    res.json({ message: 'Item group deleted' });
+  } catch (err) {
+    logger.error('Failed to delete item group:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── CSV Import (P0 §D3, QA-107/A-16) — per-row upsert-by-(org, sku) ─────────
+
+// Envelope only: rows are validated individually inside the handler so one
+// malformed row 400s ITS row, never the whole request.
+export const importItemsEnvelopeSchema = z.object({
+  items: z.array(z.unknown()).min(1),
+});
+
+const importRowSchema = z.object({
+  sku: z.string().max(100).nullable().optional(),
+  name: z.string().min(1, 'Name is required').max(200),
+  category: z.string().max(100).nullable().optional(),
+  kind: z.string().max(50).nullable().optional(),
+  uom: z.string().max(50).nullable().optional(),
+  unitCost: z.number().min(0).nullable().optional(),
+  sellPrice: z.number().min(0),
+  vendor: z.string().max(200).nullable().optional(),
+});
+
+export async function importItems(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const rows = (req.body as { items: unknown[] }).items;
+
+    let created = 0;
+    let updated = 0;
+    const errors: Array<{ index: number; message: string }> = [];
+
+    // Deliberately NO wrapping transaction and no Promise.all: rows are
+    // independent, processed in order, and one failure never aborts the batch.
+    // category/vendor name strings are dropped (today's semantics — name→FK
+    // resolution is out of P0 scope).
+    for (let index = 0; index < rows.length; index++) {
+      const parsed = importRowSchema.safeParse(rows[index]);
+      if (!parsed.success) {
+        errors.push({ index, message: parsed.error.issues[0]?.message ?? 'Invalid row' });
+        continue;
+      }
+      const row = parsed.data;
+      try {
+        const existing = row.sku
+          ? await prisma.priceBookItem.findFirst({
+              where: { sku: row.sku, ...tenantWhere(req) },
+              select: { id: true },
+            })
+          : null;
+        if (existing) {
+          await prisma.priceBookItem.update({
+            where: { id: existing.id },
+            data: {
+              name: row.name,
+              kind: row.kind ?? null,
+              // SRVW-90: only repoint type when the CSV actually carried a kind,
+              // so a re-import with no kind column cannot flip MATERIAL to SERVICE.
+              ...(row.kind ? { type: typeForKind(row.kind) } : {}),
+              uom: row.uom ?? null,
+              unit_cost: row.unitCost ?? null,
+              unit_price: row.sellPrice,
+              sell_price: row.sellPrice,
+            },
+          });
+          updated++;
+        } else {
+          await prisma.priceBookItem.create({
+            data: {
+              name: row.name,
+              sku: row.sku ?? null,
+              kind: row.kind ?? null,
+              // SRVW-90: same projection as the UI door. Unconditional is safe -
+              // a kind-less row yields SERVICE, today's schema default.
+              type: typeForKind(row.kind),
+              uom: row.uom ?? null,
+              unit_cost: row.unitCost ?? null,
+              unit_price: row.sellPrice,
+              sell_price: row.sellPrice,
+              organization_id: orgId,
+            },
+          });
+          created++;
+        }
+      } catch (rowErr) {
+        errors.push({
+          index,
+          message: isUniqueViolation(rowErr)
+            ? 'An item with this SKU already exists'
+            : ((rowErr as Error)?.message ?? 'Row failed'),
+        });
+      }
+    }
+
+    void logAudit({
+      req,
+      action: 'pricebook.items_imported',
+      resourceType: 'PriceBookItem',
+      resourceId: null,
+      metadata: { created, updated, error_count: errors.length },
+    });
+
+    res.json({ created, updated, errors });
+  } catch (err) {
+    logger.error('Failed to import items:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}

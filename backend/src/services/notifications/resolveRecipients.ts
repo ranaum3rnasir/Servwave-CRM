@@ -1,0 +1,426 @@
+/**
+ * resolveRecipients — pure function
+ *
+ * Encodes the §3 routing matrix from the in-app-notifications design spec.
+ * All DB reads happen in the caller (`emit`) and are passed via `entity` + `roleHolders`.
+ * The function drops the actor (ctx.actorId) from the final result, then de-duplicates
+ * by userId merging priority (INTERRUPT wins) and needs_action (OR).
+ *
+ * Deferred verbs (task.*, estimate.viewed, estimate.delivery_failed,
+ * invoice.delivery_failed, billing.payment_failed, service_plan.*) are intentionally
+ * NOT encoded here — they fall through to the empty-array default.
+ */
+
+export type RecipientSpec = {
+  userId: string;
+  priority: 'INTERRUPT' | 'FEED';
+  needs_action: boolean;
+};
+
+export interface ResolveContext {
+  verb: string;
+  organizationId: string;
+  actorId: string | null;
+  /** Pre-loaded entity + relations (assignees, owner, customer.owner, performers). */
+  entity: Record<string, unknown>;
+  /** Active user-id arrays keyed by role. */
+  roleHolders: {
+    ADMIN: string[];
+    DISPATCHER: string[];
+    SALES: string[];
+    TECHNICIAN: string[];
+  };
+}
+
+// ── small helpers ──────────────────────────────────────────────────────────────
+
+const INTERRUPT = 'INTERRUPT' as const;
+const FEED = 'FEED' as const;
+
+function spec(userId: string, priority: typeof INTERRUPT | typeof FEED, needs_action = false): RecipientSpec {
+  return { userId, priority, needs_action };
+}
+
+/** Expand a role group into RecipientSpecs. */
+function forRole(
+  userIds: string[],
+  priority: typeof INTERRUPT | typeof FEED,
+  needs_action = false,
+): RecipientSpec[] {
+  return userIds.map(id => spec(id, priority, needs_action));
+}
+
+/**
+ * De-duplicate by userId.
+ * Merging rule: INTERRUPT wins over FEED; needs_action is ORed.
+ * Then drop the actor (ctx.actorId).
+ */
+function dedupe(raw: RecipientSpec[], actorId: string | null): RecipientSpec[] {
+  const map = new Map<string, RecipientSpec>();
+  for (const r of raw) {
+    const existing = map.get(r.userId);
+    if (!existing) {
+      map.set(r.userId, { ...r });
+    } else {
+      // Merge: higher priority wins; needs_action ORs
+      const priority = existing.priority === INTERRUPT || r.priority === INTERRUPT ? INTERRUPT : FEED;
+      const needs_action = existing.needs_action || r.needs_action;
+      map.set(r.userId, { userId: r.userId, priority, needs_action });
+    }
+  }
+  const result = Array.from(map.values());
+  // Drop the actor (SECURITY verbs always have actorId null/system, so they're unaffected)
+  if (actorId != null) {
+    return result.filter(r => r.userId !== actorId);
+  }
+  return result;
+}
+
+// ── main function ──────────────────────────────────────────────────────────────
+
+export function resolveRecipients(ctx: ResolveContext): RecipientSpec[] {
+  const { verb, entity, roleHolders, actorId } = ctx;
+  const { ADMIN, DISPATCHER, SALES: _SALES, TECHNICIAN } = roleHolders;
+
+  /** Safely read a string field from entity. */
+  function str(key: string): string | undefined {
+    const v = entity[key];
+    return typeof v === 'string' ? v : undefined;
+  }
+
+  /** Safely read a string[] field from entity, falling back to []. */
+  function strArr(key: string): string[] {
+    const v = entity[key];
+    return Array.isArray(v) ? (v as string[]) : [];
+  }
+
+  let raw: RecipientSpec[] = [];
+
+  switch (verb) {
+    // ── LEAD ────────────────────────────────────────────────────────────────────
+    case 'lead.assigned': {
+      // Sales: assigned owner → INTERRUPT; no admin/dispatcher recipients
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, INTERRUPT));
+      break;
+    }
+
+    case 'lead.unassigned_created': {
+      // Admin FEED + Dispatcher FEED (no sales-manager role exists)
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED));
+      break;
+    }
+
+    case 'lead.reassigned_away': {
+      // Previous owner → FEED
+      const prev = str('previous_owner_id');
+      if (prev) raw.push(spec(prev, FEED));
+      break;
+    }
+
+    case 'lead.walkthrough_scheduled': {
+      // Dispatcher FEED + owner FEED + performers INTERRUPT
+      raw.push(...forRole(DISPATCHER, FEED));
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, FEED));
+      const performers = strArr('performer_ids');
+      performers.forEach(id => raw.push(spec(id, INTERRUPT)));
+      break;
+    }
+
+    // ── ESTIMATE ────────────────────────────────────────────────────────────────
+    case 'estimate.approved': {
+      // Admin FEED + Dispatcher FEED + needs_action(SCHEDULE_JOB) + owner INTERRUPT
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED, true)); // needs_action = SCHEDULE_JOB
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, INTERRUPT));
+      break;
+    }
+
+    case 'estimate.declined': {
+      // Admin FEED + owner INTERRUPT
+      raw.push(...forRole(ADMIN, FEED));
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, INTERRUPT));
+      break;
+    }
+
+    case 'estimate.deposit_paid': {
+      // Admin FEED + Dispatcher FEED + needs_action(SCHEDULE_JOB) + owner INTERRUPT
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED, true)); // needs_action = SCHEDULE_JOB
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, INTERRUPT));
+      break;
+    }
+
+    case 'estimate.cancelled':
+    case 'estimate.deposit_waived':
+    case 'estimate.approval_voided':
+    case 'estimate.status_corrected': {
+      // Admin FEED + owner FEED
+      raw.push(...forRole(ADMIN, FEED));
+      const owner = str('commission_owner_id');
+      if (owner) raw.push(spec(owner, FEED));
+      break;
+    }
+
+    // ── DISPATCH ────────────────────────────────────────────────────────────────
+    case 'dispatch.job_assigned': {
+      // Assignees INTERRUPT + Dispatcher FEED (assigner); admin not a recipient
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, INTERRUPT)));
+      raw.push(...forRole(DISPATCHER, FEED));
+      break;
+    }
+
+    case 'dispatch.job_unassigned': {
+      // Removed assignees INTERRUPT + Dispatcher FEED
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, INTERRUPT)));
+      raw.push(...forRole(DISPATCHER, FEED));
+      break;
+    }
+
+    case 'dispatch.job_rescheduled': {
+      // Assignees INTERRUPT + Dispatcher FEED
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, INTERRUPT)));
+      raw.push(...forRole(DISPATCHER, FEED));
+      break;
+    }
+
+    case 'dispatch.job_created': {
+      // Admin FEED + Dispatcher INTERRUPT + assignees INTERRUPT
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, INTERRUPT));
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, INTERRUPT)));
+      break;
+    }
+
+    // ── JOB ─────────────────────────────────────────────────────────────────────
+    case 'job.started':
+    case 'job.completed': {
+      // Dispatcher FEED + sold_by FEED (if set) + assignees FEED
+      raw.push(...forRole(DISPATCHER, FEED));
+      const soldBy = str('sold_by_id');
+      if (soldBy) raw.push(spec(soldBy, FEED));
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'job.cancelled': {
+      // Dispatcher FEED + sold_by FEED (if set) + assignees INTERRUPT
+      raw.push(...forRole(DISPATCHER, FEED));
+      const soldBy = str('sold_by_id');
+      if (soldBy) raw.push(spec(soldBy, FEED));
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, INTERRUPT)));
+      break;
+    }
+
+    case 'job.reopened': {
+      // Dispatcher FEED + assignees FEED
+      raw.push(...forRole(DISPATCHER, FEED));
+      const assignees = strArr('assignee_ids');
+      assignees.forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    // ── COMMUNICATION (CTM phone + SMS) ─────────────────────────────────────────
+    // Org-wide phone coverage: every dispatcher + admin. actorId is always null
+    // (webhook-driven) so actor exclusion never applies. There is deliberately
+    // no call_incoming verb — inbound rings the cell, not the app (#870).
+    case 'communication.call_missed': {
+      // needs_action → "call back" follow-up (cleared via the VIEW inline action)
+      raw.push(...forRole(DISPATCHER, INTERRUPT, true));
+      raw.push(...forRole(ADMIN, INTERRUPT, true));
+      break;
+    }
+
+    case 'communication.sms_inbound': {
+      raw.push(...forRole(DISPATCHER, FEED));
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+
+    case 'communication.email_inbound': {
+      // Unlike sms_inbound, an email thread has an OWNER (slice 8b's "assigned
+      // to one, visible to all"). A reply goes to whoever holds the thread, and
+      // interrupts them, because it is their conversation to answer - adding
+      // the whole room on top would make ownership decorative.
+      //
+      // The fallback is the room, at FEED: an unowned reply is nobody's in
+      // particular, so it is not urgent FOR anyone. The `!== actorId` guard
+      // matters because dedupe() drops the actor afterwards - an assignee who
+      // is also the actor would otherwise leave the reply notifying no one.
+      const assignee = str('thread_assignee_id');
+      if (assignee && assignee !== actorId) {
+        raw.push(spec(assignee, INTERRUPT));
+      } else {
+        raw.push(...forRole(DISPATCHER, FEED));
+        raw.push(...forRole(ADMIN, FEED));
+      }
+      break;
+    }
+
+    // ── AUTOMATION CENTER ───────────────────────────────────────────────────────
+    case 'automation.message': {
+      // Recipients are pre-resolved by the automation engine (assigned techs /
+      // role holders / a specific user, per the rule's action_config) and
+      // passed through entity.recipient_ids. Row-scope filtering still runs
+      // downstream in filterRecipientsByAccess.
+      const ids = strArr('recipient_ids');
+      ids.forEach(id => raw.push(spec(id, INTERRUPT)));
+      break;
+    }
+
+    // ── BILLING ─────────────────────────────────────────────────────────────────
+    case 'billing.payment_received': {
+      // Admin FEED + Dispatcher FEED + customer_owner FEED
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED));
+      const custOwner = str('customer_owner_id');
+      if (custOwner) raw.push(spec(custOwner, FEED));
+      break;
+    }
+
+    case 'billing.partial_payment': {
+      // Admin FEED + Dispatcher FEED + customer_owner FEED
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED));
+      const custOwner = str('customer_owner_id');
+      if (custOwner) raw.push(spec(custOwner, FEED));
+      break;
+    }
+
+    case 'billing.invoice_overdue':
+    case 'billing.invoice_due_soon': {
+      // Admin FEED + needs_action(SEND_REMINDER) + customer_owner FEED + needs_action
+      raw.push(...forRole(ADMIN, FEED, true)); // needs_action = SEND_REMINDER
+      const custOwner = str('customer_owner_id');
+      if (custOwner) raw.push(spec(custOwner, FEED, true)); // needs_action = SEND_REMINDER
+      break;
+    }
+
+    case 'billing.refunded':
+    case 'billing.disputed':
+    case 'billing.chargeback': {
+      // Admin INTERRUPT (Refund / dispute / chargeback → 🔴 Admin)
+      raw.push(...forRole(ADMIN, INTERRUPT));
+      break;
+    }
+
+    case 'billing.voided':
+    case 'billing.credit_applied': {
+      // Admin FEED
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+
+    // ── BILLING: payments-account lifecycle (Stripe Connect, Task 1.8) ───────────
+    case 'billing.payments_activated':
+    case 'billing.payouts_activated': {
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+    case 'billing.payments_action_needed':
+    case 'billing.payments_paused': {
+      raw.push(...forRole(ADMIN, INTERRUPT, true));
+      break;
+    }
+    // ── deferred-bank first-payment nudge (Task 1.9) ──
+    case 'billing.payouts_pending_first_payment': {
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+    // ── within-ceiling rate-change notice (Task 4.3) ──
+    case 'billing.platform_fee_rate_changed': {
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+
+    // ── TEAM ─────────────────────────────────────────────────────────────────────
+    case 'team.ot_override_requested': {
+      // Admin INTERRUPT + needs_action (APPROVE_OT / DENY_OT)
+      raw.push(...forRole(ADMIN, INTERRUPT, true));
+      break;
+    }
+
+    case 'team.invite_accepted': {
+      // Admin FEED
+      raw.push(...forRole(ADMIN, FEED));
+      break;
+    }
+
+    // ── INVENTORY ────────────────────────────────────────────────────────────────
+    case 'inventory.stock_approval_requested': {
+      // Admin INTERRUPT + needs_action (APPROVE_STOCK / DENY_STOCK)
+      raw.push(...forRole(ADMIN, INTERRUPT, true));
+      break;
+    }
+
+    case 'inventory.low_stock':
+    case 'inventory.backorder':
+    case 'inventory.staging_no_area':
+    case 'inventory.po_partial': {
+      // Admin FEED + Dispatcher FEED
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED));
+      break;
+    }
+
+    case 'inventory.staging_ready': {
+      // Admin FEED + Dispatcher FEED + the assigned tech INTERRUPT (it's their pickup).
+      raw.push(...forRole(ADMIN, FEED));
+      raw.push(...forRole(DISPATCHER, FEED));
+      strArr('assignee_ids').forEach(id => raw.push(spec(id, INTERRUPT)));
+      break;
+    }
+
+    // ── LOGISTIC ORDERS (LO-2) ──────────────────────────────────────────────────
+    // NOTE: object_type 'LOGISTIC_ORDER' is NOT in filterByAccess SCOPE_TYPE_MAP,
+    // so these recipients pass the downstream row-scope filter UNFILTERED. That is
+    // correct while recipients are approve-grant holders + ADMINs (lo.submitted)
+    // and the creator (lo.approved) — all org-wide LO readers. If a row-scoped
+    // reader (e.g. a technician) is ever added here, wire LOGISTIC_ORDER →
+    // 'LogisticOrder' into filterByAccess.SCOPE_TYPE_MAP so it is access-checked.
+    case 'lo.submitted': {
+      // Approve-grant holders ∪ ADMINs, both INTERRUPT + needs_action. The grant
+      // holders are pre-resolved by the caller into entity.approver_ids
+      // (automation.message precedent); ADMINs come from roleHolders. dedupe()
+      // merges an admin who also holds an explicit grant into a single row.
+      strArr('approver_ids').forEach(id => raw.push(spec(id, INTERRUPT, true)));
+      raw.push(...forRole(ADMIN, INTERRUPT, true));
+      break;
+    }
+
+    case 'lo.approved': {
+      // Creator only (mirror lead.assigned). On self-approve the actor filter in
+      // dedupe() drops the creator and emit() early-returns — no row.
+      const creator = str('created_by_id');
+      if (creator) raw.push(spec(creator, INTERRUPT));
+      break;
+    }
+
+    // ── SECURITY (recipient = the user themselves; actorId is always null here) ──
+    case 'security.new_signin':
+    case 'security.password_changed':
+    case 'security.mfa_enabled':
+    case 'security.mfa_disabled': {
+      const userId = str('user_id');
+      if (userId) raw.push(spec(userId, FEED));
+      break;
+    }
+
+    // ── Unknown / deferred verbs → empty ─────────────────────────────────────────
+    default:
+      break;
+  }
+
+  return dedupe(raw, actorId);
+}

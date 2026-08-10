@@ -1,0 +1,61 @@
+name: Dependency audit
+
+# WHY THIS IS NOT PART OF THE PR GATE
+#
+# `audit-ci` queries the LIVE npm advisory database, so its result changes
+# without anyone committing anything. Run on every PR, it reddens work that
+# touched zero dependencies because someone published a CVE overnight - which
+# has happened here more than once (see the audit-ci learnings in the vault).
+# That trains people to ignore a red check, which is worse than not having it.
+#
+# So it runs where each signal actually belongs:
+#   - on PRs that change a dependency manifest, where the PR IS the risk;
+#   - nightly, to catch newly-published advisories against unchanged deps.
+#
+# Deliberately NOT a required status check: a path-filtered workflow that does
+# not trigger leaves a required check pending forever, blocking the PR.
+#
+# The deterministic half of the old job - `verify:overrides`, which reads only
+# package.json + package-lock.json - moved into the backend test suite
+# (backend/src/__tests__/security-overrides.test.ts) and so still runs on EVERY
+# PR and locally. Only the live-advisory half is scheduled here.
+#
+# Note: scheduled runs execute the DEFAULT BRANCH's copy of this file and audit
+# that branch's lockfile - i.e. production dependencies. Dependency changes on
+# staging are covered by the manifest-path trigger above.
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'backend/package.json'
+      - 'frontend/package.json'
+      - 'audit-ci.jsonc'
+      - '.github/workflows/dependencies.yml'
+  schedule:
+    - cron: '17 6 * * *' # 06:17 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: deps-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit production dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          # Cache is ON here: hosted runners are ephemeral. See the note at the
+          # top of ci.yml for why upstream disables it and this repo does not.
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci
+      # Fails on HIGH/CRITICAL advisories in PRODUCTION dependencies.
+      # Dev/build-only tooling is excluded (skip-dev) - see audit-ci.jsonc.
+      - name: Audit production dependencies
+        run: npx audit-ci --config audit-ci.jsonc

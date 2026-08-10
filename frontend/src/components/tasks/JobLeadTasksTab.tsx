@@ -1,0 +1,232 @@
+import { useState, useEffect, useCallback } from 'react';
+import { Sparkles, ClipboardList } from 'lucide-react';
+import type { LinkedEntity, Task, TaskStatus } from '@/lib/tasks/types';
+import { taskAI } from '@/lib/tasks/taskAI';
+import { listTasks } from '@/lib/api/tasks';
+import { useTasksStore } from '@/stores/tasksStore';
+import { TaskCard } from './TaskCard';
+import { CreateTaskModal } from './CreateTaskModal';
+import { TaskDetailDrawer } from './TaskDetailDrawer';
+import { Button } from '@/components/ui/button';
+import { SectionCard, SectionLabel } from '@/components/jobs/overview/SectionCard';
+import { useToast } from '@/components/ui/use-toast';
+import { extractApiError } from '@/lib/utils';
+
+interface JobLeadTasksTabProps {
+  entity: LinkedEntity;   // { type: 'JOB'|'LEAD'|'CUSTOMER'|'ESTIMATE', id, label }
+  jobType?: string;       // used by "Generate tasks"; falls back to entity.label
+}
+
+// Live tasks are grouped by status so the most active work reads first.
+const STATUS_GROUPS: { key: TaskStatus; label: string }[] = [
+  { key: 'IN_PROGRESS', label: 'In progress' },
+  { key: 'TODO', label: 'To do' },
+  { key: 'BLOCKED', label: 'Blocked' },
+  { key: 'DONE', label: 'Done' },
+];
+
+export function JobLeadTasksTab({ entity, jobType }: JobLeadTasksTabProps) {
+  const [linked, setLinked] = useState<Task[]>([]);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const addTask = useTasksStore((s) => s.addTask);
+  const updateStatus = useTasksStore((s) => s.updateStatus);
+
+  const fetchEntityTasks = useCallback(async () => {
+    try {
+      const tasks = await listTasks({
+        linked_entity_type: entity.type,
+        linked_entity_id: entity.id,
+      });
+      setLinked(tasks);
+      setFetchError(null);
+    } catch (err) {
+      console.error('Failed to fetch entity tasks:', err);
+      setFetchError(extractApiError(err, 'Failed to load tasks'));
+    }
+  }, [entity.type, entity.id]);
+
+  useEffect(() => {
+    fetchEntityTasks();
+  }, [fetchEntityTasks]);
+
+  const { toast } = useToast();
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [suggestions, setSuggestions] = useState<{ title: string }[]>([]);
+  const [checked, setChecked] = useState<boolean[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  function handleGenerate() {
+    const items = taskAI.suggestTasks(jobType ?? entity.label);
+    setSuggestions(items);
+    setChecked(items.map(() => false));
+    setShowSuggestions(true);
+  }
+
+  function toggleChecked(i: number) {
+    setChecked((prev) => prev.map((v, idx) => (idx === i ? !v : v)));
+  }
+
+  async function handleAddGenerated() {
+    const selected = suggestions.filter((_, i) => checked[i]);
+    if (selected.length === 0) return;
+
+    setAdding(true);
+    const failed: string[] = [];
+    for (const item of selected) {
+      try {
+        await addTask({
+          title: item.title,
+          description: '',
+          status: 'TODO',
+          priority: 'MEDIUM',
+          owner_id: null,
+          due_at: null,
+          linked_entity: { type: entity.type, id: entity.id },
+          tags: [],
+        });
+      } catch (err) {
+        failed.push(item.title);
+        console.error('Failed to create generated task:', item.title, err);
+      }
+    }
+    setAdding(false);
+
+    if (failed.length > 0) {
+      toast({
+        title: `${failed.length} task${failed.length === 1 ? '' : 's'} failed to create`,
+        description: extractApiError(null, `Could not save: ${failed.join(', ')}`),
+        variant: 'destructive',
+      });
+    }
+
+    // Refetch entity tasks so newly generated tasks appear immediately.
+    await fetchEntityTasks();
+
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setChecked([]);
+  }
+
+  function handleDismiss() {
+    setShowSuggestions(false);
+    setSuggestions([]);
+    setChecked([]);
+  }
+
+  const selectedCount = checked.filter(Boolean).length;
+
+  return (
+    <div className="space-y-5 p-5">
+      {/* AI suggestion panel — lavender (AI surface) */}
+      {showSuggestions && (
+        <SectionCard
+          tone="ai"
+          title="Suggested tasks"
+          icon={<Sparkles className="h-4 w-4 text-ai-600" />}
+          meta={
+            <span className="text-xs text-text-secondary">for {jobType ?? entity.label}</span>
+          }
+        >
+          <div className="space-y-2">
+            {suggestions.map((item, i) => (
+              // Not converted to FormField: label WRAPS the checkbox + its own text, not a
+              // caption sitting above the control - outside FormField's shape.
+              <label key={i} className="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={checked[i] ?? false}
+                  onChange={() => toggleChecked(i)}
+                  className="rounded border-border accent-ai-600"
+                />
+                <span>{item.title}</span>
+              </label>
+            ))}
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="solid" tone="business"
+              onClick={handleAddGenerated}
+              disabled={selectedCount === 0 || adding}
+            >
+              {adding ? 'Adding…' : `Add ${selectedCount} task${selectedCount === 1 ? '' : 's'}`}
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleDismiss} disabled={adding}>
+              Cancel
+            </Button>
+          </div>
+        </SectionCard>
+      )}
+
+      {/* Fetch error */}
+      {fetchError && <p className="py-2 text-sm text-danger">{fetchError}</p>}
+
+      {/* Tasks */}
+      <SectionCard
+        title="Tasks"
+        icon={<ClipboardList className="h-4 w-4 text-text-secondary" />}
+        titleSuffix={<span className="ml-1 font-normal text-text-secondary">({linked.length})</span>}
+        meta={
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
+              + New task
+            </Button>
+            <Button size="sm" variant="solid" tone="ai" onClick={handleGenerate}>
+              <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+              Generate tasks
+            </Button>
+          </div>
+        }
+        bodyClassName={linked.length === 0 ? undefined : 'space-y-5'}
+      >
+        {linked.length === 0 ? (
+          <div className="flex flex-col items-center py-10 text-center">
+            <ClipboardList className="mb-2 h-8 w-8 text-text-secondary/30" />
+            <p className="text-sm text-text-secondary">
+              No tasks yet for this {entity.type.toLowerCase()}.
+            </p>
+          </div>
+        ) : (
+          STATUS_GROUPS.map(({ key, label }) => {
+            const group = linked.filter((t) => t.status === key);
+            if (group.length === 0) return null;
+            return (
+              <div key={key}>
+                <SectionLabel>
+                  {label} ({group.length})
+                </SectionLabel>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {group.map((t) => (
+                    <TaskCard
+                      key={t.id}
+                      task={t}
+                      hideLinkedEntity
+                      onStatusChange={(status) => {
+                        void updateStatus(t.id, status).then(() => fetchEntityTasks());
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </SectionCard>
+
+      {/* Create task modal — refetch entity list on close so new tasks appear */}
+      <CreateTaskModal
+        open={createOpen}
+        onOpenChange={(open) => {
+          setCreateOpen(open);
+          if (!open) fetchEntityTasks();
+        }}
+        presetEntity={entity}
+      />
+
+      {/* Task detail drawer */}
+      <TaskDetailDrawer />
+    </div>
+  );
+}

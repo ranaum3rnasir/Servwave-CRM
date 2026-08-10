@@ -1,0 +1,1156 @@
+import { vi } from 'vitest';
+
+// Mock env before anything else imports it
+vi.mock('../config/env', () => ({
+  env: {
+    PORT: 3000,
+    NODE_ENV: 'test',
+    FRONTEND_URL: 'http://localhost:5173',
+    TAX_RATE: 0.0875,
+    DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    // Copilot (Servy) — key present by default; the controller test mocks the
+    // gemini-generate service directly, so the SDK is never actually called.
+    GEMINI_API_KEY: 'test-gemini-key',
+    GEMINI_TEXT_MODEL: 'gemini-2.5-flash',
+    GEMINI_LIVE_MODEL: 'gemini-2.5-flash-native-audio-preview-12-2025',
+    COPILOT_VOICE_NAME: 'Puck',
+    COPILOT_SESSION_MINUTES: 30,
+    COPILOT_RATELIMIT_CAPACITY: 30,
+    COPILOT_RATELIMIT_REFILL_PER_MIN: 15,
+    // Email slice 6 - the inbound reply domain. Deliberately NOT the production
+    // default (reply.servwave.com): a test asserting against the real value
+    // would pass just as happily if the code hardcoded the domain instead of
+    // reading it from config.
+    EMAIL_REPLY_DOMAIN: 'reply.test.com',
+  },
+}));
+
+// Mock the Gemini SDK — never hit the network in tests. A class so
+// `new GoogleGenAI()` is constructable (an arrow mockImplementation is not).
+// The copilot controller test mocks the gemini-generate service for precise
+// control; this default keeps any direct import constructable + harmless.
+vi.mock('@google/genai', () => ({
+  GoogleGenAI: class {
+    models = {
+      generateContent: vi.fn().mockResolvedValue({ text: 'Test reply.', functionCalls: undefined }),
+    };
+  },
+}));
+
+// Mock rate limiter — passthrough in tests
+vi.mock('express-rate-limit', () => ({
+  default: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  __esModule: true,
+}));
+
+// Mock supabase clients. supabaseAdmin (Storage + admin APIs) and supabaseAuth
+// (session-based auth) are separate clients in prod; here they SHARE one `auth`
+// mock object so existing suites that set expectations on `supabaseAdmin.auth.*`
+// (login/refresh/reauth) keep working after those calls moved to supabaseAuth.
+vi.mock('../lib/supabase', () => {
+  const auth = {
+    getUser: vi.fn(),
+    signInWithPassword: vi.fn(),
+    refreshSession: vi.fn(),
+    admin: {
+      createUser: vi.fn(),
+      deleteUser: vi.fn(),
+      updateUserById: vi.fn(),
+      listUsers: vi.fn(),
+      signOut: vi.fn(),
+    },
+  };
+  return {
+    supabaseAdmin: {
+      auth,
+      storage: {
+        from: vi.fn().mockReturnValue({
+          upload: vi.fn().mockResolvedValue({ data: { path: 'test/file.jpg' }, error: null }),
+          remove: vi.fn().mockResolvedValue({ data: null, error: null }),
+          getPublicUrl: vi.fn().mockReturnValue({ data: { publicUrl: 'https://test.supabase.co/storage/v1/object/public/test/file.jpg' } }),
+          createSignedUrl: vi.fn().mockResolvedValue({ data: { signedUrl: 'https://test.supabase.co/storage/v1/object/sign/test/file.jpg?token=mock' }, error: null }),
+          // Batch variant (P5 stage attachments): echo each requested path back
+          // as a mock signed URL so read paths resolve deterministically.
+          createSignedUrls: vi.fn().mockImplementation((paths: string[]) =>
+            Promise.resolve({
+              data: (paths ?? []).map((p) => ({ path: p, signedUrl: `https://test.supabase.co/storage/v1/object/sign/${p}?token=mock`, error: null })),
+              error: null,
+            })),
+        }),
+      },
+    },
+    supabaseAuth: { auth },
+  };
+});
+
+// Mock CTM client — every suite sees CTM unconfigured unless it re-mocks.
+// ctm-client.test.ts vi.unmock()s this to exercise the real module.
+vi.mock('../lib/ctm/client', () => ({
+  CtmApiError: class CtmApiError extends Error {
+    httpStatus = 0;
+    reason = '';
+  },
+  isCtmConfigured: vi.fn().mockReturnValue(false),
+  // Phase-0 outbound guard — defaults to "allowed" (mirrors an unset allowlist),
+  // so suites that don't opt in behave exactly as before.
+  isOutboundAllowed: vi.fn().mockReturnValue(true),
+  getCtmForOrg: vi.fn(),
+  listAccounts: vi.fn().mockResolvedValue([]),
+  createAccount: vi.fn(),
+  listNumbers: vi.fn().mockResolvedValue([]),
+  searchNumbers: vi.fn().mockResolvedValue([]),
+  buyNumber: vi.fn(),
+  updateNumberRouting: vi.fn(),
+  createReceivingNumber: vi.fn(),
+  addReceivingToTracking: vi.fn(),
+  createVoiceMenu: vi.fn(),
+  enableSms: vi.fn().mockResolvedValue('ok'),
+  isOptedOut: vi.fn().mockResolvedValue(false),
+  createWebhook: vi.fn(),
+  listWebhooks: vi.fn().mockResolvedValue([]),
+  deleteWebhook: vi.fn(),
+  getCall: vi.fn(),
+  getCallTranscription: vi.fn(),
+  listCalls: vi.fn(),
+  placeCall: vi.fn(),
+  requestPhoneAccess: vi.fn(),
+  getRecordingResponse: vi.fn(),
+  sendSms: vi.fn(),
+  getA2pStatus: vi.fn().mockResolvedValue({ status: 'unknown' }),
+}));
+
+// Mock stripe service
+vi.mock('../lib/stripe', () => ({
+  createCheckoutSession: vi.fn().mockResolvedValue({ id: 'cs_test_123', url: 'https://checkout.stripe.com/test' }),
+  isStripeConfigured: vi.fn().mockReturnValue(true),
+  createRefund: vi.fn().mockResolvedValue({}),
+  constructWebhookEvent: vi.fn(),
+  // Task 3.2 — applicationFees surface for the dashboard-refund + dispute-lost fee-reversal
+  // doors. Defaults to "no fee found" (a no-op) so tests unrelated to fee reversal are
+  // unaffected; individual webhook tests override .list's resolved value per-call.
+  // Task 3.3 — paymentIntents.retrieve for post-commit fee capture. Defaults to a PI with no
+  // latest_charge (a safe no-op — captureStripeFees returns early) so any test that
+  // incidentally triggers the fire-and-forget capture call is unaffected;
+  // reconcile-stripe-fees.test.ts overrides the resolved value per-call.
+  getStripeForOrg: vi.fn().mockReturnValue({
+    stripe: {
+      applicationFees: {
+        list: vi.fn().mockResolvedValue({ data: [] }),
+        createRefund: vi.fn().mockResolvedValue({}),
+      },
+      paymentIntents: {
+        retrieve: vi.fn().mockResolvedValue({ latest_charge: null }),
+      },
+    },
+    stripeAccount: undefined,
+  }),
+  // Slice 1/2 (card service fee) — pure functions, real math (not canned stubs): controllers and
+  // the webhook rely on the actual output to decide/assert the fee amounts they pass through.
+  CARD_SERVICE_FEE_BPS: 350,
+  // Slice 7 (customer-facing tipping) — chip percentages; nothing persists them (D11).
+  CARD_TIP_PRESET_BPS: [1000, 1500, 2000],
+  computeServiceFee: vi.fn((amountCents: number, bps: number) => Math.round((amountCents * bps) / 10000)),
+  estimateStripeFee: vi.fn((grossCents: number) => Math.round(0.029 * grossCents) + 30),
+  deriveServiceFeeApplicationFee: vi.fn((amountCents: number) => {
+    const serviceFeeCents = Math.round((amountCents * 350) / 10000);
+    const grossCents = amountCents + serviceFeeCents;
+    const stripeFeeCents = Math.round(0.029 * grossCents) + 30;
+    return Math.max(0, serviceFeeCents - stripeFeeCents);
+  }),
+  resolveCheckoutFees: vi.fn((amountCents: number) => {
+    const serviceFeeCents = Math.round((amountCents * 350) / 10000);
+    const grossCents = amountCents + serviceFeeCents;
+    const stripeFeeCents = Math.round(0.029 * grossCents) + 30;
+    return { serviceFeeAmount: serviceFeeCents, applicationFeeAmount: Math.max(0, serviceFeeCents - stripeFeeCents) };
+  }),
+  retrieveAccount: vi.fn(),
+  // Task 1.5 — connect/account-session/account-link/status endpoints.
+  createConnectedAccount: vi.fn(),
+  createAccountSession: vi.fn(),
+  createAccountLink: vi.fn(),
+  updateAccountStatementDescriptor: vi.fn(),
+}));
+
+// Task 3.3 — post-commit fee reconciliation + nightly sweep. Defaults resolve to no-ops so
+// webhook tests unrelated to fee capture are unaffected by the fire-and-forget wiring;
+// reconcile-stripe-fees.test.ts unmocks this to test the real implementation, and
+// webhook.test.ts asserts against these vi.fn()s directly to test the wiring in isolation.
+vi.mock('../lib/reconcile-stripe-fees', () => ({
+  captureStripeFees: vi.fn().mockResolvedValue(undefined),
+  sweepUncapturedFees: vi.fn().mockResolvedValue({ swept: 0 }),
+}));
+
+// Mock numbering allocator — controllers use this to generate per-org sequence numbers.
+// Default returns deterministic L00001/E00001/J00001/I00001 strings; numbering.test.ts
+// re-mocks per-test with vi.mocked() for specific allocator behavior.
+vi.mock('../lib/numbering', () => ({
+  allocateNumber: vi.fn().mockImplementation((_tx: unknown, entity: string) => {
+    const prefix = entity[0].toUpperCase();
+    return Promise.resolve(`${prefix}00001`);
+  }),
+  // SERV10X-61 - per-container estimate numbering (`L00001-1`/`C00001-1`/`J00001-1`). create()
+  // calls this instead of allocateNumber for the anchor-based series; without it every create
+  // test 500s. Keyed off the container name's first letter to mirror the real prefix scheme.
+  allocateContainerEstimateNumber: vi.fn().mockImplementation((_tx: unknown, container: string) =>
+    Promise.resolve(`${container[0].toUpperCase()}00001-1`)),
+}));
+
+// Mock email service
+vi.mock('../lib/email', () => ({
+  // Email slice 10 (guided domain verification) — the reused Resend client
+  // instance. organization-email-domain.test.ts overrides this whole module
+  // locally with per-test-controllable domains.* mocks; this default just
+  // keeps any OTHER suite that happens to import `resend` from crashing.
+  resend: {
+    domains: {
+      create: vi.fn(),
+      get: vi.fn(),
+      verify: vi.fn(),
+      remove: vi.fn(),
+    },
+  },
+  // Email slice 7 - compose-window sends (POST /api/communication/emails).
+  // Defaults to a real-shaped 'sent' result so most controller tests don't
+  // need to override it; comm-email-send.test.ts / comm-email-attachments.test.ts
+  // re-mock per case for skipped/failed dispatch paths.
+  sendComposedEmail: vi.fn().mockResolvedValue({
+    status: 'sent',
+    providerMessageId: 're_test_compose',
+    fromAddress: 'no-reply@mail.test.com',
+    fromName: null,
+  }),
+  // GET /api/communication/sending-identity - the same From a send would use,
+  // reported without sending. Defaults to the shared-domain shape.
+  orgSendingIdentity: vi.fn().mockResolvedValue({
+    address: 'acmeplumbing@mail.test.com',
+    name: 'Acme Plumbing',
+    customDomain: false,
+    sendingEnabled: true,
+    localPart: 'acmeplumbing',
+    localPartIsCustom: false,
+    senderDomain: 'mail.test.com',
+  }),
+  // PATCH /api/organization/email-sender calls these two SYNCHRONOUSLY while
+  // building its response, so omitting them is not a stub that returns
+  // undefined - it is a TypeError inside the handler and a 500 on every path.
+  // Real implementations rather than vi.fn(), because the assertions are about
+  // the value the endpoint echoes back.
+  effectiveSenderLocalPart: (name: string | null | undefined, explicit: string | null | undefined) =>
+    explicit?.trim() ||
+    (name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40) ||
+    'no-reply',
+  senderDomainOf: () => 'mail.test.com',
+  sendEstimateEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendEstimateWithDepositEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendEstimateApprovedNotification: vi.fn().mockResolvedValue(undefined),
+  sendDepositPaymentConfirmation: vi.fn().mockResolvedValue(undefined),
+  sendDepositReceivedConfirmation: vi.fn().mockResolvedValue(undefined),
+  sendRefundNotification: vi.fn().mockResolvedValue(undefined),
+  sendInvoiceRefundNotification: vi.fn().mockResolvedValue(undefined),
+  sendDepositPaidAlert: vi.fn().mockResolvedValue(undefined),
+  sendPaymentMethodSelectedAlert: vi.fn().mockResolvedValue(undefined),
+  sendInvoiceEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendPaymentReceivedEmail: vi.fn().mockResolvedValue(undefined),
+  // Task 1.9 — co-branded action-needed email (billing.payments_action_needed /
+  // billing.payments_paused), sent from handleAccountLifecycle.
+  sendPaymentsActionNeededEmail: vi.fn().mockResolvedValue(undefined),
+  // Task 4.3 — co-branded within-ceiling rate-change notice (billing.platform_fee_rate_changed),
+  // sent from lib/platform-fee-rate-notice.ts's notifyPlatformFeeRateChange.
+  sendPaymentsRateChangeNotice: vi.fn().mockResolvedValue(undefined),
+  sendClockOverrideRequestedEmail: vi.fn().mockResolvedValue(undefined),
+  sendClockOverrideDecisionEmail: vi.fn().mockResolvedValue(undefined),
+  // Email slice 10 (guided domain verification) — one-time success notice,
+  // sent to every active org ADMIN the first time a custom domain verifies.
+  sendDomainVerifiedEmail: vi.fn().mockResolvedValue(undefined),
+  sendMfaCodeEmail: vi.fn().mockResolvedValue(undefined),
+  sendAutomationEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  // P2 item 6: the PO sender resolves with the transmitted content so the
+  // controller can persist the exact subject/html into InventoryEmail.
+  sendPurchaseOrderEmail: vi.fn().mockResolvedValue({ status: 'sent', subject: 'Purchase Order P00001', html: '<html></html>' }),
+  // Stage pickup ticket (inventory Staging) — resolves with sent + content, mirroring the PO sender.
+  sendStagePickupEmail: vi.fn().mockResolvedValue({ status: 'sent', subject: 'Pickup Ticket J00001', html: '<html></html>' }),
+  // dispatchFailureStatus is a pure classifier two controllers call directly
+  // (inv-po, inv-stages) to pick 409 vs 502 for a non-sent dispatch - keep the
+  // real logic rather than stubbing it, so those callers exercise the actual
+  // 409/502 split instead of hitting undefined() at runtime. Mirrors the real
+  // function's org_disabled/suppressed (email slice 4) -> 409 classification.
+  dispatchFailureStatus: (result: { status: string; reason?: string }) =>
+    result.status === 'skipped' && (result.reason === 'org_disabled' || result.reason === 'suppressed') ? 409 : 502,
+  // esc is a pure output-encoding function — automation merge-field rendering
+  // depends on its REAL behavior (XSS guard), so never stub it out.
+  esc: (value: unknown) =>
+    String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;'),
+}));
+
+// Automation dispatch is fire-and-forget via setImmediate — left real, it would
+// run AFTER a test finishes and pollute unrelated mocks' call counts (flake
+// vector). automation-wiring.test.ts re-mocks it locally with the same shape
+// to assert calls; engine/cron tests import the engine directly and are unaffected.
+vi.mock('../services/automations/dispatch', () => ({
+  dispatchAutomationEvent: vi.fn(),
+}));
+
+// Mock logger to suppress output during tests
+vi.mock('../lib/logger', () => ({
+  logger: {
+    info: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
+// Mock prisma with all methods used by controllers
+vi.mock('../lib/prisma', () => ({
+  prisma: {
+    customer: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
+    },
+    serviceLocation: {
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    customerEmail: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    lead: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      groupBy: vi.fn(),
+    },
+    job: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      groupBy: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    note: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // ─── Scheduler redesign: crew/assignment M2M join tables ───
+    jobAssignee: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    // SRVW-112 - per-org job sub-status catalog. `findMany` defaults to [] so the suites that
+    // never touch sub-statuses are unaffected, and `count` defaults to 0 so create()'s
+    // append-index sort_order resolves to a NUMBER in tests rather than an undefined that would
+    // silently fall through to the Prisma column default.
+    jobSubStatus: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    // SRVW-111 (label-override shape) - per-org LeadStatus display overrides. `findMany`
+    // defaults to [] so suites that never touch this are unaffected (GET falls back to the
+    // enum's own 6 values with no override applied).
+    leadStatusOverride: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    leadAssignee: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    leadWalkthroughPerformer: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    // Walkthrough-as-entity redesign, PR-B2: safe "nothing here" default so tests that don't
+    // exercise walkthrough state (most of the suite) don't need to know it exists.
+    walkthrough: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    tag: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+    },
+    leadTag: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    tagAssignment: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    user: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
+      groupBy: vi.fn(),
+    },
+    customRole: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
+    },
+    termsAcceptance: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+    },
+    location: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    department: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    estimate: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      aggregate: vi.fn(),
+      groupBy: vi.fn(),
+    },
+    estimateLineItem: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // R5f — line-item + scope-of-work photos. findMany defaults to [] so the remove()/deleteLine
+    // Storage-cleanup sweeps (Promise.all'd best-effort reads) don't crash every PRE-EXISTING
+    // delete-estimate/delete-line test that doesn't itself set up a photo fixture.
+    estimateLineItemPhoto: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    estimateScopePhoto: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    timelineEvent: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    stateTaxRate: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+    },
+    // SRVW-114 slice 1 - org-defined custom field definitions.
+    customFieldDefinition: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    // R5c (2026-07-22) - org-level tax rates. 2026-08-05: these became the authority for an org's
+    // rates, so `findFirst` here is the first hop of every tax derivation (lib/tax/resolveTaxRate).
+    orgTaxRate: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    appSetting: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
+    priceBookCategory: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    priceBookItem: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    estimateSendConfig: {
+      create: vi.fn(),
+      update: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    estimateVersionSnapshot: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+    },
+    scopePreset: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+    },
+    // ─── Entity-redesign new models (Phase 0 adds the mock surface; later phases use them) ───
+    customerPhone: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    invoiceLineItem: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // ─── SERV10X-38: job-owned items (Task 3 — job-lines CRUD) ───
+    jobLineItem: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    refund: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    credit: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    depositCreditApplication: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    stripeEvent: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+    },
+    attachment: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    invoice: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    payment: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    // ─── Service Plans models (service-plans feature OWNS these) ───
+    servicePlan: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+      aggregate: vi.fn(),
+    },
+    servicePlanLineItem: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // ─── Service-plan materials template (LO-5) — mirrors servicePlanLineItem ───
+    servicePlanMaterialLine: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    planVisit: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    servicePlanTemplate: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    servicePlanTemplateLineItem: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    organization: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn().mockResolvedValue({
+        estimate_terms: 'Test terms.',
+        estimate_notes: '- Test note',
+        estimate_payment_terms: '- 70% on acceptance',
+      }),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      // Task 1.5 — race-safe stripe_account_id claim (connectStripe).
+      updateMany: vi.fn(),
+    },
+    userTablePreference: {
+      findFirst: vi.fn(),
+      upsert: vi.fn(),
+    },
+    rolePermission: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+    // ─── Per-user permission overrides (RBAC Phase 2) ───
+    // findMany defaults to [] so every request that merges overrides sees "none" by default.
+    userPermissionOverride: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    // ─── Inventory models (Phase 1 OWNS these — later phases reference, never re-add) ───
+    brand: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    vendor: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    vendorContact: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
+    branch: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    inventoryLocation: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    stockBalance: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+    stockMovement: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), count: vi.fn() },
+    purchaseOrder: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
+    purchaseOrderLine: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    rfq: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn() },
+    rfqLine: { create: vi.fn(), deleteMany: vi.fn() },
+    rfqQuote: { create: vi.fn(), deleteMany: vi.fn() },
+    estimateReservation: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    reservationLine: { create: vi.fn(), deleteMany: vi.fn() },
+    inventoryEmail: { create: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
+    jobStage: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    jobStageLine: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    jobStageAttachment: { findFirst: vi.fn(), create: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    stageAuditEntry: { create: vi.fn(), deleteMany: vi.fn() },
+    stockApproval: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    // ─── Logistic Orders (LO-1 schema / LO-2 engine) ───
+    // findMany defaults to [] so the pre-tx anchored-LO unwind (collectAnchoredLoUnwind, called by
+    // job cancel/delete + invoice void/delete) finds no LOs by default — every pre-LO document-verb
+    // test then no-ops the unwind without needing logisticOrder delegates in its tx proxy.
+    logisticOrder: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
+    logisticOrderLine: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), createMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
+    stockApprovalModification: { create: vi.fn(), deleteMany: vi.fn() },
+    itemGroup: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    itemGroupLine: { create: vi.fn(), deleteMany: vi.fn() },
+    // ─── Inventory P4: company-tool assets (Asset + append-only AssetEvent ledger) ───
+    asset: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
+    assetEvent: { findMany: vi.fn(), create: vi.fn() },
+    // ─── Communication models (Phase 2 OWNS these — later phases reference, never re-add) ───
+    callSession: {
+      findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+    },
+    ctmEvent: {
+      findUnique: vi.fn(), create: vi.fn(),
+    },
+    // Email slice 4 — Resend delivery webhook idempotency ledger, mirrors ctmEvent.
+    resendEvent: {
+      findUnique: vi.fn().mockResolvedValue(null), create: vi.fn(),
+    },
+    // Email slice 4 — global TRANSACTIONAL suppression list. findFirst defaults to
+    // null ("nothing suppressed") so every OTHER suite that reaches the real
+    // dispatchEmail via vi.importActual (email-dispatch.test.ts, email-po-sender.test.ts, …)
+    // sees unchanged pre-slice-4 behavior unless it explicitly overrides this.
+    emailSuppression: {
+      findFirst: vi.fn().mockResolvedValue(null), upsert: vi.fn(),
+    },
+    // Email slice 10 (guided domain verification) — an org's own verified
+    // sending domain. findUnique defaults to undefined-resolved ("no custom
+    // domain configured for this org") so every OTHER suite that reaches the
+    // real dispatchEmail via vi.importActual (email-dispatch.test.ts,
+    // resend-webhook.test.ts, …) keeps using the shared EMAIL_FROM_BUSINESS
+    // address unless it explicitly opts in.
+    organizationDomain: {
+      findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn(),
+    },
+    phoneNumber: {
+      findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn().mockResolvedValue(0),
+    },
+    userPhoneNumber: {
+      findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), createMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), count: vi.fn().mockResolvedValue(0),
+    },
+    pendingCallAttribution: {
+      findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+    },
+    contact: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn(),
+    },
+    channelIdentity: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn(),
+    },
+    phoneAgent: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(),
+    },
+    // findMany defaults to [] so the blocked-list probe ingest now runs on every
+    // live inbound activity (findBlockedNumber, lib/communication/blockedNumbers.ts)
+    // has an array to scan - without a default every ingest-reaching suite would
+    // throw on `.find()` of undefined. Same idiom as logisticOrder.findMany above.
+    blockedNumber: {
+      findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn(),
+    },
+    messageThread: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), aggregate: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+    },
+    message: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+    },
+    textTemplate: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn(),
+    },
+    textAutomation: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn(),
+    },
+    whatsAppChat: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), aggregate: vi.fn(), deleteMany: vi.fn(),
+    },
+    whatsAppMessage: {
+      findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+    },
+    email: {
+      findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), count: vi.fn(), deleteMany: vi.fn(),
+    },
+    // Email slice 7 - real files attached to a human-composed send.
+    emailAttachment: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn(),
+    },
+    // Email slice 8b - per-conversation workflow state (assignee, shared
+    // snooze, archive). findFirst defaults to null so a reply that supplies a
+    // thread_id which resolves to nothing just falls back to a fresh thread
+    // rather than every non-reply-path test needing to stub this. `create`
+    // defaults to a real-shaped row (every existing sendEmail test composes
+    // fresh, so every one of them now also creates a thread) so only tests
+    // that actually care about the created thread's shape need to override it.
+    emailThread: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn().mockImplementation((args: { data: Record<string, unknown> }) =>
+        Promise.resolve({
+          id: 'default-thread-id',
+          assigned_to_user_id: args?.data?.assigned_to_user_id ?? null,
+          snoozed_until: null,
+          archived: false,
+          organization_id: args?.data?.organization_id,
+        })),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // Email slice 6 - reply tokens (<token>@reply.servwave.com -> thread).
+    // findFirst defaults to null so the minting helper's "reuse a live token"
+    // lookup misses and mints a fresh one, which is what every send-path test
+    // that doesn't care about token reuse should see. findUnique has NO default
+    // (undefined would be a silent pass through resolveReplyToken's null gate);
+    // tests that resolve a token stub it explicitly.
+    replyToken: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn().mockImplementation((args: { data: Record<string, unknown> }) =>
+        Promise.resolve({ ...(args?.data ?? {}) })),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // Email slice 8c - per-user read state (replaces the shared Email.unread
+    // column as the source of truth). findMany defaults to [] so a listEmails/
+    // getEmail call that doesn't itself care about read state doesn't need to
+    // stub this to avoid an undefined `.map`/`.some` crash.
+    emailReadState: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn().mockResolvedValue({ count: 0 }),
+      deleteMany: vi.fn(),
+    },
+    emailGroup: {
+      findMany: vi.fn(),
+    },
+    emailForwardRule: {
+      findMany: vi.fn(),
+    },
+    callFlow: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(),
+    },
+    callGroup: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(),
+    },
+    trainingScenario: {
+      findMany: vi.fn(), findFirst: vi.fn(),
+    },
+    trainingSession: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(),
+    },
+    // ─── Copilot (Servy) models ───
+    copilotConversation: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    copilotMessage: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn(),
+    },
+    copilotAuditEvent: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // ─── Timeclock models ───
+    timeEntry: {
+      findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+    },
+    geofenceConfig: {
+      findUnique: vi.fn(), findFirst: vi.fn(), upsert: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn(),
+    },
+    geofenceStore: {
+      findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(),
+    },
+    timeClockOtReview: {
+      findMany: vi.fn(), findFirst: vi.fn(), upsert: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn(),
+    },
+    // ─── Email-OTP 2FA ───
+    mfaEmailChallenge: {
+      findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(),
+      updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), count: vi.fn(),
+    },
+    // ─── Tasks (B1 model, B2 API) ───
+    task: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
+    },
+    taskSubtask: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    // ─── In-app Notifications (Phase 1 OWNS these — later phases reference, never re-add) ───
+    notification: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    notificationRecipient: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      delete: vi.fn(),
+    },
+    // ─── Security/compliance audit trail (audit-logging feature OWNS these) ───
+    auditLog: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    // ─── Automation Center ───
+    automationRule: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    automationRun: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      groupBy: vi.fn().mockResolvedValue([]),
+    },
+    // ─── Workflow Builder (Automation Center v2) ───
+    workflow: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      aggregate: vi.fn(),
+    },
+    workflowStep: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    workflowVersion: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      aggregate: vi.fn(),
+    },
+    workflowEnrollment: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    workflowStepRun: {
+      create: vi.fn(),
+      createMany: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    $queryRawUnsafe: vi.fn(),
+    $executeRaw: vi.fn(),
+    $executeRawUnsafe: vi.fn(),
+  },
+}));
