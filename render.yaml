@@ -11,7 +11,9 @@ services:
     branch: main
     rootDir: .
     autoDeployTrigger: commit
-    buildCommand: npm install && npm run build:backend
+    # --include=dev is required: NODE_ENV=production below makes npm omit
+    # devDependencies by default, and the build needs typescript and @types/*.
+    buildCommand: npm install --include=dev && npm run build:backend
     # migrate deploy uses DIRECT_URL (5432). Then boot the compiled server.
     startCommand: cd backend && npx prisma migrate deploy && node dist/index.js
     healthCheckPath: /health
