@@ -293,12 +293,14 @@ async function main() {
     const timelineRows: Prisma.TimelineEventCreateManyInput[] = [];
 
     // Unique contact generators (avoid dup-guard collisions).
-    let phoneCounter = 2010000; // base; each customer gets a unique 973-### number
+    // 555 is not an assignable NANP area code, so every generated number is
+    // guaranteed fictional and cannot reach a real subscriber.
+    let phoneCounter = 2010000; // base; each customer gets a unique 555-### number
     const usedEmails = new Set<string>();
     function uniquePhone(): string {
       phoneCounter += randInt(7, 53);
       const n = String(phoneCounter).padStart(7, '0').slice(-7);
-      return `+1973${n}`;
+      return `+1555${n}`;
     }
     function uniqueEmail(base: string): string {
       let slug = base.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '');
