@@ -1,7 +1,7 @@
 /**
- * Creates the synthetic staff that seed-demo-alpha.ts expects to already exist.
+ * Creates the synthetic staff that seed-demo.ts expects to already exist.
  *
- * seed-demo-alpha.ts deliberately never creates users - it assigns work to
+ * seed-demo.ts deliberately never creates users - it assigns work to
  * whoever is already on the org, and aborts if there is no DISPATCHER or
  * TECHNICIAN. A freshly migrated database only has the single ADMIN from
  * seed.ts, so the demo seed cannot run until this fills the other roles.
@@ -9,7 +9,7 @@
  * Run order on a new database:
  *   npm run seed              # admin + default settings
  *   npm run seed:demo-staff   # this script
- *   npm run seed:demo-alpha   # the demo dataset
+ *   npm run seed:demo   # the demo dataset
  *
  * Every value here is invented. Emails are @example.com (reserved by RFC 2606)
  * and phone numbers use the 555 area code, which is not assignable in the
@@ -23,7 +23,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ALPHA_ORG_ID = '00000000-0000-0000-0000-000000000001';
+const DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001';
 
 /** Shared across every seeded account. Development only - rotate on first login. */
 const STAFF_PASSWORD = 'Sandbox123!@#';
@@ -55,8 +55,8 @@ async function main() {
   );
 
   try {
-    const org = await prisma.organization.findUnique({ where: { id: ALPHA_ORG_ID } });
-    if (!org) throw new Error(`Organization ${ALPHA_ORG_ID} not found. Run migrations first.`);
+    const org = await prisma.organization.findUnique({ where: { id: DEMO_ORG_ID } });
+    if (!org) throw new Error(`Organization ${DEMO_ORG_ID} not found. Run migrations first.`);
 
     let created = 0;
     let skipped = 0;
@@ -85,7 +85,7 @@ async function main() {
           last_name: person.last_name,
           phone: person.phone,
           role: person.role,
-          organization_id: ALPHA_ORG_ID,
+          organization_id: DEMO_ORG_ID,
         },
       });
       created++;

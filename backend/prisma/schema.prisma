@@ -1938,11 +1938,11 @@ enum Plan {
   ENTERPRISE
 }
 
-/// Fixed UUID for Alpha Doors & Security (single-tenant MVP seed).
+/// Fixed UUID for the first demo organization (single-tenant MVP seed).
 /// Referenced directly by the DB DEFAULT on organization_id columns
 /// so unscoped inserts (tests, seeders, existing controllers) route here
-/// transparently until we onboard tenant #2.
-///   ALPHA_ORG_ID = '00000000-0000-0000-0000-000000000001'
+/// transparently.
+///   DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 model Organization {
   id                       String   @id @db.Uuid

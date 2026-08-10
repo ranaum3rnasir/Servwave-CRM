@@ -12,7 +12,7 @@ if (!TECH_PASSWORD) {
   process.exit(1);
 }
 
-const ALPHA_ORG_ID = '00000000-0000-0000-0000-000000000001';
+const DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001';
 
 async function seedTechnician() {
   const prisma = new PrismaClient();
@@ -70,7 +70,7 @@ async function seedTechnician() {
           first_name: 'Mike',
           last_name: 'Rivera',
           role: 'TECHNICIAN',
-          organization_id: ALPHA_ORG_ID,
+          organization_id: DEMO_ORG_ID,
         },
       });
       console.log('Technician Prisma user created.');
@@ -100,7 +100,7 @@ async function seedTechnician() {
         phone: '(214) 555-0142',
         ad_source: 'REFERRAL',
         kind: 'PERSON', segment: 'RESIDENTIAL',
-        organization_id: ALPHA_ORG_ID,
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded customer was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
       },
@@ -128,7 +128,7 @@ async function seedTechnician() {
         phone: '(972) 555-0238',
         ad_source: 'WEBSITE',
         kind: 'PERSON', segment: 'RESIDENTIAL',
-        organization_id: ALPHA_ORG_ID,
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded customer was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
       },
@@ -155,7 +155,7 @@ async function seedTechnician() {
         phone: '(469) 555-0391',
         ad_source: 'GOOGLE',
         kind: 'PERSON', segment: 'RESIDENTIAL',
-        organization_id: ALPHA_ORG_ID,
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded customer was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
       },
@@ -189,8 +189,8 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer.id,
         service_location_id: location.id,
-        assignees: { create: { user_id: techUserId, organization_id: ALPHA_ORG_ID } },
-        organization_id: ALPHA_ORG_ID,
+        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'AC Unit Repair — AC unit not cooling. Customer reports warm air blowing. Unit is a Carrier 24ACC636, installed 2019. Located on south side of house. Gate code is 4521. Dog in backyard — enter through side gate.',
@@ -207,8 +207,8 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer2.id,
         service_location_id: location2.id,
-        assignees: { create: { user_id: techUserId, organization_id: ALPHA_ORG_ID } },
-        organization_id: ALPHA_ORG_ID,
+        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Furnace Installation — Install new Lennox SL280V furnace. Old unit removed by previous crew. Ductwork modification may be needed.',
@@ -224,8 +224,8 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer3.id,
         service_location_id: location3.id,
-        assignees: { create: { user_id: techUserId, organization_id: ALPHA_ORG_ID } },
-        organization_id: ALPHA_ORG_ID,
+        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Water Heater Replacement — Replace 40-gallon gas water heater. Customer wants tankless upgrade quote as well.',
@@ -241,8 +241,8 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer.id,
         service_location_id: location.id,
-        assignees: { create: { user_id: techUserId, organization_id: ALPHA_ORG_ID } },
-        organization_id: ALPHA_ORG_ID,
+        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Thermostat Wiring Check — Follow-up from AC repair. Verify thermostat wiring after unit replacement.',
@@ -256,7 +256,7 @@ async function seedTechnician() {
     await prisma.timelineEvent.createMany({
       data: [
         {
-          organization_id: ALPHA_ORG_ID,
+          organization_id: DEMO_ORG_ID,
           entity_type: 'JOB',
           entity_id: job1.id,
           event_type: 'CREATED',
@@ -264,7 +264,7 @@ async function seedTechnician() {
           created_at: makeTime(8, 0),
         },
         {
-          organization_id: ALPHA_ORG_ID,
+          organization_id: DEMO_ORG_ID,
           entity_type: 'JOB',
           entity_id: job1.id,
           event_type: 'ASSIGNED',
@@ -273,7 +273,7 @@ async function seedTechnician() {
           created_at: makeTime(8, 30),
         },
         {
-          organization_id: ALPHA_ORG_ID,
+          organization_id: DEMO_ORG_ID,
           entity_type: 'JOB',
           entity_id: job1.id,
           event_type: 'STARTED',

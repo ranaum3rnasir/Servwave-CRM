@@ -1,29 +1,32 @@
 /**
- * seed-demo-alpha.ts — Demo-data enrichment for the Alpha Doors & Security demo org.
+ * seed-demo.ts - generates the dataset for "ServWave Demo One".
  *
- * Workstream C of md_files/plans/demo-data/2026-06-12-demo-data-enrichment.md.
+ * Fills the first demo organization (00000000-0000-0000-0000-000000000001) with
+ * a rich, time-distributed field-service CRM dataset so the Dashboard, Schedule,
+ * Reports and every DB-backed list/detail screen render real content instead of
+ * empty states.
  *
- * Fills the Alpha org (00000000-0000-0000-0000-000000000001) on STAGING with a
- * rich, time-distributed door/security CRM dataset so the ServWave demo Dashboard,
- * Schedule, Reports, and all DB-backed list/detail screens look excellent.
+ * ALL DATA IS INVENTED. Names come from fixed pools, emails use @example.com
+ * (reserved by RFC 2606) and phone numbers use the 555 area code, which is not
+ * assignable in the North American numbering plan. Never add real names, real
+ * email addresses or real phone numbers here.
  *
- * SAFETY (mirrors seed-emanuel-demo.ts):
- *   - refuses unless SEED_DEMO_ALPHA === 'true'
- *   - refuses the prod Supabase project ref (dtumfibsalttuiukxtoy)
- *   - only ever writes to the Alpha org id (…0001); refuses the B&G org (…bcab0001)
+ * SAFETY:
+ *   - refuses unless SEED_DEMO === 'true'
+ *   - only ever writes to the demo org id (...0001)
  *
- * IDEMPOTENT: an FK-safe wipe of the Alpha org's CRM transactional rows runs first,
- * then a single curated dataset is reseeded with all dates re-anchored to `new Date()`.
- * Re-runs reproduce the same fresh-dated dataset (counts do not double). Existing org
- * users, app_settings, the organization, departments/locations, price book, and the
- * brand/vendor/inventory/communication catalogs are NEVER deleted (comms/inventory FK
- * references to the wiped CRM rows are all ON DELETE SET NULL, so they survive cleanly).
+ * PREREQUISITE: seed-demo-staff.ts must have run. This script assigns work to
+ * existing staff and never creates users, so it aborts when the org has no
+ * dispatcher or technician.
  *
- * PERFORMANCE: the local→staging link is ~1s/round-trip with pooler limit 5. We
- * pre-generate all UUIDs and entity numbers in code, build big arrays, and bulk-insert
- * with createMany (chunked, sequential) in FK-safe parent→child order.
+ * IDEMPOTENT: an FK-safe wipe of the org's CRM transactional rows runs first,
+ * then a single curated dataset is reseeded with all dates re-anchored to
+ * `new Date()`. Re-runs reproduce the same fresh-dated dataset (counts do not
+ * double). Existing org users, app_settings, the organization, departments and
+ * locations, price book, and the brand/vendor/inventory/communication catalogs
+ * are NEVER deleted.
  *
- * Run (staging only): SEED_DEMO_ALPHA=true npx tsx src/seed-demo-alpha.ts
+ * Run: SEED_DEMO=true npx tsx src/seed-demo.ts
  */
 import { PrismaClient, Prisma } from '@prisma/client';
 import dotenv from 'dotenv';
@@ -32,11 +35,7 @@ import { randomUUID } from 'crypto';
 dotenv.config();
 
 // ── Constants & safety boundaries ───────────────────────────────────────────
-const ALPHA_ORG_ID = '00000000-0000-0000-0000-000000000001';
-const FORBIDDEN_DB_REFS = ['dtumfibsalttuiukxtoy']; // prod Supabase project ref
-const FORBIDDEN_ORG_IDS = new Set<string>([
-  '00000000-0000-0000-0000-0000bcab0001', // B&G (live prod data) — never a target
-]);
+const DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001';
 
 const CHUNK = 500;
 
@@ -187,24 +186,17 @@ const SERVICE_REQUESTS = [
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 async function main() {
-  // SAFETY GUARD (throws before any write)
-  if (process.env.SEED_DEMO_ALPHA !== 'true') {
-    throw new Error('Refusing to run: set SEED_DEMO_ALPHA=true to enable the Alpha demo seed.');
+  // SAFETY GUARD (throws before any write). This seed WIPES the target org's
+  // CRM rows before reseeding, so it must never run by accident.
+  if (process.env.SEED_DEMO !== 'true') {
+    throw new Error('Refusing to run: set SEED_DEMO=true to enable the demo seed.');
   }
-  const dbUrl = process.env.DATABASE_URL ?? '';
-  const supaUrl = process.env.SUPABASE_URL ?? '';
-  if (FORBIDDEN_DB_REFS.some((ref) => dbUrl.includes(ref) || supaUrl.includes(ref))) {
-    throw new Error('Refusing to run: DATABASE_URL/SUPABASE_URL points at the PRODUCTION Supabase project. This seed only targets staging.');
-  }
-  const orgId = ALPHA_ORG_ID;
-  if (FORBIDDEN_ORG_IDS.has(orgId)) {
-    throw new Error(`Refusing to run: target org ${orgId} is a production-only org id (B&G).`);
-  }
+  const orgId = DEMO_ORG_ID;
 
   const prisma = new PrismaClient();
   try {
     const orgRow = await prisma.organization.findUnique({ where: { id: orgId } });
-    if (!orgRow) throw new Error(`Alpha organization ${orgId} not found on this DB.`);
+    if (!orgRow) throw new Error(`Demo organization ${orgId} not found on this DB. Run migrations first.`);
     const org = orgRow; // non-null binding so nested closures keep the narrowing
     console.log(`\nSeeding demo data into "${org.name}" (${orgId})`);
     console.log(`Anchoring all dates to now = ${NOW.toISOString()}\n`);
@@ -222,18 +214,18 @@ async function main() {
     const dispatchers = users.filter((u) => u.role === 'DISPATCHER');
     const techs = users.filter((u) => u.role === 'TECHNICIAN');
     if (dispatchers.length === 0 || techs.length === 0) {
-      throw new Error('Expected dispatchers and technicians on the Alpha org; aborting.');
+      throw new Error('Expected dispatchers and technicians on the demo org; run seed-demo-staff.ts first.');
     }
     // Lead owners = SALES + ADMIN (fall back to admins if no SALES).
     const leadOwners = (sales.length ? sales : admins).concat(admins);
     const anyUser = admins[0] ?? users[0];
     const creatorId = anyUser.id;
 
-    // ── 2. FK-SAFE WIPE (Alpha org only) ───────────────────────────────────
+    // ── 2. FK-SAFE WIPE (demo org only) ───────────────────────────────────
     // Order derived from live FK delete-rules (RESTRICT children first). Comms/
     // inventory rows referencing these CRM rows are ON DELETE SET NULL, so they
     // survive — we never touch the catalog/communication tables here.
-    console.log('Wiping previous Alpha-org CRM rows (FK-safe order)…');
+    console.log('Wiping previous demo-org CRM rows (FK-safe order)…');
     const orgWhere = { organization_id: orgId };
     const invByOrg = { invoice: { organization_id: orgId } };
     await prisma.refund.deleteMany({ where: orgWhere });

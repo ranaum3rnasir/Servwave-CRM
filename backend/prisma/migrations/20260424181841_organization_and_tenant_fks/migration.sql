@@ -23,7 +23,8 @@ CREATE TABLE "organizations" (
     CONSTRAINT "organizations_pkey" PRIMARY KEY ("id")
 );
 
--- 2. Insert Alpha seed row (stub — text fields populated by seed-organization.ts)
+-- 2. Insert the first demo organization (stub - text fields populated by
+--    seed-organization.ts). Everything here is invented sample data.
 INSERT INTO "organizations" (
     "id", "name", "address_line1", "city", "state", "postal_code",
     "email", "website", "brand_color", "estimate_template",
@@ -31,11 +32,11 @@ INSERT INTO "organizations" (
     "created_at", "updated_at"
 ) VALUES (
     '00000000-0000-0000-0000-000000000001',
-    'Alpha Doors & Security INC.',
-    '1001 Willow Avenue',
-    'Hoboken', 'NJ', '07030',
-    'info@alphasecurityus.com',
-    'https://alphadoorsnewjersey.com/',
+    'ServWave Demo One',
+    '100 Example Street',
+    'Springfield', 'NJ', '07081',
+    'info@example.com',
+    'https://example.com/',
     '#E11D2E',
     'alpha-classic',
     '', '', '',
