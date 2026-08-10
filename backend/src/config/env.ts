@@ -34,7 +34,7 @@ const envSchema = z.object({
 
   // CTM (CallTrackingMetrics) phone + SMS — optional until an org connects.
   // Agency Access/Secret keys reach every sub-account; values live ONLY in the
-  // backend's Render dashboard (Stripe precedent — never in the repo).
+  // backend's Render dashboard (Stripe precedent - never in the repo).
   // CTM_WEBHOOK_TOKEN authenticates inbound CTM webhooks (?token=…, query-string
   // so the log redactor masks it); the webhook route fails CLOSED when unset.
   // BACKEND_PUBLIC_URL is this backend's own public origin, used to build the
