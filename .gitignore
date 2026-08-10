@@ -11,6 +11,10 @@ storybook-static/
 .env.local
 .env.production
 .env.*
+# ...but the committed templates must survive the .env.* wildcard above.
+# They carry placeholders only, never real values.
+!.env.example
+!**/.env.example
 .mcp.json
 
 # IDE

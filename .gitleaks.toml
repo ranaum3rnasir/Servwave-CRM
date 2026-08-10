@@ -11,6 +11,7 @@ description = "Known-fake test fixtures and placeholder values"
 paths = [
   # Documented placeholder values, not real credentials
   '''backend/\.env\.example''',
+  '''frontend/\.env\.example''',
   # Test fixtures
   '''backend/src/__tests__/.*\.ts''',
   '''e2e/.*\.ts''',
