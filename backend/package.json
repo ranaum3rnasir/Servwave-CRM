@@ -12,6 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
     "seed": "tsx src/seed.ts",
+    "seed:demo-staff": "tsx src/seed-demo-staff.ts",
     "seed:tax-rates": "tsx src/seed-tax-rates.ts",
     "seed:orgb": "tsx src/seed-org-b.ts",
     "seed:demo-alpha": "SEED_DEMO_ALPHA=true tsx src/seed-demo-alpha.ts",
