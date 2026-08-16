@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/popover';
 import GlobalSearch from './GlobalSearch';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
+import { InAppNotificationBell } from '@/components/notifications/InAppNotificationBell';
 import { GlobalDialer } from '@/components/communication/phone/Dialer';
 import { useOrganization } from '@/lib/api/organization';
 import { useUnreadCounts } from '@/lib/api/communication';
@@ -242,6 +243,10 @@ export default function Header() {
         <Separator orientation="vertical" className="mx-2 hidden h-6 sm:block" />
 
         <NotificationBell />
+
+        <Separator orientation="vertical" className="mx-2 hidden h-6 sm:block" />
+
+        <InAppNotificationBell />
 
         <Separator orientation="vertical" className="mx-2 hidden h-6 sm:block" />
 

@@ -121,3 +121,4 @@ md_files/plans/onboarding/**/talon-etl/*.json
 .github/skills/
 # Screenshots dropped at the repo root during UI work.
 /*.png
+ai-work/env/

@@ -43,11 +43,35 @@ describe('AiCenterModal — available to all orgs', () => {
     expect(screen.queryByText(/agents working 24\/7/i)).toBeNull();
   });
 
-  it('the agent detail modal carries the same roadmap label', () => {
+  it('the agent detail modal carries the same roadmap label and hides Start button for non-Owl agents', () => {
     setDemoOrg(false);
     useAiCenterStore.setState({ focusAgentId: 'mike' });
     renderWithProviders(<AiCenterModal />);
     expect(screen.getByText('Book a call about Border Collie')).toBeInTheDocument();
+    expect(screen.queryByText('Start')).toBeNull();
     expect(screen.queryAllByText('Available')).toHaveLength(0);
+  });
+
+  it('renders the Start button only for the Owl agent', () => {
+    setDemoOrg(false);
+    useAiCenterStore.setState({ focusAgentId: 'david' });
+    renderWithProviders(<AiCenterModal />);
+    expect(screen.getByText('Book a call about Owl')).toBeInTheDocument();
+    expect(screen.getByText('Start')).toBeInTheDocument();
+  });
+
+  it('renders custom Watcher configuration UI for Spider agent without video', () => {
+    setDemoOrg(false);
+    useAiCenterStore.setState({ focusAgentId: 'spider' });
+    renderWithProviders(<AiCenterModal />);
+    expect(screen.getAllByText('Spider').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('AI Lead Manager').length).toBeGreaterThan(0);
+    expect(screen.getByText('Notifications')).toBeInTheDocument();
+    expect(screen.getByText('Distance')).toBeInTheDocument();
+    expect(screen.getByText('Contacts for Watchers')).toBeInTheDocument();
+    expect(screen.getByText('Email')).toBeInTheDocument();
+    expect(screen.getByText('SMS')).toBeInTheDocument();
+    expect(screen.getByText('In-app Message')).toBeInTheDocument();
+    expect(screen.queryByText('Feature video · 90 sec')).toBeNull();
   });
 });
