@@ -1,0 +1,220 @@
+import { useEffect, useRef } from 'react';
+import { Sparkles, MessageSquare, BellOff, X, Bell } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
+import { Heading } from '@/components/ui/heading';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/use-toast';
+import { useSpiderWatcherStore, type InAppNotification } from '@/stores/spiderWatcherStore';
+
+export function SpiderNotificationPopup() {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const inAppEnabled = useSpiderWatcherStore((s) => s.notifications.inApp);
+  const getComputedNotifications = useSpiderWatcherStore((s) => s.getComputedNotifications);
+  const selectNotification = useSpiderWatcherStore((s) => s.selectNotification);
+  const setInAppNotification = useSpiderWatcherStore((s) => s.setInAppNotification);
+  const isWindowOpen = useSpiderWatcherStore((s) => s.isWindowOpen);
+  const setIsWindowOpen = useSpiderWatcherStore((s) => s.setIsWindowOpen);
+
+  const activeNotifications = inAppEnabled ? getComputedNotifications() : [];
+
+  const unreadCount = inAppEnabled
+    ? activeNotifications.filter((n) => !n.read).length
+    : 0;
+
+  // Close panel when clicking outside
+  useEffect(() => {
+    if (!isWindowOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        setIsWindowOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [isWindowOpen, setIsWindowOpen]);
+
+  const handleNotificationClick = (notif: InAppNotification) => {
+    selectNotification(notif.id);
+    setIsWindowOpen(false);
+    toast({
+      title: `🕷️ Spider Lead Active: ${notif.contactName}`,
+      description: `Opening Lead Communication tab for ${notif.contactName} (${notif.leadStage || 'Lead Alert'})`,
+      duration: 3000,
+    });
+    const draftMsg = encodeURIComponent(
+      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
+    );
+    const targetLeadId = notif.leadId || notif.contactId;
+    navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
+  };
+
+  const handleSendMessage = (notif: InAppNotification, e: React.MouseEvent) => {
+    e.stopPropagation();
+    selectNotification(notif.id);
+    setIsWindowOpen(false);
+    toast({
+      title: 'Opening Lead Communication Composer',
+      description: `Drafting message for ${notif.contactName} (${notif.companyName})`,
+      duration: 3000,
+    });
+    const draftMsg = encodeURIComponent(
+      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
+    );
+    const targetLeadId = notif.leadId || notif.contactId;
+    navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
+  };
+
+  // Keep spider icon completely hidden by default. Only display when there is an active/unread notification.
+  if (!inAppEnabled || unreadCount === 0) return null;
+
+  return (
+    <div ref={panelRef} className="fixed bottom-5 right-5 z-50">
+      {/* ── Floating Notification Bell FAB ───────────────────────────── */}
+      <button
+        type="button"
+        id="spider-notification-bell-trigger"
+        onClick={() => setIsWindowOpen(!isWindowOpen)}
+        aria-label={
+          unreadCount > 0
+            ? `${unreadCount} unread Spider notification${unreadCount > 1 ? 's' : ''} — click to view`
+            : 'Spider Lead Watcher notifications'
+        }
+        aria-expanded={isWindowOpen}
+        className={cn(
+          'relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-ai-500 to-ai-600 text-on-fill',
+          'shadow-card transition-transform hover:scale-110 active:scale-95',
+          'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ai-200',
+          !isWindowOpen && unreadCount > 0 && 'animate-bounce',
+        )}
+        style={!isWindowOpen && unreadCount > 0 ? { animationDuration: '1.4s' } : undefined}
+      >
+        <Bell className="h-6 w-6 text-on-fill drop-shadow-xs" />
+
+        {/* Unread badge */}
+        {unreadCount > 0 && (
+          <span className="absolute -top-1 -right-1 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-notify px-1 text-[11px] font-bold text-on-fill ring-2 ring-surface-light animate-pulse">
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {/* ── Notification panel ────────────────────────────────────────── */}
+      {isWindowOpen && (
+        <div
+          role="dialog"
+          aria-label="Spider Lead Watcher Notifications"
+          className="absolute bottom-16 right-0 w-88 sm:w-96 rounded-xl border border-border bg-surface-light shadow-card overflow-hidden animate-in slide-in-from-bottom-3 duration-200"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-border bg-surface-light px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ai-50 text-ai-600">
+                <Sparkles className="h-3.5 w-3.5" />
+              </span>
+              <div>
+                <Heading level={3} scale="sm" weight="bold">
+                  Spider Notifications
+                </Heading>
+                <p className="text-[11px] text-text-soft">Lead Watcher Stage Alerts</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsWindowOpen(false)}
+              className="rounded-md p-1 text-text-soft hover:bg-background-light hover:text-text-primary transition-colors"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="max-h-80 overflow-y-auto divide-y divide-border/60">
+            {!inAppEnabled ? (
+              <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                <BellOff className="h-8 w-8 text-text-soft/60" />
+                <p className="text-xs font-medium text-text-secondary">
+                  In-App Spider notifications are currently disabled.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 text-xs"
+                  onClick={() => {
+                    setInAppNotification(true);
+                    toast({ title: 'Enabled Spider In-App Notifications', duration: 2000 });
+                  }}
+                >
+                  Enable Notifications
+                </Button>
+              </div>
+            ) : activeNotifications.length === 0 ? (
+              <p className="px-4 py-8 text-center text-xs text-text-soft">
+                No Spider lead watcher alerts currently active.
+              </p>
+            ) : (
+              activeNotifications.map((n) => (
+                <div
+                  key={n.id}
+                  onClick={() => handleNotificationClick(n)}
+                  className={cn(
+                    'flex gap-3 p-3.5 transition-colors cursor-pointer hover:bg-background-light group',
+                    !n.read ? 'bg-ai-50/40' : 'bg-surface-light'
+                  )}
+                >
+                  <Avatar className="h-8 w-8 shrink-0 mt-0.5">
+                    <AvatarFallback tone="subtle" className="text-xs font-bold">
+                      {n.contactName[0]}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs font-bold text-text-primary truncate group-hover:text-ai-strong transition-colors">
+                        {n.companyName}
+                      </p>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[10px] text-text-soft">{n.timeAgo}</span>
+                        {!n.read && (
+                          <span className="h-2 w-2 rounded-full bg-notify shrink-0 animate-pulse" />
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-xs font-medium text-text-secondary truncate">{n.contactName}</p>
+                    {n.leadStage && (
+                      <div className="flex items-center gap-1">
+                        <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
+                          {n.leadStage}
+                        </span>
+                      </div>
+                    )}
+                    <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
+                      {n.message}
+                    </p>
+                    <div className="pt-1.5 flex items-center justify-between">
+                      <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
+                        Threshold Exceeded
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => handleSendMessage(n, e)}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-ai-600 hover:text-ai-strong transition-colors"
+                      >
+                        <MessageSquare className="h-3 w-3" />
+                        Send Message
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

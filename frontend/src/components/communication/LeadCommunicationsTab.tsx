@@ -16,7 +16,8 @@
  * 403 for non-pilot orgs). Email-from-lead is intentionally omitted (the email
  * endpoint stamps job_id only, no lead_id yet).
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { MessageSquare, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -65,7 +66,17 @@ export function LeadCommunicationsTab({
   const canCompose =
     canAccessComms && ability.can('create', 'Communication') && !!customerId;
 
-  const [body, setBody] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [body, setBody] = useState(() => searchParams.get('draft') || '');
+
+  // Pre-fill composer if a draft message was provided via URL (e.g. from Spider Notification)
+  useEffect(() => {
+    const draft = searchParams.get('draft');
+    if (draft && draft !== body) {
+      setBody(draft);
+    }
+  }, [searchParams]);
+
   // Row → detail drawer (calls only in this slice), gated on comms access.
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [selectedSmsCustomerId, setSelectedSmsCustomerId] = useState<string | null>(null);
@@ -73,7 +84,16 @@ export function LeadCommunicationsTab({
   const handleSend = () => {
     const trimmed = body.trim();
     if (!trimmed || sendSms.isPending || !customerId) return;
-    sendSms.mutate({ customerId, body: trimmed }, { onSuccess: () => setBody('') });
+    sendSms.mutate({ customerId, body: trimmed }, {
+      onSuccess: () => {
+        setBody('');
+        if (searchParams.has('draft')) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('draft');
+          setSearchParams(next, { replace: true });
+        }
+      },
+    });
   };
 
   // Backend returns ascending (oldest first); the roll-up reads newest-first,
@@ -108,94 +128,95 @@ export function LeadCommunicationsTab({
             <div key={i} className="flex gap-3 px-2 py-2.5">
               <Skeleton className="h-4 w-4 shrink-0" />
               <div className="flex-1 space-y-2">
-                <Skeleton className="h-4 w-48" />
-                <Skeleton className="h-3 w-72" />
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-3 w-3/4" />
               </div>
             </div>
           ))}
         </div>
       ) : isError ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <p className="text-sm text-danger">Failed to load communications.</p>
-        </div>
+        <EmptyState
+          title="Could not load communications"
+          description="Please refresh or try again later."
+        />
       ) : timeline.length === 0 ? (
         <EmptyState
-          icon={MessageSquare}
           title="No communication on this lead yet."
-         
+          description={
+            canCompose
+              ? 'Send an SMS below to start the conversation for this lead.'
+              : 'Communications tied to this lead will appear here.'
+          }
         />
       ) : (
-        <ol className="space-y-0.5">
-          {timeline.map((it) => (
+        <ul className="divide-y divide-border/60">
+          {timeline.map((item) => (
             <CommRow
-              key={it.id}
-              item={it}
+              key={`${item.channel}-${item.id}`}
+              item={item}
               formatTimestamp={formatAt}
               currentLeadId={leadId}
               customerId={customerId}
               onSelect={
                 canAccessComms
-                  ? it.channel === 'call'
-                    ? () => setSelectedCallId(it.id)
-                    : it.channel === 'sms' && customerId
-                      ? () => setSelectedSmsCustomerId(customerId ?? null)
-                      : undefined
+                  ? (row) => {
+                      if (row.channel === 'call') setSelectedCallId(row.id);
+                      if (row.channel === 'sms' && customerId) setSelectedSmsCustomerId(customerId);
+                    }
                   : undefined
               }
-              className="rounded-lg px-2 py-2.5 hover:bg-background-light"
             />
           ))}
-        </ol>
+        </ul>
       )}
 
-      {/* Composer — texts sent here are stamped with this lead at origin.
-          Rendered only for comms-enabled orgs + users with create Communication;
-          everyone else gets the clean read-only timeline. */}
+      {/* ── SMS Composer ────────────────────────────────────────────── */}
       {canCompose && (
-        <div className="mt-4 border-t border-border pt-3">
-          <div className="flex items-end gap-2">
-            <Textarea
-              rows={2}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={`Text ${customerName ?? 'customer'}…`}
-              className="min-h-0 flex-1 resize-none"
-            />
+        <div className="mt-4 rounded-lg border border-border bg-surface-light p-3">
+          <label className="mb-1.5 block text-xs font-medium text-text-secondary">
+            Send SMS
+            {leadLabel && (
+              <span className="ml-1 text-text-soft">· Tied to {leadLabel}</span>
+            )}
+          </label>
+          <Textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder={customerName ? `Text ${customerName}...` : 'Type a message...'}
+            className="min-h-[72px] resize-y text-xs"
+            disabled={sendSms.isPending}
+          />
+          {sendSms.error && (
+            <p className="mt-1.5 text-xs text-danger">
+              {extractApiError(sendSms.error, 'Failed to send SMS')}
+            </p>
+          )}
+          <div className="mt-2 flex items-center justify-between">
+            <span className="text-[11px] text-text-soft">
+              {body.length > 0 && `${body.length} character${body.length === 1 ? '' : 's'}`}
+            </span>
             <Button
-              variant="solid" tone="business"
+              size="sm"
               onClick={handleSend}
-              disabled={sendSms.isPending || !body.trim()}
+              disabled={!body.trim() || sendSms.isPending}
             >
+              <MessageSquare className="mr-1.5 h-3.5 w-3.5" />
               Send
             </Button>
           </div>
-          {sendSms.isError && (
-            <p className="mt-1.5 text-sm text-danger">
-              {extractApiError(sendSms.error, 'Failed to send text')}
-            </p>
-          )}
-          <p className="mt-1.5 flex items-center gap-2 text-[11px] text-text-soft">
-            <span className="text-text-secondary/70">⌘↵ to send</span>·
-            <span>
-              Texts sent from this lead are tagged {leadLabel ?? 'to this lead'} automatically.
-            </span>
-          </p>
         </div>
       )}
 
+      {/* Detail drawers (interactive drill-in from timeline rows) */}
       {selectedCallId && (
-        <EntityCallDrawer callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
+        <EntityCallDrawer
+          callId={selectedCallId}
+          onClose={() => setSelectedCallId(null)}
+        />
       )}
       {selectedSmsCustomerId && (
         <EntitySmsDrawer
           customerId={selectedSmsCustomerId}
-          customerName={customerName}
           onClose={() => setSelectedSmsCustomerId(null)}
         />
       )}

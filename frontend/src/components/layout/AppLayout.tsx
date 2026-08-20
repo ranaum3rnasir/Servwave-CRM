@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -8,19 +8,18 @@ import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import Sidebar from './Sidebar';
 import Header from './Header';
 import { ServWaveMark } from '@/components/brand/ServWaveMark';
-import { useSettingsGuard } from '@/stores/settingsGuard.store';
 import { AiCenterModal } from '@/components/ai-center/AiCenterModal';
 import CopilotProvider from '@/components/copilot/CopilotProvider';
 import { OfficeSoftphoneWarmup } from '@/components/communication/phone/OfficeSoftphoneWarmup';
 import { useOrganization } from '@/lib/api/organization';
 import { setOrgFormattingPrefs } from '@/lib/org-format';
+import { SpiderNotificationPopup } from '@/components/notifications/SpiderNotificationPopup';
+import { BrowserAutomationIndicator } from '@/components/notifications/BrowserAutomationIndicator';
 
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const { pathname } = useLocation();
-  const navigate = useNavigate();
-  const requestLeave = useSettingsGuard((s) => s.requestLeave);
 
   // Hydrate org-aware currency/date formatting once the organization loads, so
   // the central formatters (formatCurrency / the formatExact* pair) honor the org's
@@ -68,40 +67,33 @@ export default function AppLayout() {
               onClick={() => setMobileOpen(true)}
               title="Open menu"
               aria-label="Open menu"
-              className="flex h-9 w-9 md:hidden"
+              className="h-9 w-9 md:hidden"
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <Link
-              to="/"
-              aria-label="ServWave dashboard"
-              onClick={(e) => {
-                if (useSettingsGuard.getState().isDirty) {
-                  e.preventDefault();
-                  requestLeave(() => navigate('/'));
-                }
-              }}
-              className="flex items-center gap-2 rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-on-fill/60"
-            >
-              <ServWaveMark className="h-6 w-auto text-on-fill" />
-              <span className="hidden whitespace-nowrap text-lg font-bold tracking-tight text-on-fill sm:inline">
-                Serv<span className="text-on-fill">Wave</span>
+            {/* Wordmark */}
+            <div className="flex min-w-0 items-center gap-2">
+              <ServWaveMark className="h-6 w-6 shrink-0" />
+              <span className="truncate text-base font-bold tracking-tight text-on-fill">
+                ServWave
               </span>
-            </Link>
+            </div>
           </div>
 
-          {/* Header content (search, comms, notifications, account) */}
-          <Header />
+          {/* Header content (search, notifications, user avatar, AI trigger) */}
+          <div className="min-w-0 flex-1">
+            <Header />
+          </div>
         </header>
 
-        {/* Body — collapsible nav panel + content */}
+        {/* Below top bar: sidebar + page content side by side */}
         <div className="flex min-h-0 flex-1">
-          {/* Desktop / Tablet sidebar */}
-          <div className="hidden md:flex">
+          {/* Desktop sidebar */}
+          <div className="hidden shrink-0 md:block">
             <Sidebar collapsed={collapsed} />
           </div>
 
-          {/* Mobile sidebar drawer */}
+          {/* Mobile sidebar (drawer) */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetContent side="left" className="w-sidebar p-0">
               <VisuallyHidden>
@@ -117,6 +109,12 @@ export default function AppLayout() {
           </main>
         </div>
       </div>
+
+      {/* Visual Browser Automation Indicator (Ambient Glowing Viewport Border + Live Status Banner) */}
+      <BrowserAutomationIndicator />
+
+      {/* Spider persistent notification pop-up box in lower section */}
+      <SpiderNotificationPopup />
 
       {/* Global AI Agentic Farm modal — opened from the sidebar */}
       <AiCenterModal />

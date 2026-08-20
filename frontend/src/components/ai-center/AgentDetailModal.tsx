@@ -1,5 +1,18 @@
-import { useState } from 'react';
-import { Play, Check, Bell, Mail, MessageSquare, Clock, Users, Search } from 'lucide-react';
+import { useState, useMemo, useEffect } from 'react';
+import {
+  Play,
+  Check,
+  Bell,
+  Mail,
+  MessageSquare,
+  Clock,
+  Users,
+  Search,
+  ChevronDown,
+  AlertTriangle,
+  CheckCircle2,
+  Layers,
+} from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
@@ -7,13 +20,28 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Heading } from '@/components/ui/heading';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import api from '@/lib/axios';
 import { customerDisplayName } from '@/lib/customer-name';
 import type { AIAgent } from '@/lib/ai-center/agents';
 import { comingSoonPillCls } from './comingSoonPill';
 import { TranscriberModal } from '@/components/transcriber/TranscriberModal';
-import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
+import {
+  useSpiderWatcherStore,
+  type TimeUnit,
+  type WatcherCustomer,
+  type WatcherLead,
+  DEFAULT_WATCHER_CUSTOMERS,
+  isLeadOverdue,
+  resolveLeadStageAndElapsedTime,
+} from '@/stores/spiderWatcherStore';
 
 interface AgentDetailModalProps {
   agent: AIAgent | null;
@@ -21,70 +49,178 @@ interface AgentDetailModalProps {
   onBook: (agent: AIAgent) => void;
 }
 
-const FALLBACK_WATCHER_CONTACTS = [
-  { id: 'c1', first_name: 'John', last_name: 'Smith', company_name: 'Apex Plumbing Co.', email: 'john@apexplumbing.com', inactiveDays: 45 },
-  { id: 'c2', first_name: 'Sarah', last_name: 'Johnson', company_name: 'Metro HVAC Services', email: 'sarah.j@metrohvac.com', inactiveDays: 60 },
-  { id: 'c3', first_name: 'Michael', last_name: 'Brown', company_name: 'Citywide Electric', email: 'mbrown@citywide.com', inactiveDays: 14 },
-  { id: 'c4', first_name: 'Emily', last_name: 'Davis', company_name: 'Highland Builders', email: 'edavis@highland.com', inactiveDays: 90 },
-  { id: 'c5', first_name: 'Robert', last_name: 'Wilson', company_name: 'Summit Property Management', email: 'rwilson@summitpm.com', inactiveDays: 35 },
-  { id: 'c6', first_name: 'Jessica', last_name: 'Taylor', company_name: 'Pinnacle Roofing & Solar', email: 'jtaylor@pinnacle.com', inactiveDays: 120 },
-  { id: 'c7', first_name: 'David', last_name: 'Miller', company_name: 'Valley Maintenance', email: 'dmiller@valleymaintenance.com', inactiveDays: 5 },
-];
+const TIME_UNITS: TimeUnit[] = ['Second', 'Minute', 'Hour', 'Day'];
 
 /** Dedicated UI for Spider (AI Lead Manager) Watcher configuration */
 function SpiderWatcherConfig() {
   const notifications = useSpiderWatcherStore((s) => s.notifications);
   const setNotifications = useSpiderWatcherStore((s) => s.setNotifications);
-  const days = useSpiderWatcherStore((s) => s.days);
-  const setDays = useSpiderWatcherStore((s) => s.setDays);
+  const leadStages = useSpiderWatcherStore((s) => s.leadStages);
+  const updateLeadStage = useSpiderWatcherStore((s) => s.updateLeadStage);
+  const storeCustomers = useSpiderWatcherStore((s) => s.customers);
+  const setCustomers = useSpiderWatcherStore((s) => s.setCustomers);
+  const selectedCustomerIds = useSpiderWatcherStore((s) => s.selectedCustomerIds);
+  const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
+  const toggleCustomerSelection = useSpiderWatcherStore((s) => s.toggleCustomerSelection);
+  const toggleLeadSelection = useSpiderWatcherStore((s) => s.toggleLeadSelection);
+  const selectAllCustomers = useSpiderWatcherStore((s) => s.selectAllCustomers);
+  const deselectAllCustomers = useSpiderWatcherStore((s) => s.deselectAllCustomers);
 
   const [search, setSearch] = useState('');
+  const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
+  const [hoveredCustomerId, setHoveredCustomerId] = useState<string | null>(null);
 
-  // Fetch customers dynamically from API
-  const { data: apiCustomers } = useQuery({
-    queryKey: ['spider-watcher-customers'],
+  // Fetch actual real leads from the Leads API
+  const { data: apiLeads } = useQuery({
+    queryKey: ['spider-watcher-leads-real'],
     queryFn: async () => {
       try {
-        const res = await api.get('/api/customers', { params: { limit: 50 } });
+        const res = await api.get('/api/leads', { params: { limit: 100 } });
+        return res.data?.leads || [];
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 30_000,
+  });
+
+  // Fetch actual customers from API
+  const { data: apiCustomers } = useQuery({
+    queryKey: ['spider-watcher-customers-real'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/api/customers', { params: { limit: 100 } });
         return res.data?.customers || [];
       } catch {
         return [];
       }
     },
-    staleTime: 60_000,
+    staleTime: 30_000,
   });
 
-  const rawList = apiCustomers && apiCustomers.length > 0 ? apiCustomers : FALLBACK_WATCHER_CONTACTS;
+  // Sync store when real API leads arrive
+  useEffect(() => {
+    if (apiLeads && apiLeads.length > 0) {
+      const customerMap = new Map<string, WatcherCustomer>();
 
-  const selectedDaysNum = parseInt(days || '0', 10);
+      for (const rawLead of apiLeads) {
+        const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
+        const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
 
-  const contactsList = rawList.map((c: any, index: number) => {
-    const inactiveDays = c.inactiveDays ?? (5 + ((index * 15) % 110));
-    return {
-      id: c.id,
-      name: customerDisplayName(c, c.company_name || 'Customer'),
-      company: c.company_name,
-      email: c.email,
-      inactiveDays,
-    };
-  });
+        const watcherLead: WatcherLead = {
+          id: rawLead.id,
+          leadNumber: rawLead.lead_number || `LD-${rawLead.id.slice(-4)}`,
+          serviceRequest: rawLead.service_request || 'General Service Request',
+          stageId: stageMetrics.stageId,
+          stageLabel: stageMetrics.stageLabel,
+          elapsedValue: stageMetrics.elapsedValue,
+          elapsedUnit: stageMetrics.elapsedUnit,
+          elapsedSeconds: stageMetrics.elapsedSeconds,
+          createdAt: rawLead.created_at,
+          contactedAt: rawLead.contacted_at,
+          walkthroughScheduledAt: rawLead.walkthrough_scheduled_at,
+          walkthroughCompletedAt: rawLead.walkthrough_completed_at,
+          status: rawLead.status,
+        };
 
-  // Filter contacts by selected inactive days threshold AND search string
-  const filteredContacts = contactsList.filter((c: any) => {
-    const matchesDays = c.inactiveDays >= selectedDaysNum;
-    const matchesSearch = search
-      ? c.name.toLowerCase().includes(search.toLowerCase()) ||
-        (c.company && c.company.toLowerCase().includes(search.toLowerCase()))
-      : true;
-    return matchesDays && matchesSearch;
-  });
+        if (!customerMap.has(custId)) {
+          const cust = rawLead.customer || {};
+          customerMap.set(custId, {
+            id: custId,
+            name: customerDisplayName(cust, cust.company_name || 'Customer'),
+            company: cust.company_name,
+            email: cust.email,
+            phone: cust.phone,
+            leads: [watcherLead],
+          });
+        } else {
+          customerMap.get(custId)!.leads.push(watcherLead);
+        }
+      }
+
+      if (apiCustomers && apiCustomers.length > 0) {
+        for (const cust of apiCustomers) {
+          if (!customerMap.has(cust.id)) {
+            customerMap.set(cust.id, {
+              id: cust.id,
+              name: customerDisplayName(cust, cust.company_name || 'Customer'),
+              company: cust.company_name,
+              email: cust.email,
+              phone: cust.phone,
+              leads: [],
+            });
+          }
+        }
+      }
+
+      setCustomers(Array.from(customerMap.values()));
+    }
+  }, [apiLeads, apiCustomers, setCustomers]);
+
+  // Use store customers (either default or synced with live leads)
+  const customersList: WatcherCustomer[] = useMemo(() => {
+    const base = storeCustomers && storeCustomers.length > 0 ? storeCustomers : DEFAULT_WATCHER_CUSTOMERS;
+    return base.map((c) => ({
+      ...c,
+      leads: c.leads.map((l) => {
+        const m = resolveLeadStageAndElapsedTime(l);
+        return {
+          ...l,
+          stageId: m.stageId,
+          stageLabel: m.stageLabel,
+          elapsedValue: m.elapsedValue,
+          elapsedUnit: m.elapsedUnit,
+          elapsedSeconds: m.elapsedSeconds,
+        };
+      }),
+    }));
+  }, [storeCustomers]);
+
+  // Filter customers and their leads by search string
+  const filteredCustomers = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return customersList;
+
+    return customersList.filter((c) => {
+      const matchCustomer =
+        c.name.toLowerCase().includes(q) ||
+        (c.company && c.company.toLowerCase().includes(q)) ||
+        (c.email && c.email.toLowerCase().includes(q));
+
+      const matchLeads = c.leads.some(
+        (l) =>
+          l.leadNumber.toLowerCase().includes(q) ||
+          l.serviceRequest.toLowerCase().includes(q) ||
+          l.stageLabel.toLowerCase().includes(q)
+      );
+
+      return matchCustomer || matchLeads;
+    });
+  }, [customersList, search]);
+
+  // Compute total active triggered leads across all monitored customers
+  const totalTriggeredCount = useMemo(() => {
+    let count = 0;
+    for (const customer of customersList) {
+      for (const lead of customer.leads) {
+        if (selectedLeadIds.includes(lead.id) && isLeadOverdue(lead, leadStages)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }, [customersList, selectedLeadIds, leadStages]);
+
+  const allSelected =
+    customersList.length > 0 &&
+    customersList.every((c) => selectedCustomerIds.includes(c.id));
 
   return (
     <div className="space-y-4">
-      {/* Top Section — Notifications (Left) & Distance / Days (Right) */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      {/* Top Section — Notifications (Left: 4 cols) & Distance / Lead Stages (Right: 8 cols) */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Left Section — Notifications */}
-        <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card">
+        <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card lg:col-span-4">
           <div className="mb-3 border-b border-border/60 pb-2">
             <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
               <Bell className="h-4 w-4 text-ai-600 shrink-0" />
@@ -92,7 +228,12 @@ function SpiderWatcherConfig() {
             </Heading>
           </div>
           <div className="space-y-2.5 flex-1">
-            <label className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer">
+            <div
+              className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer"
+              onClick={() =>
+                setNotifications((prev) => ({ ...prev, email: !prev.email }))
+              }
+            >
               <Checkbox
                 checked={notifications.email}
                 onCheckedChange={(checked) =>
@@ -103,9 +244,14 @@ function SpiderWatcherConfig() {
                 <Mail className="h-3.5 w-3.5 text-text-soft" />
                 <span>Email</span>
               </div>
-            </label>
+            </div>
 
-            <label className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer">
+            <div
+              className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer"
+              onClick={() =>
+                setNotifications((prev) => ({ ...prev, sms: !prev.sms }))
+              }
+            >
               <Checkbox
                 checked={notifications.sms}
                 onCheckedChange={(checked) =>
@@ -116,9 +262,14 @@ function SpiderWatcherConfig() {
                 <MessageSquare className="h-3.5 w-3.5 text-text-soft" />
                 <span>SMS</span>
               </div>
-            </label>
+            </div>
 
-            <label className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer">
+            <div
+              className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer"
+              onClick={() =>
+                setNotifications((prev) => ({ ...prev, inApp: !prev.inApp }))
+              }
+            >
               <Checkbox
                 checked={notifications.inApp}
                 onCheckedChange={(checked) =>
@@ -129,42 +280,84 @@ function SpiderWatcherConfig() {
                 <Bell className="h-3.5 w-3.5 text-ai-600" />
                 <span>In-app Message</span>
               </div>
-            </label>
+            </div>
           </div>
         </div>
 
-        {/* Right Section — Distance */}
-        <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card">
-          <div className="mb-3 border-b border-border/60 pb-2">
+        {/* Right Section — Distance (Lead Stages & Parallel Time Periods with Expanded Width) */}
+        <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card lg:col-span-8">
+          <div className="mb-3 border-b border-border/60 pb-2 flex items-center justify-between">
             <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-ai-600 shrink-0" />
               Distance
             </Heading>
+            <span className="text-[10px] font-semibold text-ai-600 bg-ai-50 border border-ai-200 px-2 py-0.5 rounded-full uppercase tracking-wider">
+              Lead Stages
+            </span>
           </div>
-          <div className="flex flex-col justify-center flex-1 space-y-2">
-            <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary">
-              Number of Days
-            </label>
-            <div className="relative flex items-center">
-              <input
-                type="number"
-                min="1"
-                value={days}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === '' || /^\d+$/.test(val)) {
-                    setDays(val);
-                  }
-                }}
-                className="w-full rounded-md border border-border bg-surface-light px-3 py-2 pr-14 text-xs font-medium text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
-                placeholder="3"
-              />
-              <span className="pointer-events-none absolute right-3 text-xs font-semibold text-text-secondary">
-                days
-              </span>
+
+          {/* Lead Stages rows — spacious and fully visible without cutting off long names */}
+          <div className="flex flex-col justify-between flex-1 space-y-2">
+            <div className="space-y-2">
+              {leadStages.map((stage) => (
+                <div
+                  key={stage.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2 rounded-lg border border-border/60 bg-background-light/40 hover:bg-background-light transition-colors"
+                >
+                  {/* Stage Label — clearly visible with full stage names without truncation */}
+                  <div className="min-w-0 flex-1 pr-2">
+                    <span
+                      className="block text-xs font-semibold text-text-primary whitespace-normal leading-relaxed"
+                    >
+                      {stage.label}
+                    </span>
+                  </div>
+
+                  {/* Parallel Time Period & Unit Inputs */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <input
+                      type="number"
+                      min="0"
+                      value={stage.duration !== undefined ? stage.duration : 0}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 0) {
+                          updateLeadStage(stage.id, { duration: val });
+                        } else if (e.target.value === '') {
+                          updateLeadStage(stage.id, { duration: 0 });
+                        }
+                      }}
+                      className="w-14 rounded-md border border-border bg-surface-light px-2 py-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
+                      placeholder="0"
+                      aria-label={`Time period for ${stage.label}`}
+                    />
+                    <Select
+                      value={stage.unit}
+                      onValueChange={(val) =>
+                        updateLeadStage(stage.id, { unit: val as TimeUnit })
+                      }
+                    >
+                      <SelectTrigger
+                        className="w-24 h-7 text-xs font-semibold px-2 py-0.5"
+                        aria-label={`Time unit for ${stage.label}`}
+                      >
+                        <SelectValue placeholder={stage.unit} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {TIME_UNITS.map((unit) => (
+                          <SelectItem key={unit} value={unit} className="text-xs">
+                            {unit}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              ))}
             </div>
-            <p className="text-[11px] text-text-soft leading-relaxed">
-              Spider watches for contacts with no messages or activity in the last {days || '3'} days.
+
+            <p className="text-[11px] text-text-soft leading-tight pt-1">
+              Spider watches for leads remaining in each stage longer than the configured period.
             </p>
           </div>
         </div>
@@ -172,14 +365,37 @@ function SpiderWatcherConfig() {
 
       {/* Bottom Section — Contacts for Watchers */}
       <div className="rounded-card border border-border bg-surface-light p-4 shadow-card">
-        <div className="mb-3 border-b border-border/60 pb-2">
-          <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
-            <Users className="h-4 w-4 text-ai-600 shrink-0" />
-            Contacts for Watchers
-          </Heading>
-          <p className="text-[11px] text-text-soft mt-0.5">
-            Contacts with no messages or activity in the last {days || '3'} days ({filteredContacts.length} found)
-          </p>
+        <div className="mb-3 border-b border-border/60 pb-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-ai-600 shrink-0" />
+              Contacts for Watchers
+            </Heading>
+            <p className="text-[11px] text-text-soft mt-0.5">
+              Customers and leads monitored for stage thresholds ({filteredCustomers.length} customers,{' '}
+              <span className={cn(totalTriggeredCount > 0 ? 'text-danger-strong font-semibold' : '')}>
+                {totalTriggeredCount} active trigger{totalTriggeredCount === 1 ? '' : 's'}
+              </span>
+              )
+            </p>
+          </div>
+
+          {/* Quick select / deselect buttons */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={allSelected ? deselectAllCustomers : selectAllCustomers}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  allSelected ? deselectAllCustomers() : selectAllCustomers();
+                }
+              }}
+              className="cursor-pointer text-[11px] font-semibold text-ai-600 hover:text-ai-strong transition-colors"
+            >
+              {allSelected ? 'Deselect all' : 'Select all'}
+            </span>
+          </div>
         </div>
 
         {/* Search bar */}
@@ -189,46 +405,213 @@ function SpiderWatcherConfig() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search contacts..."
+            placeholder="Search customers or leads by name, company, lead # or service..."
             className="w-full rounded-md border border-border bg-surface-light py-1.5 pl-9 pr-3 text-xs text-text-primary outline-none placeholder:text-text-soft focus-visible:ring-2 focus-visible:ring-ai-500"
           />
         </div>
 
-        {/* Contacts list — Clean view without selection controls */}
-        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
-          {filteredContacts.length === 0 ? (
+        {/* Customers & Multi-Lead Dropdown List */}
+        <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+          {filteredCustomers.length === 0 ? (
             <div className="py-6 text-center text-xs text-text-soft">
-              No contacts found with no messages or activity in the last {days || '3'} days.
+              No contacts or leads found matching your search.
             </div>
           ) : (
-            filteredContacts.map((contact: any) => (
-              <div
-                key={contact.id}
-                className="flex items-center gap-3 rounded-lg border border-border/50 bg-surface-light p-2.5 transition-colors hover:bg-background-light"
-              >
-                <Avatar className="h-7 w-7 shrink-0">
-                  <AvatarFallback className="text-[11px] font-bold bg-ai-100 text-ai-700">
-                    {contact.name[0]}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-bold text-text-primary">{contact.name}</p>
-                  {contact.company && contact.company !== contact.name && (
-                    <p className="truncate text-[11px] text-text-soft">{contact.company}</p>
+            filteredCustomers.map((customer) => {
+              const allCustomerLeadIds = customer.leads.map((l) => l.id);
+              const isCustomerChecked = selectedCustomerIds.includes(customer.id);
+              const isDropdownOpen =
+                expandedCustomerId === customer.id || hoveredCustomerId === customer.id;
+
+              const triggeredLeadsForCustomer = customer.leads.filter(
+                (l) => selectedLeadIds.includes(l.id) && isLeadOverdue(l, leadStages)
+              );
+
+              return (
+                <div
+                  key={customer.id}
+                  className="rounded-lg border border-border/70 bg-surface-light transition-all shadow-xs"
+                  onMouseEnter={() => setHoveredCustomerId(customer.id)}
+                  onMouseLeave={() => setHoveredCustomerId(null)}
+                >
+                  {/* Customer Row Header */}
+                  <div
+                    className={cn(
+                      'flex items-center gap-3 p-2.5 transition-colors cursor-pointer rounded-lg hover:bg-background-light',
+                      isDropdownOpen && 'bg-background-light/70 rounded-b-none border-b border-border/40'
+                    )}
+                    onClick={() => {
+                      setExpandedCustomerId(
+                        expandedCustomerId === customer.id ? null : customer.id
+                      );
+                    }}
+                  >
+                    {/* Customer Checkbox for Watcher selection */}
+                    <div
+                      className="shrink-0"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Checkbox
+                        checked={isCustomerChecked}
+                        onCheckedChange={() =>
+                          toggleCustomerSelection(customer.id, allCustomerLeadIds)
+                        }
+                        aria-label={`Select customer ${customer.name} for watcher`}
+                      />
+                    </div>
+
+                    <Avatar className="h-7 w-7 shrink-0">
+                      <AvatarFallback tone="subtle" className="text-[11px] font-bold">
+                        {customer.name[0]}
+                      </AvatarFallback>
+                    </Avatar>
+
+                    {/* Customer info */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-xs font-bold text-text-primary">
+                          {customer.name}
+                        </p>
+                        {customer.company && customer.company !== customer.name && (
+                          <span className="hidden sm:inline-block truncate text-[11px] text-text-soft">
+                            · {customer.company}
+                          </span>
+                        )}
+                      </div>
+                      {customer.email && (
+                        <p className="truncate text-[11px] font-mono text-text-soft">
+                          {customer.email}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Customer stats & dropdown trigger */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Active alert indicator if any lead is triggered */}
+                      {triggeredLeadsForCustomer.length > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-bold text-danger-strong animate-pulse">
+                          <AlertTriangle className="h-3 w-3" />
+                          {triggeredLeadsForCustomer.length} Triggered
+                        </span>
+                      )}
+
+                      {/* Lead count badge */}
+                      <span className="flex items-center gap-1 rounded-full bg-ai-50 border border-ai-200 px-2 py-0.5 text-[10px] font-semibold text-ai-strong">
+                        <Layers className="h-3 w-3" />
+                        {customer.leads.length} lead{customer.leads.length === 1 ? '' : 's'}
+                      </span>
+
+                      {/* Expand / Dropdown toggle icon */}
+                      <div
+                        role="button"
+                        aria-label={`Toggle leads for ${customer.name}`}
+                        className="rounded p-1 text-text-soft hover:text-text-primary hover:bg-background-light"
+                      >
+                        <ChevronDown
+                          className={cn(
+                            'h-4 w-4 text-text-soft transition-transform duration-200',
+                            isDropdownOpen && 'rotate-180 text-ai-600'
+                          )}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Dropdown displaying all leads belonging to this customer */}
+                  {isDropdownOpen && (
+                    <div className="p-2.5 bg-background-light/40 space-y-2 border-t border-border/40">
+                      <div className="flex items-center justify-between px-1">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-text-secondary">
+                          Leads for {customer.name}
+                        </span>
+                        <span className="text-[10px] text-text-soft">
+                          Select individual leads for Spider alerts
+                        </span>
+                      </div>
+
+                      {customer.leads.length === 0 ? (
+                        <p className="text-xs text-text-soft py-2 px-1">
+                          No active leads found for this customer.
+                        </p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {customer.leads.map((lead) => {
+                            const isLeadChecked = selectedLeadIds.includes(lead.id);
+                            const overdue = isLeadOverdue(lead, leadStages);
+                            const stageConfig = leadStages.find(
+                              (s) => s.id === lead.stageId || s.label === lead.stageLabel
+                            );
+
+                            return (
+                              <div
+                                key={lead.id}
+                                className={cn(
+                                  'flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md p-2 border transition-colors',
+                                  isLeadChecked
+                                    ? overdue
+                                      ? 'border-danger-border bg-danger-surface/50 hover:bg-danger-surface/70'
+                                      : 'border-ai-200 bg-ai-50/40 hover:bg-ai-50/60'
+                                    : 'border-border/60 bg-surface-light/60 opacity-65 hover:opacity-100'
+                                )}
+                              >
+                                {/* Left: Lead Checkbox, Number & Service description */}
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <Checkbox
+                                    checked={isLeadChecked}
+                                    onCheckedChange={() =>
+                                      toggleLeadSelection(lead.id, customer.id, allCustomerLeadIds)
+                                    }
+                                    aria-label={`Select lead ${lead.leadNumber} for notifications`}
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono text-xs font-bold text-text-primary">
+                                        {lead.leadNumber}
+                                      </span>
+                                      <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.2 text-[10px] font-bold text-ai-strong">
+                                        {lead.stageLabel}
+                                      </span>
+                                    </div>
+                                    <p className="truncate text-[11px] text-text-secondary font-medium">
+                                      {lead.serviceRequest}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {/* Right: Stage Duration & Notification Trigger Status */}
+                                <div className="flex items-center gap-2 shrink-0 pl-6 sm:pl-0">
+                                  <span className="text-[10px] font-medium text-text-soft">
+                                    {lead.elapsedValue} {lead.elapsedUnit}
+                                    {lead.elapsedValue > 1 ? 's' : ''} in stage
+                                  </span>
+
+                                  {isLeadChecked && overdue ? (
+                                    <span className="flex items-center gap-1 rounded-full bg-danger text-on-fill px-2 py-0.5 text-[10px] font-bold shadow-xs">
+                                      <AlertTriangle className="h-3 w-3" />
+                                      Alert Active ({lead.elapsedValue} {lead.elapsedUnit}s ≥{' '}
+                                      {stageConfig?.duration ?? 0} {stageConfig?.unit || 'Second'}s)
+                                    </span>
+                                  ) : isLeadChecked ? (
+                                    <span className="flex items-center gap-1 rounded-full bg-ai-50 text-ai-strong border border-ai-200 px-2 py-0.5 text-[10px] font-semibold">
+                                      <CheckCircle2 className="h-3 w-3 text-ai-600" />
+                                      Within limit
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full bg-surface-light border border-border px-2 py-0.5 text-[10px] font-medium text-text-soft">
+                                      Not Monitored
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {contact.email && (
-                    <span className="hidden md:inline-block truncate text-[11px] font-mono text-text-soft mr-2">
-                      {contact.email}
-                    </span>
-                  )}
-                  <span className="rounded-full bg-ai-50 border border-ai-200 px-2.5 py-0.5 text-[10px] font-semibold text-ai-700">
-                    No activity for {contact.inactiveDays} days
-                  </span>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
@@ -246,7 +629,10 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
       <Dialog open={!!agent} onOpenChange={onOpenChange}>
         <DialogContent
           overlayClassName="bg-ocean-900/40"
-          className="flex max-h-[88vh] w-[94vw] max-w-2xl flex-col gap-0 overflow-hidden p-0"
+          className={cn(
+            'flex max-h-[88vh] w-[94vw] flex-col gap-0 overflow-hidden p-0',
+            isSpider ? 'max-w-4xl' : 'max-w-2xl'
+          )}
         >
           {agent && (
             <>

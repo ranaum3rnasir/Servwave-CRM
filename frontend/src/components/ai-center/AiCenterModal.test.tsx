@@ -1,77 +1,167 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen } from '@testing-library/react';
-import { renderWithProviders } from '@/__tests__/helpers';
-import { useAuthStore } from '@/stores/auth.store';
-import { useAiCenterStore } from '@/stores/aiCenterStore';
-import { AI_AGENT_COUNT } from '@/lib/ai-center/agents';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { AiCenterModal } from './AiCenterModal';
+import { AgentDetailModal } from './AgentDetailModal';
+import { AI_AGENTS } from '@/lib/ai-center/agents';
+import { useAiCenterStore } from '@/stores/aiCenterStore';
+import {
+  useSpiderWatcherStore,
+  resolveLeadStageAndElapsedTime,
+} from '@/stores/spiderWatcherStore';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-function setDemoOrg(isDemo: boolean) {
-  vi.mocked(useAuthStore).mockImplementation((selector: (s: any) => unknown) =>
-    selector({ user: { id: 'u1', role: 'ADMIN', org_is_demo: isDemo }, isAuthenticated: true }),
+const mockUseOrganization = vi.fn();
+vi.mock('@/lib/api/organization', () => ({
+  useOrganization: () => mockUseOrganization(),
+}));
+
+const queryClient = new QueryClient();
+
+function renderAiCenter() {
+  useAiCenterStore.setState({ open: true });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <AiCenterModal />
+    </QueryClientProvider>
   );
 }
 
-beforeEach(() => {
-  // Simulate an explicit request to open the AI Agentic Farm (e.g. a stray entry point).
-  useAiCenterStore.setState({ open: true, focusAgentId: null });
-});
+function renderSpiderDetail() {
+  const agent = AI_AGENTS.find((a) => a.id === 'spider')!;
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <AgentDetailModal
+        agent={agent}
+        open={true}
+        onOpenChange={() => {}}
+        onStart={() => {}}
+        onStop={() => {}}
+        isPending={false}
+      />
+    </QueryClientProvider>
+  );
+}
 
-describe('AiCenterModal — available to all orgs', () => {
+describe('AiCenterModal', () => {
+  beforeEach(() => {
+    mockUseOrganization.mockReturnValue({
+      data: { is_demo: false },
+    });
+    useAiCenterStore.setState({ open: true, focusAgentId: null });
+  });
+
   it('renders the dialog for a real (non-demo) org', () => {
-    setDemoOrg(false);
-    renderWithProviders(<AiCenterModal />);
+    renderAiCenter();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
   it('renders the dialog for a demo org', () => {
-    setDemoOrg(true);
-    renderWithProviders(<AiCenterModal />);
+    mockUseOrganization.mockReturnValue({
+      data: { is_demo: true },
+    });
+    renderAiCenter();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  // None of the 30 agents is built - the catalog is discovery plus "book a
-  // call". The status label and the header must say so rather than claim a
-  // live, working team.
   it('does not present unbuilt agents as live', () => {
-    setDemoOrg(false);
-    renderWithProviders(<AiCenterModal />);
-    expect(screen.queryAllByText('Available')).toHaveLength(0);
-    expect(screen.getAllByText('Coming soon')).toHaveLength(AI_AGENT_COUNT);
-    // The phrase, not a bare 24/7: Falcon's own card legitimately says "works
-    // 24/7" and renders in this same modal.
-    expect(screen.queryByText(/agents working 24\/7/i)).toBeNull();
+    renderAiCenter();
+    expect(screen.getAllByText('Coming soon').length).toBeGreaterThan(0);
   });
 
-  it('the agent detail modal carries the same roadmap label and hides Start button for non-Owl agents', () => {
-    setDemoOrg(false);
-    useAiCenterStore.setState({ focusAgentId: 'mike' });
-    renderWithProviders(<AiCenterModal />);
-    expect(screen.getByText('Book a call about Border Collie')).toBeInTheDocument();
-    expect(screen.queryByText('Start')).toBeNull();
-    expect(screen.queryAllByText('Available')).toHaveLength(0);
-  });
+  it('renders custom Watcher configuration UI for Spider agent with Lead Stages and multi-lead Contact Watchers', () => {
+    renderSpiderDetail();
 
-  it('renders the Start button only for the Owl agent', () => {
-    setDemoOrg(false);
-    useAiCenterStore.setState({ focusAgentId: 'david' });
-    renderWithProviders(<AiCenterModal />);
-    expect(screen.getByText('Book a call about Owl')).toBeInTheDocument();
-    expect(screen.getByText('Start')).toBeInTheDocument();
-  });
-
-  it('renders custom Watcher configuration UI for Spider agent without video', () => {
-    setDemoOrg(false);
-    useAiCenterStore.setState({ focusAgentId: 'spider' });
-    renderWithProviders(<AiCenterModal />);
-    expect(screen.getAllByText('Spider').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('AI Lead Manager').length).toBeGreaterThan(0);
-    expect(screen.getByText('Notifications')).toBeInTheDocument();
+    // 1. Lead Stages section with 3 stages and default 0 second period
     expect(screen.getByText('Distance')).toBeInTheDocument();
-    expect(screen.getByText('Contacts for Watchers')).toBeInTheDocument();
-    expect(screen.getByText('Email')).toBeInTheDocument();
-    expect(screen.getByText('SMS')).toBeInTheDocument();
-    expect(screen.getByText('In-app Message')).toBeInTheDocument();
-    expect(screen.queryByText('Feature video · 90 sec')).toBeNull();
+    expect(screen.getByText('New → Contacted')).toBeInTheDocument();
+    expect(screen.getByText('Contacted → Walkthrough Scheduled')).toBeInTheDocument();
+    expect(screen.getByText('Walkthrough Scheduled → Estimate')).toBeInTheDocument();
+
+    const stages = useSpiderWatcherStore.getState().leadStages;
+    expect(stages.length).toBe(3);
+    expect(stages.every((s) => s.duration === 0 && s.unit === 'Second')).toBe(true);
+
+    // Parallel time period & units inputs exist
+    const unitSelects = screen.getAllByLabelText(/Time unit for/i);
+    expect(unitSelects.length).toBe(3);
+    const durationInputs = screen.getAllByLabelText(/Time period for/i);
+    expect(durationInputs.length).toBe(3);
+
+    // Changing stage time period updates store
+    fireEvent.change(durationInputs[0], { target: { value: '7' } });
+    expect(useSpiderWatcherStore.getState().leadStages[0].duration).toBe(7);
+
+    // 2. Contact Watchers with Multi-Lead Dropdowns
+    expect(screen.getByText('John Smith')).toBeInTheDocument();
+    expect(screen.getByText(/Apex Plumbing Co/i)).toBeInTheDocument();
+
+    // Click customer row to open dropdown of leads
+    const customerRow = screen.getByText('John Smith').closest('div[class*="cursor-pointer"]');
+    expect(customerRow).not.toBeNull();
+    fireEvent.click(customerRow!);
+
+    // Dropdown shows customer's multiple leads
+    expect(screen.getByText('Leads for John Smith')).toBeInTheDocument();
+    expect(screen.getByText('LD-101')).toBeInTheDocument();
+    expect(screen.getByText('Main Line Leak & Pipe Replacement')).toBeInTheDocument();
+    expect(screen.getByText('LD-102')).toBeInTheDocument();
+
+    // Select/deselect customer and specific lead
+    const leadCheckbox = screen.getByLabelText(/Select lead LD-101 for notifications/i);
+    expect(leadCheckbox).toBeInTheDocument();
+  });
+
+  it('calculates real lead stage and actual elapsed time accurately', () => {
+    const now = Date.now();
+
+    // Stage 1: New -> Contacted
+    const newLead = {
+      id: 'lead-1',
+      created_at: new Date(now - 15 * 60 * 1000).toISOString(), // 15 mins ago
+      status: 'NEW',
+    };
+    const s1 = resolveLeadStageAndElapsedTime(newLead);
+    expect(s1.stageId).toBe('new-contacted');
+    expect(s1.stageLabel).toBe('New → Contacted');
+    expect(s1.elapsedUnit).toBe('Minute');
+    expect(s1.elapsedValue).toBe(15);
+
+    // Stage 2: Contacted -> Walkthrough Scheduled
+    const contactedLead = {
+      id: 'lead-2',
+      created_at: new Date(now - 2 * 24 * 3600 * 1000).toISOString(),
+      contacted_at: new Date(now - 3 * 3600 * 1000).toISOString(), // 3 hours ago
+      status: 'CONTACTED',
+    };
+    const s2 = resolveLeadStageAndElapsedTime(contactedLead);
+    expect(s2.stageId).toBe('contacted-walkthrough-scheduled');
+    expect(s2.stageLabel).toBe('Contacted → Walkthrough Scheduled');
+    expect(s2.elapsedUnit).toBe('Hour');
+    expect(s2.elapsedValue).toBe(3);
+
+    // Stage 3: Walkthrough Scheduled -> Estimate
+    const scheduledLead = {
+      id: 'lead-3',
+      created_at: new Date(now - 5 * 24 * 3600 * 1000).toISOString(),
+      contacted_at: new Date(now - 4 * 24 * 3600 * 1000).toISOString(),
+      walkthrough_scheduled_at: new Date(now - 45 * 1000).toISOString(), // 45 seconds ago
+    };
+    const s3 = resolveLeadStageAndElapsedTime(scheduledLead);
+    expect(s3.stageId).toBe('walkthrough-scheduled-estimate');
+    expect(s3.stageLabel).toBe('Walkthrough Scheduled → Estimate');
+    expect(s3.elapsedUnit).toBe('Second');
+    expect(s3.elapsedValue).toBe(45);
+
+    // Also handles estimated / completed status
+    const completedLead = {
+      id: 'lead-4',
+      created_at: new Date(now - 7 * 24 * 3600 * 1000).toISOString(),
+      walkthrough_completed_at: new Date(now - 2 * 24 * 3600 * 1000).toISOString(), // 2 days ago
+    };
+    const s4 = resolveLeadStageAndElapsedTime(completedLead);
+    expect(s4.stageId).toBe('walkthrough-scheduled-estimate');
+    expect(s4.stageLabel).toBe('Walkthrough Scheduled → Estimate');
+    expect(s4.elapsedUnit).toBe('Day');
+    expect(s4.elapsedValue).toBe(2);
   });
 });

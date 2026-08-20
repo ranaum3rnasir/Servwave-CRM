@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { Bell, Sparkles, MessageSquare, BellOff } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -7,109 +6,59 @@ import { Heading } from '@/components/ui/heading';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
-import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
+import { useSpiderWatcherStore, type InAppNotification } from '@/stores/spiderWatcherStore';
 
-export interface InAppNotification {
-  id: string;
-  contactName: string;
-  companyName: string;
-  inactiveDays: number;
-  message: string;
-  timeAgo: string;
-  read: boolean;
-  contactId: string;
-}
-
-const DEFAULT_IN_APP_NOTIFICATIONS: InAppNotification[] = [
-  {
-    id: 'inapp-1',
-    contactName: 'John Smith',
-    companyName: 'Apex Plumbing Co.',
-    inactiveDays: 45,
-    message: 'No messages or activity for 45 days. Spider Agent detected re-engagement opportunity.',
-    timeAgo: '10m ago',
-    read: false,
-    contactId: 'c1',
-  },
-  {
-    id: 'inapp-2',
-    contactName: 'Sarah Johnson',
-    companyName: 'Metro HVAC Services',
-    inactiveDays: 60,
-    message: 'No messages or activity for 60 days. Follow-up SMS pending.',
-    timeAgo: '45m ago',
-    read: false,
-    contactId: 'c2',
-  },
-  {
-    id: 'inapp-3',
-    contactName: 'Emily Davis',
-    companyName: 'Highland Builders',
-    inactiveDays: 90,
-    message: 'No messages or activity for 90 days. Re-engagement offer ready.',
-    timeAgo: '2h ago',
-    read: false,
-    contactId: 'c4',
-  },
-  {
-    id: 'inapp-4',
-    contactName: 'Robert Wilson',
-    companyName: 'Summit Property Management',
-    inactiveDays: 35,
-    message: 'No messages or activity for 35 days.',
-    timeAgo: '5h ago',
-    read: true,
-    contactId: 'c5',
-  },
-];
+export type { InAppNotification };
 
 /** Dedicated In-App Notification Bell component for Spider Lead Watcher Messages */
 export function InAppNotificationBell() {
-  const [open, setOpen] = useState(false);
   const inAppEnabled = useSpiderWatcherStore((s) => s.notifications.inApp);
-  const configuredDays = useSpiderWatcherStore((s) => s.days);
   const setInAppNotification = useSpiderWatcherStore((s) => s.setInAppNotification);
+  const getComputedNotifications = useSpiderWatcherStore((s) => s.getComputedNotifications);
+  const selectNotification = useSpiderWatcherStore((s) => s.selectNotification);
+  const isWindowOpen = useSpiderWatcherStore((s) => s.isWindowOpen);
+  const setIsWindowOpen = useSpiderWatcherStore((s) => s.setIsWindowOpen);
 
-  const [notifications, setNotifications] = useState<InAppNotification[]>(
-    DEFAULT_IN_APP_NOTIFICATIONS
-  );
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const selectedDaysNum = parseInt(configuredDays || '3', 10);
-
-  // Filter notifications based on whether inApp is enabled and matching inactiveDays
-  const activeNotifications = inAppEnabled
-    ? notifications.filter((n) => n.inactiveDays >= selectedDaysNum)
-    : [];
+  const activeNotifications = inAppEnabled ? getComputedNotifications() : [];
 
   const unreadCount = inAppEnabled ? activeNotifications.filter((n) => !n.read).length : 0;
 
-  const markAllRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-    toast({ title: 'Marked all in-app notifications as read', duration: 2000 });
-  };
-
-  const markRead = (id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+  const handleNotificationClick = (notif: InAppNotification) => {
+    selectNotification(notif.id);
+    setIsWindowOpen(false);
+    toast({
+      title: `🕷️ Spider Lead Active: ${notif.contactName}`,
+      description: `Opening Lead Communication tab for ${notif.contactName} (${notif.leadStage || 'Lead Alert'})`,
+      duration: 3000,
+    });
+    const draftMsg = encodeURIComponent(
+      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
     );
+    const targetLeadId = notif.leadId || notif.contactId;
+    navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
   };
 
   const handleSendMessage = (notif: InAppNotification, e: React.MouseEvent) => {
     e.stopPropagation();
-    markRead(notif.id);
+    selectNotification(notif.id);
     toast({
-      title: 'Opening Message Composer',
-      description: `Sending automated message to ${notif.contactName} (${notif.companyName})`,
+      title: 'Opening Lead Communication Composer',
+      description: `Drafting message for ${notif.contactName} (${notif.companyName})`,
       duration: 3000,
     });
-    setOpen(false);
-    navigate(`/communication/text?contact=${notif.contactId}`);
+    setIsWindowOpen(false);
+    const draftMsg = encodeURIComponent(
+      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
+    );
+    const targetLeadId = notif.leadId || notif.contactId;
+    navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={isWindowOpen} onOpenChange={setIsWindowOpen}>
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
@@ -130,29 +79,20 @@ export function InAppNotificationBell() {
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-88 p-0 sm:w-96 shadow-lg border border-border">
+      <PopoverContent align="end" className="w-88 p-0 sm:w-96 shadow-card border border-border">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border bg-surface-light px-4 py-3">
           <div className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ai-100 text-ai-700">
+            <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ai-50 text-ai-600">
               <Sparkles className="h-3.5 w-3.5" />
             </span>
             <div>
-              <Heading level={3} scale="sm" weight="bold" className="text-text-primary">
+              <Heading level={3} scale="sm" weight="bold">
                 In-App Notifications
               </Heading>
               <p className="text-[11px] text-text-soft">Spider Lead Watcher Alerts</p>
             </div>
           </div>
-          {inAppEnabled && unreadCount > 0 && (
-            <button
-              type="button"
-              onClick={markAllRead}
-              className="text-xs font-semibold text-ai-600 hover:text-ai-700"
-            >
-              Mark all read
-            </button>
-          )}
         </div>
 
         {/* Body */}
@@ -177,20 +117,20 @@ export function InAppNotificationBell() {
             </div>
           ) : activeNotifications.length === 0 ? (
             <p className="px-4 py-8 text-center text-xs text-text-soft">
-              No in-app notifications for contacts inactive in the last {configuredDays} days.
+              No in-app notifications for contacts inactive past configured thresholds.
             </p>
           ) : (
             activeNotifications.map((n) => (
               <div
                 key={n.id}
-                onClick={() => markRead(n.id)}
+                onClick={() => handleNotificationClick(n)}
                 className={cn(
                   'flex gap-3 p-3.5 transition-colors cursor-pointer hover:bg-background-light',
                   !n.read ? 'bg-ai-50/40' : 'bg-surface-light'
                 )}
               >
                 <Avatar className="h-8 w-8 shrink-0 mt-0.5">
-                  <AvatarFallback className="bg-ai-100 text-ai-700 text-xs font-bold">
+                  <AvatarFallback tone="subtle" className="text-xs font-bold">
                     {n.contactName[0]}
                   </AvatarFallback>
                 </Avatar>
@@ -202,21 +142,27 @@ export function InAppNotificationBell() {
                     <div className="flex items-center gap-1.5 shrink-0">
                       <span className="text-[10px] text-text-soft">{n.timeAgo}</span>
                       {!n.read && (
-                        <span className="h-2 w-2 rounded-full bg-notify shrink-0" />
+                        <span className="h-2 w-2 rounded-full bg-notify shrink-0 animate-pulse" />
                       )}
                     </div>
                   </div>
+                  <p className="text-xs font-medium text-text-secondary truncate">{n.contactName}</p>
+                  {n.leadStage && (
+                    <span className="inline-block rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
+                      {n.leadStage}
+                    </span>
+                  )}
                   <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
                     {n.message}
                   </p>
                   <div className="pt-1.5 flex items-center justify-between">
-                    <span className="rounded-full bg-ai-100/80 px-2 py-0.5 text-[10px] font-semibold text-ai-700">
-                      No activity for {n.inactiveDays} days
+                    <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
+                      Stage Alert
                     </span>
                     <button
                       type="button"
                       onClick={(e) => handleSendMessage(n, e)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-ai-600 hover:text-ai-700"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-ai-600 hover:text-ai-strong"
                     >
                       <MessageSquare className="h-3 w-3" />
                       Send Message

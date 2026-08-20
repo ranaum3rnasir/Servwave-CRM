@@ -714,15 +714,17 @@ export default function LeadDetailPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  // Deep-link from the Leads list schedule action: /leads/:id?tab=walkthrough.
-  // Whitelisted to 'walkthrough' so an arbitrary ?tab= can't select an invalid tab.
+  // Deep-link from Spider Notification, Leads list or other entry points:
+  // Whitelisted to valid tabs so an arbitrary ?tab= can't select an invalid tab.
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab !== 'walkthrough') return;
-    setActiveTab('walkthrough');
-    const next = new URLSearchParams(searchParams);
-    next.delete('tab');
-    setSearchParams(next, { replace: true });
+    if (!tab) return;
+    if (tab === 'walkthrough' || tab === 'communication' || tab === 'estimates' || tab === 'tasks' || tab === 'overview') {
+      setActiveTab(tab);
+      const next = new URLSearchParams(searchParams);
+      next.delete('tab');
+      setSearchParams(next, { replace: true });
+    }
   }, [searchParams, setSearchParams]);
   const { data: leadAttachments } = useQuery({
     queryKey: ['attachments', 'LEAD', id],
