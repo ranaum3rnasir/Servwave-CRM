@@ -1,4 +1,4 @@
-import { Bell, Sparkles, MessageSquare, BellOff } from 'lucide-react';
+import { Bell, Sparkles, BellOff } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -6,7 +6,11 @@ import { Heading } from '@/components/ui/heading';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
-import { useSpiderWatcherStore, type InAppNotification } from '@/stores/spiderWatcherStore';
+import {
+  useSpiderWatcherStore,
+  formatCurrentStageName,
+  type InAppNotification,
+} from '@/stores/spiderWatcherStore';
 
 export type { InAppNotification };
 
@@ -29,29 +33,14 @@ export function InAppNotificationBell() {
   const handleNotificationClick = (notif: InAppNotification) => {
     selectNotification(notif.id);
     setIsWindowOpen(false);
+    const stageName = formatCurrentStageName(notif.leadStage);
     toast({
       title: `🕷️ Spider Lead Active: ${notif.contactName}`,
-      description: `Opening Lead Communication tab for ${notif.contactName} (${notif.leadStage || 'Lead Alert'})`,
+      description: `Opening Lead Communication tab for ${notif.contactName} (${stageName})`,
       duration: 3000,
     });
     const draftMsg = encodeURIComponent(
-      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
-    );
-    const targetLeadId = notif.leadId || notif.contactId;
-    navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
-  };
-
-  const handleSendMessage = (notif: InAppNotification, e: React.MouseEvent) => {
-    e.stopPropagation();
-    selectNotification(notif.id);
-    toast({
-      title: 'Opening Lead Communication Composer',
-      description: `Drafting message for ${notif.contactName} (${notif.companyName})`,
-      duration: 3000,
-    });
-    setIsWindowOpen(false);
-    const draftMsg = encodeURIComponent(
-      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${notif.leadStage || 'Active'}).`
+      `Hello ${notif.contactName}, following up regarding your ${notif.serviceRequest || 'service request'} (Stage: ${stageName}).`
     );
     const targetLeadId = notif.leadId || notif.contactId;
     navigate(`/leads/${targetLeadId}?tab=communication&draft=${draftMsg}`);
@@ -149,7 +138,7 @@ export function InAppNotificationBell() {
                   <p className="text-xs font-medium text-text-secondary truncate">{n.contactName}</p>
                   {n.leadStage && (
                     <span className="inline-block rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
-                      {n.leadStage}
+                      {formatCurrentStageName(n.leadStage)}
                     </span>
                   )}
                   <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
@@ -159,14 +148,6 @@ export function InAppNotificationBell() {
                     <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
                       Stage Alert
                     </span>
-                    <button
-                      type="button"
-                      onClick={(e) => handleSendMessage(n, e)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-ai-600 hover:text-ai-strong"
-                    >
-                      <MessageSquare className="h-3 w-3" />
-                      Send Message
-                    </button>
                   </div>
                 </div>
               </div>

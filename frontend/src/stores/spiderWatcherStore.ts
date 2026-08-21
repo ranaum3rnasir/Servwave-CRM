@@ -74,6 +74,19 @@ export function timeUnitToSeconds(duration: number, unit: TimeUnit): number {
 }
 
 /**
+ * Format stage label to only display the current stage name (e.g. 'New', 'Contacted', 'Walkthrough')
+ */
+export function formatCurrentStageName(stageLabelOrId?: string): string {
+  if (!stageLabelOrId) return 'New';
+  const lower = stageLabelOrId.toLowerCase();
+  if (lower.startsWith('new') || lower.includes('new →')) return 'New';
+  if (lower.startsWith('contacted') || lower.includes('contacted →')) return 'Contacted';
+  if (lower.startsWith('walkthrough') || lower.includes('walkthrough')) return 'Walkthrough';
+  if (lower.startsWith('estimate') || lower.includes('estimate')) return 'Estimate';
+  return stageLabelOrId;
+}
+
+/**
  * Calculates the current stage and actual time spent in that stage from real lead timestamps
  */
 export function resolveLeadStageAndElapsedTime(lead: {
@@ -645,17 +658,19 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
               ? lead.elapsedSeconds
               : timeUnitToSeconds(lead.elapsedValue, lead.elapsedUnit);
 
+          const currentStage = formatCurrentStageName(lead.stageLabel || lead.stageId || config?.fromStage);
+
           result.push({
             id: notifId,
             contactName: customer.name,
             companyName: customer.company || customer.name,
             inactiveDays: Math.max(1, Math.round(leadSecs / 86400)),
-            message: `Lead ${lead.leadNumber} (${lead.serviceRequest}) in stage "${lead.stageLabel}" for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${config?.duration ?? 0} ${config?.unit || 'Second'}${config && config.duration > 1 ? 's' : ''}).`,
+            message: `Lead ${lead.leadNumber} (${lead.serviceRequest}) in stage "${currentStage}" for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${config?.duration ?? 0} ${config?.unit || 'Second'}${config && config.duration > 1 ? 's' : ''}).`,
             timeAgo: `${lead.elapsedValue} ${lead.elapsedUnit.toLowerCase()}${lead.elapsedValue > 1 ? 's' : ''} in stage`,
             read: false,
             contactId: customer.id,
             leadId: lead.id,
-            leadStage: lead.stageLabel,
+            leadStage: currentStage,
             serviceRequest: lead.serviceRequest,
             isTriggered: true,
           });

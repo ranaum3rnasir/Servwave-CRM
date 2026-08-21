@@ -68,7 +68,6 @@ function SpiderWatcherConfig() {
 
   const [search, setSearch] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
-  const [hoveredCustomerId, setHoveredCustomerId] = useState<string | null>(null);
 
   // Fetch actual real leads from the Leads API
   const { data: apiLeads } = useQuery({
@@ -420,8 +419,7 @@ function SpiderWatcherConfig() {
             filteredCustomers.map((customer) => {
               const allCustomerLeadIds = customer.leads.map((l) => l.id);
               const isCustomerChecked = selectedCustomerIds.includes(customer.id);
-              const isDropdownOpen =
-                expandedCustomerId === customer.id || hoveredCustomerId === customer.id;
+              const isDropdownOpen = expandedCustomerId === customer.id;
 
               const triggeredLeadsForCustomer = customer.leads.filter(
                 (l) => selectedLeadIds.includes(l.id) && isLeadOverdue(l, leadStages)
@@ -431,8 +429,6 @@ function SpiderWatcherConfig() {
                 <div
                   key={customer.id}
                   className="rounded-lg border border-border/70 bg-surface-light transition-all shadow-xs"
-                  onMouseEnter={() => setHoveredCustomerId(customer.id)}
-                  onMouseLeave={() => setHoveredCustomerId(null)}
                 >
                   {/* Customer Row Header */}
                   <div
@@ -501,11 +497,18 @@ function SpiderWatcherConfig() {
                         {customer.leads.length} lead{customer.leads.length === 1 ? '' : 's'}
                       </span>
 
-                      {/* Expand / Dropdown toggle icon */}
-                      <div
-                        role="button"
+                      {/* Expand / Dropdown toggle button (Click-only) */}
+                      <button
+                        type="button"
                         aria-label={`Toggle leads for ${customer.name}`}
-                        className="rounded p-1 text-text-soft hover:text-text-primary hover:bg-background-light"
+                        aria-expanded={isDropdownOpen}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedCustomerId(
+                            expandedCustomerId === customer.id ? null : customer.id
+                          );
+                        }}
+                        className="rounded p-1 text-text-soft hover:text-text-primary hover:bg-background-light cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
                       >
                         <ChevronDown
                           className={cn(
@@ -513,7 +516,7 @@ function SpiderWatcherConfig() {
                             isDropdownOpen && 'rotate-180 text-ai-600'
                           )}
                         />
-                      </div>
+                      </button>
                     </div>
                   </div>
 

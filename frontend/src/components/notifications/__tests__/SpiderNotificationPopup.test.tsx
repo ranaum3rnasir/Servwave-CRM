@@ -31,8 +31,15 @@ describe('SpiderNotificationPopup', () => {
     expect(screen.getByText('Spider Notifications')).toBeInTheDocument();
     expect(screen.getAllByText('Apex Plumbing Co.').length).toBeGreaterThan(0);
 
-    // "Mark all read" button has been removed
+    // "Mark all read" and "Send Message" buttons are removed
     expect(screen.queryByText('Mark all read')).toBeNull();
+    expect(screen.queryByText('Send Message')).toBeNull();
+
+    // Displays only current stage name (e.g. 'New', 'Contacted', 'Walkthrough')
+    expect(screen.getAllByText('New').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Contacted').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Walkthrough').length).toBeGreaterThan(0);
+    expect(screen.queryByText('New → Contacted')).toBeNull();
   });
 
   it('clicking a notification marks it as read, removes it from the notification list, and activates red border state', () => {

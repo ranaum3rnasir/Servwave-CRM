@@ -95,10 +95,16 @@ describe('AiCenterModal', () => {
     expect(screen.getByText('John Smith')).toBeInTheDocument();
     expect(screen.getByText(/Apex Plumbing Co/i)).toBeInTheDocument();
 
-    // Click customer row to open dropdown of leads
-    const customerRow = screen.getByText('John Smith').closest('div[class*="cursor-pointer"]');
-    expect(customerRow).not.toBeNull();
-    fireEvent.click(customerRow!);
+    // Dropdown is NOT open on hover
+    const customerCard = screen.getByText('John Smith').closest('div[class*="rounded-lg border"]');
+    expect(customerCard).not.toBeNull();
+    fireEvent.mouseEnter(customerCard!);
+    expect(screen.queryByText('Leads for John Smith')).toBeNull();
+
+    // Click dropdown button to open dropdown of leads
+    const dropdownBtn = screen.getByLabelText(/Toggle leads for John Smith/i);
+    expect(dropdownBtn).toBeInTheDocument();
+    fireEvent.click(dropdownBtn);
 
     // Dropdown shows customer's multiple leads
     expect(screen.getByText('Leads for John Smith')).toBeInTheDocument();
