@@ -15,8 +15,10 @@ import { useOrganization } from '@/lib/api/organization';
 import { setOrgFormattingPrefs } from '@/lib/org-format';
 import { SpiderNotificationPopup } from '@/components/notifications/SpiderNotificationPopup';
 import { BrowserAutomationIndicator } from '@/components/notifications/BrowserAutomationIndicator';
+import { useSyncSpiderWatcherLive } from '@/stores/spiderWatcherStore';
 
 export default function AppLayout() {
+  useSyncSpiderWatcherLive();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const { pathname } = useLocation();

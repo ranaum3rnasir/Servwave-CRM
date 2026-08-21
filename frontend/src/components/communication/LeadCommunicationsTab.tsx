@@ -31,6 +31,7 @@ import { EntityCallDrawer } from '@/components/communication/shared/EntityCallDr
 import { EntitySmsDrawer } from '@/components/communication/shared/EntitySmsDrawer';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useLeadCommunications, useSendLeadSms } from '@/lib/api/jobCommunications';
+import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
 
 function formatAt(at: string) {
   return new Date(at).toLocaleString('en-US', {
@@ -87,6 +88,8 @@ export function LeadCommunicationsTab({
     sendSms.mutate({ customerId, body: trimmed }, {
       onSuccess: () => {
         setBody('');
+        // Mark active Spider Lead notifications as read upon successfully sending message
+        useSpiderWatcherStore.getState().markLeadNotificationsRead(leadId);
         if (searchParams.has('draft')) {
           const next = new URLSearchParams(searchParams);
           next.delete('draft');

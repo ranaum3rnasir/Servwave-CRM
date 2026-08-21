@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Layers,
+  Save,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
@@ -27,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/lib/utils';
 import api from '@/lib/axios';
 import { customerDisplayName } from '@/lib/customer-name';
@@ -41,6 +43,8 @@ import {
   DEFAULT_WATCHER_CUSTOMERS,
   isLeadOverdue,
   resolveLeadStageAndElapsedTime,
+  formatCurrentStageName,
+  buildWatcherCustomersFromLive,
 } from '@/stores/spiderWatcherStore';
 
 interface AgentDetailModalProps {
@@ -66,8 +70,20 @@ function SpiderWatcherConfig() {
   const selectAllCustomers = useSpiderWatcherStore((s) => s.selectAllCustomers);
   const deselectAllCustomers = useSpiderWatcherStore((s) => s.deselectAllCustomers);
 
+  const { toast } = useToast();
   const [search, setSearch] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
+  const [isSaved, setIsSaved] = useState(false);
+
+  const handleSaveThresholds = () => {
+    setIsSaved(true);
+    toast({
+      title: 'Threshold Settings Saved',
+      description: 'Stage distance thresholds for Spider Agent have been successfully stored.',
+      duration: 3000,
+    });
+    setTimeout(() => setIsSaved(false), 2000);
+  };
 
   // Fetch actual real leads from the Leads API
   const { data: apiLeads } = useQuery({
@@ -99,69 +115,17 @@ function SpiderWatcherConfig() {
 
   // Sync store when real API leads arrive
   useEffect(() => {
-    if (apiLeads && apiLeads.length > 0) {
-      const customerMap = new Map<string, WatcherCustomer>();
-
-      for (const rawLead of apiLeads) {
-        const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
-        const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
-
-        const watcherLead: WatcherLead = {
-          id: rawLead.id,
-          leadNumber: rawLead.lead_number || `LD-${rawLead.id.slice(-4)}`,
-          serviceRequest: rawLead.service_request || 'General Service Request',
-          stageId: stageMetrics.stageId,
-          stageLabel: stageMetrics.stageLabel,
-          elapsedValue: stageMetrics.elapsedValue,
-          elapsedUnit: stageMetrics.elapsedUnit,
-          elapsedSeconds: stageMetrics.elapsedSeconds,
-          createdAt: rawLead.created_at,
-          contactedAt: rawLead.contacted_at,
-          walkthroughScheduledAt: rawLead.walkthrough_scheduled_at,
-          walkthroughCompletedAt: rawLead.walkthrough_completed_at,
-          status: rawLead.status,
-        };
-
-        if (!customerMap.has(custId)) {
-          const cust = rawLead.customer || {};
-          customerMap.set(custId, {
-            id: custId,
-            name: customerDisplayName(cust, cust.company_name || 'Customer'),
-            company: cust.company_name,
-            email: cust.email,
-            phone: cust.phone,
-            leads: [watcherLead],
-          });
-        } else {
-          customerMap.get(custId)!.leads.push(watcherLead);
-        }
-      }
-
-      if (apiCustomers && apiCustomers.length > 0) {
-        for (const cust of apiCustomers) {
-          if (!customerMap.has(cust.id)) {
-            customerMap.set(cust.id, {
-              id: cust.id,
-              name: customerDisplayName(cust, cust.company_name || 'Customer'),
-              company: cust.company_name,
-              email: cust.email,
-              phone: cust.phone,
-              leads: [],
-            });
-          }
-        }
-      }
-
-      setCustomers(Array.from(customerMap.values()));
+    if (apiLeads || apiCustomers) {
+      const live = buildWatcherCustomersFromLive(apiLeads || [], apiCustomers || []);
+      setCustomers(live);
     }
   }, [apiLeads, apiCustomers, setCustomers]);
 
-  // Use store customers (either default or synced with live leads)
+  // Use live store customers
   const customersList: WatcherCustomer[] = useMemo(() => {
-    const base = storeCustomers && storeCustomers.length > 0 ? storeCustomers : DEFAULT_WATCHER_CUSTOMERS;
-    return base.map((c) => ({
+    return (storeCustomers || []).map((c) => ({
       ...c,
-      leads: c.leads.map((l) => {
+      leads: (c.leads || []).map((l) => {
         const m = resolveLeadStageAndElapsedTime(l);
         return {
           ...l,
@@ -355,9 +319,35 @@ function SpiderWatcherConfig() {
               ))}
             </div>
 
-            <p className="text-[11px] text-text-soft leading-tight pt-1">
-              Spider watches for leads remaining in each stage longer than the configured period.
-            </p>
+            <div className="pt-2 border-t border-border/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <p className="text-[11px] text-text-soft leading-tight">
+                Spider watches for leads remaining in each stage longer than the configured period.
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleSaveThresholds}
+                className={cn(
+                  'h-7 px-3 text-xs font-semibold transition-all shrink-0 self-end sm:self-auto shadow-xs',
+                  isSaved
+                    ? 'bg-success-600 hover:bg-success-700 text-on-fill'
+                    : 'bg-ai-600 hover:bg-ai-700 text-on-fill'
+                )}
+                aria-label="Save configured threshold settings"
+              >
+                {isSaved ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 mr-1" />
+                    Saved
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-3.5 w-3.5 mr-1" />
+                    Save
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -571,8 +561,8 @@ function SpiderWatcherConfig() {
                                       <span className="font-mono text-xs font-bold text-text-primary">
                                         {lead.leadNumber}
                                       </span>
-                                      <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.2 text-[10px] font-bold text-ai-strong">
-                                        {lead.stageLabel}
+                                      <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
+                                        {formatCurrentStageName(lead.stageLabel || lead.stageId)}
                                       </span>
                                     </div>
                                     <p className="truncate text-[11px] text-text-secondary font-medium">

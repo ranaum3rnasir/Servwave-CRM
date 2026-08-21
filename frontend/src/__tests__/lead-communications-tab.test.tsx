@@ -14,6 +14,7 @@ import { buildAbility } from '@/lib/ability';
 import { requestCall } from '@/lib/communication/phoneTabHandoff';
 import { LeadCommunicationsTab } from '@/components/communication/LeadCommunicationsTab';
 import type { CommItem } from '@/lib/api/jobCommunications';
+import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
 
 const mockApi = vi.mocked(api);
 const mockRequestCall = vi.mocked(requestCall);
@@ -164,7 +165,7 @@ describe('LeadCommunicationsTab', () => {
     expect(screen.getByText('J00042').closest('a')).toHaveAttribute('href', `/jobs/${JOB_ID}`);
   });
 
-  it('sends a lead-stamped text from the composer and clears it on success', async () => {
+  it('sends a lead-stamped text from the composer, clears it on success, and marks Spider notification as read', async () => {
     const user = userEvent.setup();
     mockApi.post.mockResolvedValue({ data: { ok: true } });
     renderTab();
@@ -182,6 +183,9 @@ describe('LeadCommunicationsTab', () => {
       })
     );
     await waitFor(() => expect(textarea).toHaveValue(''));
+
+    // Verify Spider store marks this lead's notification as read
+    expect(useSpiderWatcherStore.getState().readNotificationIds).toContain(LEAD_ID);
   });
 
   it('"Call customer" routes into the /phone tab with full lead attribution', async () => {

@@ -9,6 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/axios';
 import type { CommChannel } from '@/components/communication/shared/atoms';
+import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
 
 export interface CommItem {
   id: string;
@@ -98,6 +99,8 @@ export function useSendLeadSms(leadId: string) {
     mutationFn: ({ customerId, body }: { customerId: string; body: string }) =>
       api.post('/api/communication/sms', { customerId, body, leadId }).then((r) => r.data),
     onSuccess: () => {
+      // Mark Spider lead notification as read upon successful message dispatch
+      useSpiderWatcherStore.getState().markLeadNotificationsRead(leadId);
       qc.invalidateQueries({ queryKey: ['lead-communications', leadId] });
       // Prefix match — refresh the per-customer roll-up too (the row is
       // customer-linked as well as lead-linked).

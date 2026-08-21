@@ -1,4 +1,8 @@
 import { create } from 'zustand';
+import { useQuery } from '@tanstack/react-query';
+import { useEffect } from 'react';
+import api from '@/lib/axios';
+import { customerDisplayName } from '@/lib/customer-name';
 
 export type TimeUnit = 'Second' | 'Minute' | 'Hour' | 'Day';
 
@@ -234,216 +238,70 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
   },
 ];
 
-const NOW = Date.now();
-const MIN = 60 * 1000;
-const HOUR = 60 * MIN;
-const DAY = 24 * HOUR;
+/** Build customer + leads structure from live API records */
+export function buildWatcherCustomersFromLive(
+  apiLeads: any[] = [],
+  apiCustomers: any[] = []
+): WatcherCustomer[] {
+  const customerMap = new Map<string, WatcherCustomer>();
 
-export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
-  {
-    id: 'c1',
-    name: 'John Smith',
-    company: 'Apex Plumbing Co.',
-    email: 'john@apexplumbing.com',
-    phone: '+1 (555) 234-5678',
-    leads: [
-      {
-        id: 'l1',
-        leadNumber: 'LD-101',
-        serviceRequest: 'Main Line Leak & Pipe Replacement',
-        stageId: 'new-contacted',
-        stageLabel: 'New → Contacted',
-        elapsedValue: 4,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 4 * 86400,
-        createdAt: new Date(NOW - 4 * DAY).toISOString(),
-      },
-      {
-        id: 'l2',
-        leadNumber: 'LD-102',
-        serviceRequest: 'Commercial Water Heater Installation',
-        stageId: 'contacted-walkthrough-scheduled',
-        stageLabel: 'Contacted → Walkthrough Scheduled',
-        elapsedValue: 6,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 6 * 86400,
-        createdAt: new Date(NOW - 10 * DAY).toISOString(),
-        contactedAt: new Date(NOW - 6 * DAY).toISOString(),
-      },
-      {
-        id: 'l3',
-        leadNumber: 'LD-103',
-        serviceRequest: 'Backflow Valve Annual Testing',
-        stageId: 'walkthrough-scheduled-estimate',
-        stageLabel: 'Walkthrough Scheduled → Estimate',
-        elapsedValue: 12,
-        elapsedUnit: 'Hour',
-        elapsedSeconds: 12 * 3600,
-        createdAt: new Date(NOW - 5 * DAY).toISOString(),
-        walkthroughScheduledAt: new Date(NOW - 12 * HOUR).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c2',
-    name: 'Sarah Johnson',
-    company: 'Metro HVAC Services',
-    email: 'sarah.j@metrohvac.com',
-    phone: '+1 (555) 345-6789',
-    leads: [
-      {
-        id: 'l4',
-        leadNumber: 'LD-201',
-        serviceRequest: 'Central AC Rooftop Unit Overhaul',
-        stageId: 'contacted-walkthrough-scheduled',
-        stageLabel: 'Contacted → Walkthrough Scheduled',
-        elapsedValue: 8,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 8 * 86400,
-        createdAt: new Date(NOW - 12 * DAY).toISOString(),
-        contactedAt: new Date(NOW - 8 * DAY).toISOString(),
-      },
-      {
-        id: 'l5',
-        leadNumber: 'LD-202',
-        serviceRequest: 'Ductwork System Sanitization & Sealing',
-        stageId: 'walkthrough-scheduled-estimate',
-        stageLabel: 'Walkthrough Scheduled → Estimate',
-        elapsedValue: 3,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 3 * 86400,
-        createdAt: new Date(NOW - 7 * DAY).toISOString(),
-        walkthroughScheduledAt: new Date(NOW - 3 * DAY).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c3',
-    name: 'Michael Brown',
-    company: 'Citywide Electric',
-    email: 'mbrown@citywide.com',
-    phone: '+1 (555) 456-7890',
-    leads: [
-      {
-        id: 'l6',
-        leadNumber: 'LD-301',
-        serviceRequest: '400A Main Electrical Panel Upgrade',
-        stageId: 'new-contacted',
-        stageLabel: 'New → Contacted',
-        elapsedValue: 5,
-        elapsedUnit: 'Hour',
-        elapsedSeconds: 5 * 3600,
-        createdAt: new Date(NOW - 5 * HOUR).toISOString(),
-      },
-      {
-        id: 'l7',
-        leadNumber: 'LD-302',
-        serviceRequest: 'Level 3 Dual EV Charger Installation',
-        stageId: 'walkthrough-scheduled-estimate',
-        stageLabel: 'Walkthrough Scheduled → Estimate',
-        elapsedValue: 2,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 2 * 86400,
-        createdAt: new Date(NOW - 4 * DAY).toISOString(),
-        walkthroughScheduledAt: new Date(NOW - 2 * DAY).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c4',
-    name: 'Emily Davis',
-    company: 'Highland Builders',
-    email: 'edavis@highland.com',
-    phone: '+1 (555) 567-8901',
-    leads: [
-      {
-        id: 'l8',
-        leadNumber: 'LD-401',
-        serviceRequest: 'Custom Home Framing Structural Inspection',
-        stageId: 'walkthrough-scheduled-estimate',
-        stageLabel: 'Walkthrough Scheduled → Estimate',
-        elapsedValue: 4,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 4 * 86400,
-        createdAt: new Date(NOW - 6 * DAY).toISOString(),
-        walkthroughScheduledAt: new Date(NOW - 4 * DAY).toISOString(),
-      },
-      {
-        id: 'l9',
-        leadNumber: 'LD-402',
-        serviceRequest: 'Multi-Level Deck Construction',
-        stageId: 'new-contacted',
-        stageLabel: 'New → Contacted',
-        elapsedValue: 5,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 5 * 86400,
-        createdAt: new Date(NOW - 5 * DAY).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c5',
-    name: 'Robert Wilson',
-    company: 'Summit Property Management',
-    email: 'rwilson@summitpm.com',
-    phone: '+1 (555) 678-9012',
-    leads: [
-      {
-        id: 'l10',
-        leadNumber: 'LD-501',
-        serviceRequest: 'Multi-Unit HVAC & Boiler Seasonal Assessment',
-        stageId: 'contacted-walkthrough-scheduled',
-        stageLabel: 'Contacted → Walkthrough Scheduled',
-        elapsedValue: 6,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 6 * 86400,
-        createdAt: new Date(NOW - 9 * DAY).toISOString(),
-        contactedAt: new Date(NOW - 6 * DAY).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c6',
-    name: 'Jessica Taylor',
-    company: 'Pinnacle Roofing & Solar',
-    email: 'jtaylor@pinnacle.com',
-    phone: '+1 (555) 789-0123',
-    leads: [
-      {
-        id: 'l11',
-        leadNumber: 'LD-601',
-        serviceRequest: 'Commercial TPO Roofing & Solar Integration',
-        stageId: 'walkthrough-scheduled-estimate',
-        stageLabel: 'Walkthrough Scheduled → Estimate',
-        elapsedValue: 3,
-        elapsedUnit: 'Day',
-        elapsedSeconds: 3 * 86400,
-        createdAt: new Date(NOW - 5 * DAY).toISOString(),
-        walkthroughScheduledAt: new Date(NOW - 3 * DAY).toISOString(),
-      },
-    ],
-  },
-  {
-    id: 'c7',
-    name: 'David Miller',
-    company: 'Valley Maintenance',
-    email: 'dmiller@valleymaintenance.com',
-    phone: '+1 (555) 890-1234',
-    leads: [
-      {
-        id: 'l12',
-        leadNumber: 'LD-701',
-        serviceRequest: 'Facility Routine Preventative Maintenance',
-        stageId: 'new-contacted',
-        stageLabel: 'New → Contacted',
-        elapsedValue: 2,
-        elapsedUnit: 'Hour',
-        elapsedSeconds: 2 * 3600,
-        createdAt: new Date(NOW - 2 * HOUR).toISOString(),
-      },
-    ],
-  },
-];
+  if (Array.isArray(apiLeads)) {
+    for (const rawLead of apiLeads) {
+      const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
+      const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
+
+      const watcherLead: WatcherLead = {
+        id: rawLead.id,
+        leadNumber: rawLead.lead_number || `LD-${String(rawLead.id).slice(-4)}`,
+        serviceRequest: rawLead.service_request || 'General Service Request',
+        stageId: stageMetrics.stageId,
+        stageLabel: stageMetrics.stageLabel,
+        elapsedValue: stageMetrics.elapsedValue,
+        elapsedUnit: stageMetrics.elapsedUnit,
+        elapsedSeconds: stageMetrics.elapsedSeconds,
+        createdAt: rawLead.created_at,
+        contactedAt: rawLead.contacted_at,
+        walkthroughScheduledAt: rawLead.walkthrough_scheduled_at,
+        walkthroughCompletedAt: rawLead.walkthrough_completed_at,
+        status: rawLead.status,
+      };
+
+      if (!customerMap.has(custId)) {
+        const cust = rawLead.customer || {};
+        customerMap.set(custId, {
+          id: custId,
+          name: customerDisplayName(cust, cust.company_name || 'Customer'),
+          company: cust.company_name,
+          email: cust.email,
+          phone: cust.phone,
+          leads: [watcherLead],
+        });
+      } else {
+        customerMap.get(custId)!.leads.push(watcherLead);
+      }
+    }
+  }
+
+  if (Array.isArray(apiCustomers)) {
+    for (const cust of apiCustomers) {
+      if (!customerMap.has(cust.id)) {
+        customerMap.set(cust.id, {
+          id: cust.id,
+          name: customerDisplayName(cust, cust.company_name || 'Customer'),
+          company: cust.company_name,
+          email: cust.email,
+          phone: cust.phone,
+          leads: [],
+        });
+      }
+    }
+  }
+
+  return Array.from(customerMap.values());
+}
+
+/** No mock/dummy customers by default — strictly driven by live data & selections */
+export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [];
 
 interface SpiderWatcherState {
   notifications: SpiderNotificationsConfig;
@@ -480,6 +338,7 @@ interface SpiderWatcherState {
 
   markRead: (id: string) => void;
   markAllRead: () => void;
+  markLeadNotificationsRead: (leadId: string) => void;
   selectNotification: (id: string) => void;
   setIsRedBorderActive: (active: boolean) => void;
   setIsWindowOpen: (open: boolean) => void;
@@ -489,9 +348,6 @@ interface SpiderWatcherState {
   getComputedNotifications: () => InAppNotification[];
 }
 
-const ALL_CUSTOMER_IDS = DEFAULT_WATCHER_CUSTOMERS.map((c) => c.id);
-const ALL_LEAD_IDS = DEFAULT_WATCHER_CUSTOMERS.flatMap((c) => c.leads.map((l) => l.id));
-
 export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
   notifications: {
     email: true,
@@ -500,9 +356,9 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
   },
   days: '0',
   leadStages: DEFAULT_LEAD_STAGES,
-  customers: DEFAULT_WATCHER_CUSTOMERS,
-  selectedCustomerIds: ALL_CUSTOMER_IDS,
-  selectedLeadIds: ALL_LEAD_IDS,
+  customers: [],
+  selectedCustomerIds: [],
+  selectedLeadIds: [],
   inAppNotifications: [],
   readNotificationIds: [],
   isRedBorderActive: false,
@@ -615,17 +471,23 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
       };
     }),
 
-  selectNotification: (id) =>
+  markLeadNotificationsRead: (leadId) =>
     set((state) => {
-      const plainId = id.replace(/^notif-/, '');
+      const plainId = leadId.replace(/^notif-/, '');
       const fullNotifId = `notif-${plainId}`;
       return {
-        activeNotificationId: id,
-        isRedBorderActive: true,
         readNotificationIds: Array.from(
-          new Set([...state.readNotificationIds, id, fullNotifId, plainId])
+          new Set([...state.readNotificationIds, leadId, fullNotifId, plainId])
         ),
       };
+    }),
+
+  selectNotification: (id) =>
+    set({
+      activeNotificationId: id,
+      isRedBorderActive: true,
+      // Note: Clicking or opening a notification does NOT mark it as read.
+      // Notifications are only marked as read when a message is successfully dispatched to the lead.
     }),
 
   setIsRedBorderActive: (active) => set({ isRedBorderActive: active }),
@@ -637,18 +499,31 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
     const state = get();
     const result: InAppNotification[] = [];
 
-    // Evaluate real-time stage notifications dynamically from monitored customers and leads
+    // Strictly return empty if no customer or lead is selected or no customers exist
+    if (
+      !state.customers ||
+      state.customers.length === 0 ||
+      !state.selectedLeadIds ||
+      state.selectedLeadIds.length === 0
+    ) {
+      return result;
+    }
+
+    // Evaluate real-time stage notifications dynamically from monitored customers and selected leads
     // Read notifications are filtered out so clicked/read notifications disappear from the list
     for (const customer of state.customers) {
+      if (!customer.leads || customer.leads.length === 0) continue;
       for (const lead of customer.leads) {
         const isSelected = state.selectedLeadIds.includes(lead.id);
+        if (!isSelected) continue;
+
         const overdue = isLeadOverdue(lead, state.leadStages);
         const notifId = `notif-${lead.id}`;
         const isRead =
           state.readNotificationIds.includes(notifId) ||
           state.readNotificationIds.includes(lead.id);
 
-        if (isSelected && overdue && !isRead) {
+        if (overdue && !isRead) {
           const config = state.leadStages.find(
             (s) => s.id === lead.stageId || s.label === lead.stageLabel
           );
@@ -658,7 +533,9 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
               ? lead.elapsedSeconds
               : timeUnitToSeconds(lead.elapsedValue, lead.elapsedUnit);
 
-          const currentStage = formatCurrentStageName(lead.stageLabel || lead.stageId || config?.fromStage);
+          const currentStage = formatCurrentStageName(
+            lead.stageLabel || lead.stageId || config?.fromStage
+          );
 
           result.push({
             id: notifId,
@@ -681,3 +558,41 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
     return result;
   },
 }));
+
+/** Hook to sync real live API customers and leads into the Spider Watcher store */
+export function useSyncSpiderWatcherLive() {
+  const setCustomers = useSpiderWatcherStore((s) => s.setCustomers);
+
+  const { data: leads } = useQuery({
+    queryKey: ['spider-watcher-leads-real'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/api/leads', { params: { limit: 100 } });
+        return res.data?.leads || [];
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 15_000,
+  });
+
+  const { data: customers } = useQuery({
+    queryKey: ['spider-watcher-customers-real'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/api/customers', { params: { limit: 100 } });
+        return res.data?.customers || [];
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 15_000,
+  });
+
+  useEffect(() => {
+    if (leads || customers) {
+      const live = buildWatcherCustomersFromLive(leads || [], customers || []);
+      setCustomers(live);
+    }
+  }, [leads, customers, setCustomers]);
+}

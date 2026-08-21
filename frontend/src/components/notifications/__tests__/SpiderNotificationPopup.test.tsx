@@ -2,13 +2,56 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SpiderNotificationPopup } from '../SpiderNotificationPopup';
-import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
+import { useSpiderWatcherStore, type WatcherCustomer } from '@/stores/spiderWatcherStore';
+
+const TEST_CUSTOMERS: WatcherCustomer[] = [
+  {
+    id: 'c1',
+    name: 'John Smith',
+    company: 'Apex Plumbing Co.',
+    leads: [
+      {
+        id: 'l1',
+        leadNumber: 'LD-101',
+        serviceRequest: 'Main Line Leak',
+        stageId: 'new-contacted',
+        stageLabel: 'New → Contacted',
+        elapsedValue: 4,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 4 * 86400,
+      },
+      {
+        id: 'l2',
+        leadNumber: 'LD-102',
+        serviceRequest: 'Water Heater',
+        stageId: 'contacted-walkthrough-scheduled',
+        stageLabel: 'Contacted → Walkthrough Scheduled',
+        elapsedValue: 6,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 6 * 86400,
+      },
+      {
+        id: 'l3',
+        leadNumber: 'LD-103',
+        serviceRequest: 'Valve Testing',
+        stageId: 'walkthrough-scheduled-estimate',
+        stageLabel: 'Walkthrough Scheduled → Estimate',
+        elapsedValue: 12,
+        elapsedUnit: 'Hour',
+        elapsedSeconds: 12 * 3600,
+      },
+    ],
+  },
+];
 
 describe('SpiderNotificationPopup', () => {
   beforeEach(() => {
     useSpiderWatcherStore.setState({
       notifications: { email: true, sms: true, inApp: true },
       days: '0',
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2', 'l3'],
       isRedBorderActive: false,
       activeNotificationId: null,
       isWindowOpen: true, // open panel to test dialog contents
@@ -16,7 +59,7 @@ describe('SpiderNotificationPopup', () => {
     });
   });
 
-  it('renders lower section pop-up box with Bell trigger icon when inApp is enabled and unread notifications exist', () => {
+  it('renders lower section pop-up box with Bell trigger icon when inApp is enabled and unread notifications exist for selected leads', () => {
     render(
       <MemoryRouter>
         <SpiderNotificationPopup />
@@ -42,7 +85,23 @@ describe('SpiderNotificationPopup', () => {
     expect(screen.queryByText('New → Contacted')).toBeNull();
   });
 
-  it('clicking a notification marks it as read, removes it from the notification list, and activates red border state', () => {
+  it('displays empty notification state when no customer or lead is selected', () => {
+    useSpiderWatcherStore.setState({
+      selectedCustomerIds: [],
+      selectedLeadIds: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <SpiderNotificationPopup />
+      </MemoryRouter>
+    );
+
+    // No notifications triggered, bell icon hidden
+    expect(screen.queryByRole('button', { name: /Spider notification/i })).not.toBeInTheDocument();
+  });
+
+  it('clicking a notification activates indicator and selects it, but does NOT mark it as read', () => {
     render(
       <MemoryRouter>
         <SpiderNotificationPopup />
@@ -60,12 +119,21 @@ describe('SpiderNotificationPopup', () => {
     const state = useSpiderWatcherStore.getState();
     expect(state.isRedBorderActive).toBe(true);
     expect(state.activeNotificationId).toBe(targetNotif.id);
-    expect(state.readNotificationIds).toContain(targetNotif.id);
+    // Clicking/opening does NOT mark as read
+    expect(state.readNotificationIds).not.toContain(targetNotif.id);
+    expect(state.getComputedNotifications().length).toBe(initialNotifs.length);
+  });
 
-    // After clicking, the clicked notification is removed from the active notifications list
-    const remainingNotifs = state.getComputedNotifications();
-    expect(remainingNotifs.find((n) => n.id === targetNotif.id)).toBeUndefined();
-    expect(remainingNotifs.length).toBe(initialNotifs.length - 1);
+  it('marking lead notifications as read (on message send) removes the notification from list', () => {
+    const initialNotifs = useSpiderWatcherStore.getState().getComputedNotifications();
+    expect(initialNotifs.length).toBe(3);
+
+    // Simulate successful message dispatch to lead l1
+    useSpiderWatcherStore.getState().markLeadNotificationsRead('l1');
+
+    const remaining = useSpiderWatcherStore.getState().getComputedNotifications();
+    expect(remaining.length).toBe(2);
+    expect(remaining.find((n) => n.leadId === 'l1')).toBeUndefined();
   });
 
   it('keeps icon completely hidden when unreadCount is 0 or all notifications are read', () => {

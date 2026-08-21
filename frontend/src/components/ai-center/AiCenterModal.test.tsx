@@ -7,6 +7,7 @@ import { useAiCenterStore } from '@/stores/aiCenterStore';
 import {
   useSpiderWatcherStore,
   resolveLeadStageAndElapsedTime,
+  type WatcherCustomer,
 } from '@/stores/spiderWatcherStore';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -16,6 +17,38 @@ vi.mock('@/lib/api/organization', () => ({
 }));
 
 const queryClient = new QueryClient();
+
+const TEST_CUSTOMERS: WatcherCustomer[] = [
+  {
+    id: 'c1',
+    name: 'John Smith',
+    company: 'Apex Plumbing Co.',
+    email: 'john@apexplumbing.com',
+    phone: '+1 (555) 234-5678',
+    leads: [
+      {
+        id: 'l1',
+        leadNumber: 'LD-101',
+        serviceRequest: 'Main Line Leak & Pipe Replacement',
+        stageId: 'new-contacted',
+        stageLabel: 'New → Contacted',
+        elapsedValue: 4,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 4 * 86400,
+      },
+      {
+        id: 'l2',
+        leadNumber: 'LD-102',
+        serviceRequest: 'Commercial Water Heater Installation',
+        stageId: 'contacted-walkthrough-scheduled',
+        stageLabel: 'Contacted → Walkthrough Scheduled',
+        elapsedValue: 6,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 6 * 86400,
+      },
+    ],
+  },
+];
 
 function renderAiCenter() {
   useAiCenterStore.setState({ open: true });
@@ -48,6 +81,11 @@ describe('AiCenterModal', () => {
       data: { is_demo: false },
     });
     useAiCenterStore.setState({ open: true, focusAgentId: null });
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+    });
   });
 
   it('renders the dialog for a real (non-demo) org', () => {
@@ -91,6 +129,12 @@ describe('AiCenterModal', () => {
     fireEvent.change(durationInputs[0], { target: { value: '7' } });
     expect(useSpiderWatcherStore.getState().leadStages[0].duration).toBe(7);
 
+    // Save button exists at the end of Distance section and saves thresholds
+    const saveThresholdsBtn = screen.getByRole('button', { name: /Save/i });
+    expect(saveThresholdsBtn).toBeInTheDocument();
+    fireEvent.click(saveThresholdsBtn);
+    expect(screen.getByText('Saved')).toBeInTheDocument();
+
     // 2. Contact Watchers with Multi-Lead Dropdowns
     expect(screen.getByText('John Smith')).toBeInTheDocument();
     expect(screen.getByText(/Apex Plumbing Co/i)).toBeInTheDocument();
@@ -115,6 +159,10 @@ describe('AiCenterModal', () => {
     // Select/deselect customer and specific lead
     const leadCheckbox = screen.getByLabelText(/Select lead LD-101 for notifications/i);
     expect(leadCheckbox).toBeInTheDocument();
+
+    // Lead stage badge in Contact Watcher displays single stage ("New", "Contacted", "Walkthrough")
+    expect(screen.getAllByText('New').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Contacted').length).toBeGreaterThan(0);
   });
 
   it('calculates real lead stage and actual elapsed time accurately', () => {
