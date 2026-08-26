@@ -235,7 +235,6 @@ async function main() {
     await prisma.invoiceLineItem.deleteMany({ where: { invoice: { organization_id: orgId } } });
     await prisma.invoice.deleteMany({ where: orgWhere });
     await prisma.planVisit.deleteMany({ where: orgWhere });
-    await prisma.jobAssignee.deleteMany({ where: orgWhere });
     await prisma.job.deleteMany({ where: orgWhere });
     await prisma.servicePlanLineItem.deleteMany({ where: orgWhere });
     await prisma.servicePlan.deleteMany({ where: orgWhere });
@@ -243,8 +242,8 @@ async function main() {
     await prisma.estimateLineItem.deleteMany({ where: { estimate: { organization_id: orgId } } });
     await prisma.estimate.deleteMany({ where: orgWhere });
     await prisma.leadAssignee.deleteMany({ where: orgWhere });
-    await prisma.leadWalkthroughPerformer.deleteMany({ where: orgWhere });
-    await prisma.walkthrough.deleteMany({ where: orgWhere });
+    await prisma.visitAssignee.deleteMany({ where: orgWhere });
+    await prisma.visit.deleteMany({ where: orgWhere });
     await prisma.leadTag.deleteMany({ where: { lead: { organization_id: orgId } } });
     await prisma.lead.deleteMany({ where: orgWhere });
     await prisma.note.deleteMany({ where: orgWhere });
@@ -270,12 +269,15 @@ async function main() {
     const locationRows: Prisma.ServiceLocationCreateManyInput[] = [];
     const leadRows: Prisma.LeadCreateManyInput[] = [];
     const leadAssigneeRows: Prisma.LeadAssigneeCreateManyInput[] = [];
-    const walkthroughRows: Prisma.WalkthroughCreateManyInput[] = [];
-    const walkPerformerRows: Prisma.LeadWalkthroughPerformerCreateManyInput[] = [];
+    const walkthroughRows: Prisma.VisitCreateManyInput[] = [];
+    const walkPerformerRows: Prisma.VisitAssigneeCreateManyInput[] = [];
+    // S8 (D6): the job-side trips and the crew on them. Separate arrays only so the insert order
+    // below stays readable - both land in `visits` / `visit_assignees`.
+    const jobVisitRows: Prisma.VisitCreateManyInput[] = [];
+    const jobVisitCrewRows: Prisma.VisitAssigneeCreateManyInput[] = [];
     const estimateRows: Prisma.EstimateCreateManyInput[] = [];
     const estLineRows: Prisma.EstimateLineItemCreateManyInput[] = [];
     const jobRows: Prisma.JobCreateManyInput[] = [];
-    const jobAssigneeRows: Prisma.JobAssigneeCreateManyInput[] = [];
     const invoiceRows: Prisma.InvoiceCreateManyInput[] = [];
     const invLineRows: Prisma.InvoiceLineItemCreateManyInput[] = [];
     const paymentRows: Prisma.PaymentCreateManyInput[] = [];
@@ -519,9 +521,9 @@ async function main() {
       if (assign) {
         leadAssigneeRows.push({ id: randomUUID(), lead_id: id, user_id: ownerUser.id, organization_id: orgId });
       }
-      // Seed a real Walkthrough row for this lead: a scheduled date means SCHEDULED, otherwise
-      // opts.walkthroughNeeded means REQUESTED (the needs-scheduling bucket). Demo data only
-      // models these two branches - no COMPLETED/CANCELLED visit is synthesized here.
+      // Seed a real Visit row for this lead when one is scheduled. Multi-visit D22a: the
+      // "needs scheduling" bucket is now the ABSENCE of a live visit, so a lead that needs one
+      // gets NO row at all - the placeholder REQUESTED branch is gone rather than rewritten.
       let walkthroughId: string | null = null;
       if (opts.walkthroughScheduledAt) {
         walkthroughId = randomUUID();
@@ -529,18 +531,10 @@ async function main() {
           id: walkthroughId,
           organization_id: orgId,
           lead_id: id,
+          purpose: 'WALKTHROUGH',
+          visit_seq: 1,
           status: 'SCHEDULED',
           scheduled_at: opts.walkthroughScheduledAt,
-          created_at: createdAt,
-          updated_at: updatedAt,
-        });
-      } else if (opts.walkthroughNeeded) {
-        walkthroughId = randomUUID();
-        walkthroughRows.push({
-          id: walkthroughId,
-          organization_id: orgId,
-          lead_id: id,
-          status: 'REQUESTED',
           created_at: createdAt,
           updated_at: updatedAt,
         });
@@ -548,7 +542,7 @@ async function main() {
       // walkthroughId is non-null here whenever walkthroughScheduledAt was set (the first branch
       // above always sets it) - a performer is only seeded for the SCHEDULED case.
       if (opts.walkthroughScheduledAt) {
-        walkPerformerRows.push({ id: randomUUID(), lead_id: id, walkthrough_id: walkthroughId!, user_id: pick(techs).id, organization_id: orgId });
+        walkPerformerRows.push({ id: randomUUID(), visit_id: walkthroughId!, user_id: pick(techs).id, organization_id: orgId });
       }
       return { id, custId: opts.custId, locId: opts.locId, ownerId: ownerUser.id, source, jobType, status: opts.status, createdAt, serviceRequest: sr };
     }
@@ -593,9 +587,9 @@ async function main() {
         ? new Date(MONTH_START.getTime() + Math.floor(rnd() * (NOW.getTime() - MONTH_START.getTime())))
         : daysAgo(randInt(32, 75));
       const status = OPEN_STATUSES[i % OPEN_STATUSES.length];
-      // ~6 unassigned + open (unassigned KPI). A few contacted_at null (need-followup).
+      // ~6 unassigned + open (unassigned KPI). A few carry no contact stamp at all.
       const unassigned = i < 6;
-      const needFollowup = i >= 6 && i < 10; // contacted_at null but assigned
+      const noContactRecorded = i >= 6 && i < 10; // assigned, but contacted_at stays null
       // A few leads need a REQUESTED walkthrough, unscheduled, NEW/CONTACTED (needs-attention).
       const walkNeeded = (status === 'NEW' || status === 'CONTACTED') && i % 4 === 0;
       // A few other NEW/CONTACTED leads have an already-booked visit, so the LeadsPage visit chip
@@ -607,7 +601,7 @@ async function main() {
         status,
         createdAt: created,
         assign: !unassigned,
-        contacted: needFollowup ? false : status !== 'NEW',
+        contacted: noContactRecorded ? false : status !== 'NEW',
         walkthroughNeeded: walkNeeded,
         walkthroughScheduledAt: walkScheduled ? daysFromNow(randInt(1, 6)) : null,
       });
@@ -764,8 +758,10 @@ async function main() {
         service_location_id: opts.lead.locId,
         estimate_id: estimateId,
         status: opts.status as any,
-        scheduled_start: start,
-        scheduled_end: end,
+        // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - Prisma.
+        // JobCreateManyInput no longer carries them. The visit booked below (now unconditional on
+        // `start`, not on `crew.length > 0`) is the real window; the wire keys are a computed
+        // projection off it.
         scope_notes: opts.lead.serviceRequest,
         completed_at: opts.completedAt ?? (completed ? (start ?? opts.createdAt) : null),
         amount_invoiced: amountInvoiced,
@@ -776,8 +772,35 @@ async function main() {
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM' as const,
       });
-      for (const uid of crew) {
-        jobAssigneeRows.push({ id: randomUUID(), job_id: id, user_id: uid, organization_id: orgId });
+      // Multi-visit S8 (D6): crew lives on the VISIT, so a seeded crewed job gets a real trip to
+      // carry it. A crew row with no trip would be unreachable by OWN_JOB, which is now a
+      // `visits.some.assignees.some` predicate - the seeded technician would see nothing.
+      //
+      // S8 (RATIFIED, A5) fix, found via this PR's own Step 0 re-grep (not named in the
+      // contract's snapshot): the guard was `if (crew.length > 0)`, so ~5 of the 120 HISTORY jobs
+      // seeded crewless (deliberately, `assignCrew = i % 25 !== 0`) got NO visit row at all.
+      // Before this PR that only meant an uncrewed job with no per-visit crew list; after it, it
+      // would ALSO mean the job's scheduled_start/scheduled_end projection reads null forever -
+      // a "scheduled"/"completed" seeded job silently showing no date. Booking now follows `start`
+      // (matching the real create() door's own rule: a time given books a trip, independent of
+      // crew), with the crew rows staying conditional on `crew.length > 0` beneath it.
+      if (start) {
+        const jobVisitId = randomUUID();
+        jobVisitRows.push({
+          id: jobVisitId,
+          organization_id: orgId,
+          job_id: id,
+          purpose: 'WORK',
+          visit_seq: 1,
+          status: completed ? 'COMPLETED' : opts.status === 'CANCELLED' ? 'CANCELLED' : 'SCHEDULED',
+          scheduled_at: start,
+          scheduled_end: end,
+          created_at: opts.createdAt,
+          updated_at: opts.completedAt ?? start ?? opts.createdAt,
+        });
+        for (const uid of crew) {
+          jobVisitCrewRows.push({ id: randomUUID(), visit_id: jobVisitId, user_id: uid, organization_id: orgId });
+        }
       }
       const jb: JobBuild = {
         id, custId: opts.lead.custId, locId: opts.lead.locId, estimateId,
@@ -794,7 +817,8 @@ async function main() {
     let aqi = 0;
     const nextApproved = (): EstInfo | null => (aqi < approvedQueue.length ? approvedQueue[aqi++] : null);
 
-    // -- TODAY: ~9 across SCHEDULED/EN_ROUTE/ON_SITE/IN_PROGRESS/COMPLETED, incl 2 past-start SCHEDULED.
+    // -- TODAY: ~9 across SCHEDULED/IN_PROGRESS/COMPLETED, incl 2 past-start SCHEDULED. S4 (D17)
+    // retired EN_ROUTE/ON_SITE from JobStatus - a crew on the way or on site is a VISIT state.
     const nowHour = NOW.getHours();
     const todayPlan: Array<{ status: string; start: Date }> = [
       { status: 'SCHEDULED', start: todayAt(Math.min(23, Math.max(nowHour + 1, 9))) },
@@ -802,8 +826,8 @@ async function main() {
       // two past-start, still SCHEDULED → needs-attention
       { status: 'SCHEDULED', start: atTime(NOW, Math.max(7, nowHour - 2)) },
       { status: 'SCHEDULED', start: atTime(NOW, Math.max(6, nowHour - 3)) },
-      { status: 'EN_ROUTE', start: atTime(NOW, Math.max(7, nowHour - 1)) },
-      { status: 'ON_SITE', start: atTime(NOW, Math.max(7, nowHour - 1)) },
+      { status: 'IN_PROGRESS', start: atTime(NOW, Math.max(7, nowHour - 1)) },
+      { status: 'SCHEDULED', start: atTime(NOW, Math.max(7, nowHour - 1)) },
       { status: 'IN_PROGRESS', start: atTime(NOW, Math.max(7, nowHour - 2)) },
       { status: 'COMPLETED', start: todayAt(8) },
       { status: 'COMPLETED', start: todayAt(10) },
@@ -1159,6 +1183,63 @@ async function main() {
       console.log(`  ${label}: ${rows.length}`);
     }
 
+    // ─── Lead stage clocks (spec #1751 D2/D3/D10) ─────────────────────────────────────────────
+    //
+    // Derived here rather than stamped at each `addLead`, because every fact these clocks are
+    // made of is created AFTER the lead row: the visit when a walkthrough is booked, the estimate
+    // when one is sent or approved. Every array is fully built by this point, so one pass over
+    // them is both the simplest way to do it and the closest mirror of D10's backfill, which
+    // derives the same five values from the same two tables.
+    //
+    // It matters that the seeder does this at all. A seeded org whose leads carry visits and
+    // estimates but null clocks would misrepresent every one of them to anything that reads the
+    // stage clocks - the automation anchors included - so the demo data has to agree with the
+    // history it invents.
+    {
+      type Agg = {
+        firstBooked?: Date; firstCompleted?: Date; lastCompleted?: Date;
+        firstSent?: Date; firstApproved?: Date;
+      };
+      const byLead = new Map<string, Agg>();
+      const at = (leadId: string) => {
+        let a = byLead.get(leadId);
+        if (!a) { a = {}; byLead.set(leadId, a); }
+        return a;
+      };
+      const earlier = (cur: Date | undefined, next: Date) => (!cur || next < cur ? next : cur);
+      const later = (cur: Date | undefined, next: Date) => (!cur || next > cur ? next : cur);
+
+      for (const v of walkthroughRows) {
+        if (!v.lead_id) continue;
+        const a = at(v.lead_id as string);
+        // No status filter, matching both the live door and the backfill: booking happened even
+        // if the trip was later cancelled, and the clock is monotonic.
+        if (v.created_at) a.firstBooked = earlier(a.firstBooked, v.created_at as Date);
+        if (v.completed_at && v.status !== 'CANCELLED') {
+          a.firstCompleted = earlier(a.firstCompleted, v.completed_at as Date);
+          a.lastCompleted = later(a.lastCompleted, v.completed_at as Date);
+        }
+      }
+      for (const e of estimateRows) {
+        if (!e.lead_id) continue;
+        const a = at(e.lead_id as string);
+        if (e.sent_at) a.firstSent = earlier(a.firstSent, e.sent_at as Date);
+        if (e.approved_at) a.firstApproved = earlier(a.firstApproved, e.approved_at as Date);
+      }
+
+      for (const l of leadRows) {
+        const a = byLead.get(l.id as string);
+        if (!a) continue;
+        l.walkthrough_first_booked_at = a.firstBooked ?? null;
+        l.walkthrough_first_completed_at = a.firstCompleted ?? null;
+        l.last_visit_completed_at = a.lastCompleted ?? null;
+        l.first_estimate_sent_at = a.firstSent ?? null;
+        // Only a won lead has a won_at, exactly as in the backfill: an approved estimate under a
+        // lead in some other status is not a win.
+        l.won_at = l.status === 'WON' ? (a.firstApproved ?? null) : null;
+      }
+    }
+
     console.log('Inserting dataset…');
     await insertChunked('customers', customerRows, (d) => prisma.customer.createMany({ data: d }));
     await insertChunked('customer_emails', emailRows, (d) => prisma.customerEmail.createMany({ data: d }));
@@ -1166,14 +1247,16 @@ async function main() {
     await insertChunked('service_locations', locationRows, (d) => prisma.serviceLocation.createMany({ data: d }));
     await insertChunked('leads', leadRows, (d) => prisma.lead.createMany({ data: d }));
     await insertChunked('lead_assignees', leadAssigneeRows, (d) => prisma.leadAssignee.createMany({ data: d }));
-    await insertChunked('walkthroughs', walkthroughRows, (d) => prisma.walkthrough.createMany({ data: d }));
-    await insertChunked('lead_walkthrough_performers', walkPerformerRows, (d) => prisma.leadWalkthroughPerformer.createMany({ data: d }));
+    await insertChunked('visits', walkthroughRows, (d) => prisma.visit.createMany({ data: d }));
+    await insertChunked('lead_walkthrough_performers', walkPerformerRows, (d) => prisma.visitAssignee.createMany({ data: d }));
     await insertChunked('estimates', estimateRows, (d) => prisma.estimate.createMany({ data: d }));
     await insertChunked('estimate_line_items', estLineRows, (d) => prisma.estimateLineItem.createMany({ data: d }));
     await insertChunked('service_plans', planRows, (d) => prisma.servicePlan.createMany({ data: d }));
     await insertChunked('service_plan_line_items', planLineRows, (d) => prisma.servicePlanLineItem.createMany({ data: d }));
     await insertChunked('jobs', jobRows, (d) => prisma.job.createMany({ data: d }));
-    await insertChunked('job_assignees', jobAssigneeRows, (d) => prisma.jobAssignee.createMany({ data: d }));
+    // S8 (D6): AFTER jobs - a visit's job_id is an FK.
+    await insertChunked('job visits', jobVisitRows, (d) => prisma.visit.createMany({ data: d }));
+    await insertChunked('job visit crew', jobVisitCrewRows, (d) => prisma.visitAssignee.createMany({ data: d }));
     await insertChunked('plan_visits', planVisitRows, (d) => prisma.planVisit.createMany({ data: d }));
     await insertChunked('invoices', invoiceRows, (d) => prisma.invoice.createMany({ data: d }));
     await insertChunked('invoice_line_items', invLineRows, (d) => prisma.invoiceLineItem.createMany({ data: d }));
