@@ -1,4 +1,4 @@
--- §4.5 (2 of 2): Seed accepted_payment_methods defaults, backfill B&G CARD rows
+-- §4.5 (2 of 2): Seed accepted_payment_methods defaults, backfill Lakeside CARD rows
 -- to EXTERNAL_CARD, drop the now-unused payment_provider column + enum.
 --
 -- Public-page routing is now driven by Organization.accepted_payment_methods:
@@ -20,10 +20,10 @@ UPDATE "organizations"
   SET "accepted_payment_methods" = '["EXTERNAL_CARD", "BANK_TRANSFER", "CHECK", "CASH"]'::jsonb
   WHERE "stripe_account_id" IS NULL;
 
--- 2. B&G backfill: rewrite any existing CARD payments/deposits in the B&G tenant
---    as EXTERNAL_CARD. B&G has no Stripe, so any CARD-typed row in their org was
+-- 2. Lakeside backfill: rewrite any existing CARD payments/deposits in the Lakeside tenant
+--    as EXTERNAL_CARD. Lakeside has no Stripe, so any CARD-typed row in their org was
 --    actually an externally-processed card (e.g., Paystri). Scope is intentionally
---    limited to B&G's organization_id — other orgs' CARD rows reflect real Stripe
+--    limited to Lakeside's organization_id — other orgs' CARD rows reflect real Stripe
 --    payments and must not be rewritten.
 UPDATE "deposits"
   SET "payment_method" = 'EXTERNAL_CARD'
@@ -41,7 +41,7 @@ UPDATE "payments"
       WHERE "organization_id" = '00000000-0000-0000-0000-0000bcab0001'
     );
 
--- Rewrite "CARD" → "EXTERNAL_CARD" inside the JSON arrays on B&G's send_configs
+-- Rewrite "CARD" → "EXTERNAL_CARD" inside the JSON arrays on Lakeside's send_configs
 -- so already-sent estimate links still render the right Credit Card behavior
 -- (call-us, not Stripe) when customers reopen them.
 UPDATE "estimate_send_configs" esc

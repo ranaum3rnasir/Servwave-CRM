@@ -209,14 +209,14 @@ describe('persistTransactionalEmail', () => {
       to: 'cust@example.com',
       subject: 'Deposit Receipt — E00001',
       text: 'Deposit received.',
-      fromName: 'Alpha Doors & Security',
+      fromName: 'Northwind Services',
       fromAddress: 'noreply@mail.test.servwave.com',
     });
 
     expect(prisma.email.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          from: { name: 'Alpha Doors & Security', email: 'noreply@mail.test.servwave.com' },
+          from: { name: 'Northwind Services', email: 'noreply@mail.test.servwave.com' },
         }),
       }),
     );

@@ -34,7 +34,7 @@ const ORG_ID = 'org-1';
 // the terminal call_path hop, talk_time zero).
 const INBOUND_HANGUP_END = {
   sid: 'CA9101',
-  account_id: 596375,
+  account_id: 500001,
   caller_number: '+15550001111',
   tracking_number: '+12019037784',
   direction: 'inbound',
@@ -126,7 +126,7 @@ describe('call_incoming removal (ingest-only model — inbound rings the cell, n
       ORG_ID,
       {
         sid: 'CA9105',
-        account_id: 596375,
+        account_id: 500001,
         caller_number: '+15550001111',
         tracking_number: '+12019037784',
         direction: 'inbound',

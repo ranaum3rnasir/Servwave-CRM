@@ -226,7 +226,7 @@ describe('Org-level email_sending_enabled toggle', () => {
       city: 'Richmond',
       state: 'VA',
       phone: null,
-      ctm_account_id: '596375',
+      ctm_account_id: '500001',
       _count: { users: 10 },
     });
 

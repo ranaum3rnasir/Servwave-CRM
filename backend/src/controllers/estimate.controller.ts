@@ -2301,7 +2301,7 @@ async function sendEstimateInternal(
   }
 
   // ── PREP (phase 1): resolve the recipient BEFORE anything irreversible ──────────────
-  // The reported bug (B&G): the estimate was flipped to SENT and the client told "Sent" while
+  // The reported bug (Lakeside): the estimate was flipped to SENT and the client told "Sent" while
   // the email never left the system. We now refuse to send — and never mark SENT — if there is
   // no deliverable address, and (below) only commit the SENT transition once the email is
   // confirmed dispatched.

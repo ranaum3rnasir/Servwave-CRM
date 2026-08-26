@@ -34,7 +34,7 @@ import { ReportToolbar, ReportPager, ReportSelectTrigger } from './_shared';
 import { hashStr, mulberry32 } from '@/lib/reports/random';
 import { exportCsvFile } from '@/lib/csv';
 
-// ── Domain vocab (Alpha Security US) ─────────────────────────────────────────
+// ── Domain vocab (Northwind Services) ─────────────────────────────────────────
 const STATUSES = ['Submitted', 'In progress', 'Pending', 'Done', 'done pending', 'Canceled'] as const;
 type Status = (typeof STATUSES)[number];
 

@@ -56,7 +56,7 @@ describe('Numbers table - forwarding destination', () => {
     renderNumbers();
 
     expect(screen.getByText('Rings at')).toBeInTheDocument();
-    expect(screen.getByText('(609) 874-5252')).toBeInTheDocument();
+    expect(screen.getByText('(555) 555-0199')).toBeInTheDocument();
   });
 
   it('flags a number that has no destination rather than rendering a blank cell', () => {
@@ -127,7 +127,7 @@ describe('Numbers table - forwarding destination', () => {
       { ability: buildAbility([{ action: 'read', subject: 'Communication' }]) },
     );
 
-    expect(screen.getByText('(609) 874-5252')).toBeInTheDocument();
+    expect(screen.getByText('(555) 555-0199')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /change/i })).toBeNull();
   });
 
@@ -153,7 +153,7 @@ describe('Numbers table - releasing a number', () => {
 
   it('will not release until the number itself is typed back', async () => {
     // A confirm dialog alone is one muscle-memory click from permanently
-    // losing a working business line. Alpha Doors has 20 live numbers here.
+    // losing a working business line. Northwind Services has 20 live numbers here.
     renderNumbers();
 
     fireEvent.click(screen.getByRole('button', { name: /^release$/i }));

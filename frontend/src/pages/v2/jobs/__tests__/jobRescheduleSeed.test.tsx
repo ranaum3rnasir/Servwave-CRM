@@ -7,7 +7,7 @@
  * `defaultEnd` / `defaultIsAllDay` / `mode`. Reschedule therefore opened four empty pickers
  * and silently discarded the existing slot unless the user retyped all of it.
  *
- * Reported against prod job 698776 (Alpha Doors), whose row was correct the whole time.
+ * Reported against prod job 698776 (Northwind Services), whose row was correct the whole time.
  *
  * The org zone is Asia/Manila deliberately: it differs from every plausible runner zone, so
  * these assertions fail on browser-local behaviour rather than passing by coincidence.

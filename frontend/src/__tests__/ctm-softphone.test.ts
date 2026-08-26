@@ -34,8 +34,8 @@ function makeSoftphone(overrides: Record<string, any> = {}) {
   const getToken = vi.fn().mockResolvedValue({
     token: 'TKN-123',
     valid_until: 1799999999,
-    account_id: '596375',
-    user: { account: '596375' },
+    account_id: '500001',
+    user: { account: '500001' },
   });
   const sp = createCtmSoftphone({
     getToken,
@@ -59,7 +59,7 @@ afterEach(() => vi.clearAllMocks());
 
 describe('isCtmSoftphoneEnabled', () => {
   it('defaults ON (WebRTC softphone is the pilot office path now)', () => {
-    // The default flipped from OFF → ON for the Alpha Doors pilot. On the
+    // The default flipped from OFF → ON for the Northwind Services pilot. On the
     // staging branch this makes /phone use the real WebRTC device without any
     // per-browser toggle; prod stays on the pre-flip code until promotion.
     expect(isCtmSoftphoneEnabled()).toBe(true);
@@ -94,8 +94,8 @@ describe('createCtmSoftphone', () => {
     const access = {
       token: 'TKN-123',
       valid_until: 1799999999,
-      account_id: '596375',
-      user: { account: '596375' },
+      account_id: '500001',
+      user: { account: '500001' },
     };
     const getToken = vi.fn().mockResolvedValue(access);
     const { sp, el } = makeSoftphone({ getToken });
@@ -135,8 +135,8 @@ describe('createCtmSoftphone', () => {
     const access = {
       token: 'TKN-123',
       valid_until: 1799999999,
-      account_id: '596375',
-      user: { account: '596375' },
+      account_id: '500001',
+      user: { account: '500001' },
     };
     const getToken = vi.fn().mockResolvedValue(access);
     const { sp, el } = makeSoftphone({ getToken });
@@ -366,8 +366,8 @@ describe('createCtmSoftphone — proactive token refresh', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const getToken = vi
       .fn()
-      .mockResolvedValueOnce({ token: 'T1', valid_until: nowSec + 600, account_id: '596375', user: { account: '596375' } })
-      .mockResolvedValueOnce({ token: 'T2', valid_until: nowSec + 600, account_id: '596375', user: { account: '596375' } });
+      .mockResolvedValueOnce({ token: 'T1', valid_until: nowSec + 600, account_id: '500001', user: { account: '500001' } })
+      .mockResolvedValueOnce({ token: 'T2', valid_until: nowSec + 600, account_id: '500001', user: { account: '500001' } });
     const { sp, el } = makeSoftphone({ getToken });
     await sp.ready;
 

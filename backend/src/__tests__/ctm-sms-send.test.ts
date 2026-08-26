@@ -35,7 +35,7 @@ const sendParams = (overrides: Record<string, unknown> = {}) => ({
 
 /** A fully connected + SMS-ready + entitled + kill-switch-on org record. */
 const CONNECTED_ORG_ROW = {
-  ctm_account_id: '596375',
+  ctm_account_id: '500001',
   ctm_sms_ready: true,
   sms_sending_enabled: true,
   plan: 'PRO',
@@ -95,7 +95,7 @@ describe('sendCtmSms — compliance gates', () => {
 
   it('blocks on SMS_NOT_READY (A2P pending) — client never called, row untouched', async () => {
     mockConnectedOrg();
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375', ctm_sms_ready: false });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001', ctm_sms_ready: false });
 
     const result = await sendCtmSms(prisma, sendParams());
 
@@ -198,7 +198,7 @@ describe('sendCtmSms — compliance gates', () => {
     const result = await sendCtmSms(prisma, sendParams());
 
     expect(result).toEqual({ delivered: false, reason: 'RECIPIENT_OPTED_OUT' });
-    expect(client.isOptedOut).toHaveBeenCalledWith('596375', TO);
+    expect(client.isOptedOut).toHaveBeenCalledWith('500001', TO);
     expect(client.sendSms).not.toHaveBeenCalled();
     expect(p.message.update).toHaveBeenCalledWith({
       where: { id: MSG_ID },
@@ -249,7 +249,7 @@ describe('sendCtmSms — delivery outcomes', () => {
     await flush();
 
     expect(result).toEqual({ delivered: true });
-    expect(client.sendSms).toHaveBeenCalledWith('596375', {
+    expect(client.sendSms).toHaveBeenCalledWith('500001', {
       from: 'TPN-A',
       to: TO,
       msg: 'Your technician is on the way',
@@ -494,7 +494,7 @@ describe('recordOutboundSms — CTM delivery seam', () => {
       body: 'Automated reminder',
     });
 
-    expect(client.sendSms).toHaveBeenCalledWith('596375', {
+    expect(client.sendSms).toHaveBeenCalledWith('500001', {
       from: 'TPN-A',
       to: '+15551234567',
       msg: 'Automated reminder',
@@ -599,7 +599,7 @@ describe('POST /api/communication/sms — connected-org gating', () => {
   it('409s SMS_NOT_READY with no row created', async () => {
     mockAuthAs('dispatcher');
     mockConnectedSendPath();
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375', ctm_sms_ready: false });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001', ctm_sms_ready: false });
 
     const res = await request(app)
       .post('/api/communication/sms')
@@ -694,7 +694,7 @@ describe('POST /api/communication/sms — connected-org gating', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.delivery).toBe('sent');
-    expect(client.sendSms).toHaveBeenCalledWith('596375', {
+    expect(client.sendSms).toHaveBeenCalledWith('500001', {
       from: 'TPN-A',
       to: '+15551234567',
       msg: 'hello',

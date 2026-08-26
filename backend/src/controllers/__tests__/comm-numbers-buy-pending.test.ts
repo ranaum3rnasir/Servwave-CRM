@@ -26,7 +26,7 @@ import { mockAuthAs, authHeader, ALPHA_ORG_ID } from '../../__tests__/helpers';
 const p = prisma as any;
 const client = ctmClient as any;
 
-const CTM_ACCOUNT_ID = '597911';
+const CTM_ACCOUNT_ID = '500002';
 const WANTED = '+16097775555';
 
 const buy = (body: Record<string, unknown> = {}) =>

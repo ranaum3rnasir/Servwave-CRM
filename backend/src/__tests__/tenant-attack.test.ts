@@ -541,13 +541,13 @@ describe('Attack 6 — Settings + Organization row isolation', () => {
   it('PATCH /api/settings/<key> as Org B → upsert keyed under Org B (not Org A)', async () => {
     mockAuthAs('orgB_admin');
     (prisma.appSetting.upsert as Mock).mockResolvedValue({
-      organization_id: ORG_B_ID, key: 'company_name', value: 'B&G', updated_at: new Date(),
+      organization_id: ORG_B_ID, key: 'company_name', value: 'Lakeside', updated_at: new Date(),
     });
 
     const res = await request(app)
       .patch('/api/settings/company_name')
       .set(authHeader('orgB_admin'))
-      .send({ value: 'B&G' });
+      .send({ value: 'Lakeside' });
 
     expect(res.status).toBe(200);
     const calls = (prisma.appSetting.upsert as Mock).mock.calls;
@@ -562,7 +562,7 @@ describe('Attack 6 — Settings + Organization row isolation', () => {
   it('GET /api/organization as Org B → loads Org B row only (never Org A)', async () => {
     mockAuthAs('orgB_admin');
     (prisma.organization.findUnique as Mock).mockResolvedValue({
-      id: ORG_B_ID, name: 'B&G', logo_url: null, brand_color: '#242424',
+      id: ORG_B_ID, name: 'Lakeside', logo_url: null, brand_color: '#242424',
     });
 
     const res = await request(app).get('/api/organization').set(authHeader('orgB_admin'));

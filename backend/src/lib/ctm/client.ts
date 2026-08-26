@@ -225,11 +225,11 @@ async function* paginate<T>(
     yield items;
 
     // CTM's `next_page` is a URL, not a page number:
-    //   "https://api.calltrackingmetrics.com/api/v1/accounts/596375/calls?page=2"
+    //   "https://api.calltrackingmetrics.com/api/v1/accounts/500001/calls?page=2"
     // so it is a "there is more" flag and nothing else. This walk used to do
     // Number(next_page), got NaN, and stopped after page one - silently, since
     // a truncated list looks exactly like a short one. Page size is 10, so
-    // every caller saw the first 10 of everything: 10 of Alpha Doors' 20
+    // every caller saw the first 10 of everything: 10 of Northwind Services' 20
     // numbers, 10 of its 123 calls. Advance by counting, and prefer
     // total_pages (a real number) as the bound.
     if (items.length === 0) break;
@@ -335,7 +335,7 @@ export async function updateNumberRouting(
 /**
  * Give a tracking number back, ending its recurring charge.
  *
- * CONFIRMED live 2026-08-12 against sub-account 597911, end to end: releasing
+ * CONFIRMED live 2026-08-12 against sub-account 500002, end to end: releasing
  * the orphaned `+1 609-596-8565` took the account from four numbers to three
  * and ended its 2026-09-05 billing. The `POST …/release` spelling, by
  * contrast, returns the router's generic `{"error":"invalid request"}` - no
@@ -366,7 +366,7 @@ export async function createReceivingNumber(
  *  Each record carries BOTH ids CTM uses for a receiving number: the `id`
  *  string (RPN…) that the routing endpoints take, and a numeric `filter_id`.
  *  The call webhook's `answered_by.receiving_number_id` is the FILTER_ID -
- *  verified against the live Alpha Doors account on 2026-08-07 - which is what
+ *  verified against the live Northwind Services account on 2026-08-07 - which is what
  *  makes "who picked up this forwarded call" answerable at all. */
 export async function listReceivingNumbers(
   accountId: string,
@@ -495,11 +495,11 @@ export async function deleteWebhook(accountId: string, webhookId: string | numbe
  * Fetch one call activity by the CA… sid we store.
  *
  * CTM's call-detail path is keyed by the NUMERIC activity id, not the sid:
- * `/accounts/596375/calls/4367824697` answers 200 while
- * `/accounts/596375/calls/CA96f6f290523bc59bd930eebc84d324c9` - the SAME call -
+ * `/accounts/500001/calls/4367824697` answers 200 while
+ * `/accounts/500001/calls/CA96f6f290523bc59bd930eebc84d324c9` - the SAME call -
  * answers `404 {"reason":"call not found"}`. We only ever persist the sid (the
  * numeric id has no column), so resolve it through the list endpoint's `search`
- * term, which matches a sid exactly. Verified live against account 596375,
+ * term, which matches a sid exactly. Verified live against account 500001,
  * including for calls old enough that the 404 first read as data expiry.
  *
  * A miss is a 200 with `total_entries: 0`, and `search` is free text, so both

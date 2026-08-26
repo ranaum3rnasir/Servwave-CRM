@@ -24,7 +24,7 @@ import { reattributeOrg, BATCH_SIZE, type ReattributeDeps } from '../ctm-reattri
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const ORG_ID = 'ab0e6f4e-0000-4000-8000-000000000042';
-const ACCOUNT_ID = '596375';
+const ACCOUNT_ID = '500001';
 const SAGIV_ID = 'b0000000-0000-0000-0000-00000000000b';
 
 const DEFAULT_ORG = { id: ORG_ID, ctm_account_id: ACCOUNT_ID };

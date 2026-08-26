@@ -28,7 +28,7 @@ const p = prisma as any;
 const CALL_END_PAYLOAD = {
   sid: 'CA0001',
   id: 12345,
-  account_id: 596375,
+  account_id: 500001,
   caller_number: '+12015551234',
   tracking_number: '+12019037784',
   direction: 'inbound',
@@ -136,7 +136,7 @@ describe('CTM webhook auth (fail closed)', () => {
   // API secret). CTM signs sub-account webhooks with a different secret, so with
   // the API secret set but no dedicated signing secret, a signed webhook must
   // still pass on the token alone — reusing the API secret 401'd every real
-  // Alpha Doors (596375) webhook on 2026-07-13.
+  // Northwind Services (500001) webhook on 2026-07-13.
   it('does NOT verify the signature against CTM_SECRET_KEY — signed webhook passes when signing secret is unset', async () => {
     mockEnv.env.CTM_WEBHOOK_SIGNING_SECRET = undefined; // API secret stays set
     const rawBody = JSON.stringify(CALL_END_PAYLOAD);
@@ -265,7 +265,7 @@ describe('CTM webhook ingestion flow', () => {
 describe('CTM inbound SMS ingestion', () => {
   const SMS_PAYLOAD = {
     message_id: 'MSG0001',
-    account_id: 596375,
+    account_id: 500001,
     caller_number: '+12015551234',
     tracking_number: '+12019037784',
     direction: 'msg_inbound',
@@ -332,7 +332,7 @@ describe('CTM inbound SMS ingestion', () => {
 describe('CTM SMS thread find/create parity (one thread per counterpart)', () => {
   const SMS_PAYLOAD = {
     message_id: 'MSG1001',
-    account_id: 596375,
+    account_id: 500001,
     caller_number: '+12015551234',
     tracking_number: '+12019037784',
     direction: 'msg_inbound',
@@ -416,7 +416,7 @@ describe('CTM SMS thread find/create parity (one thread per counterpart)', () =>
 describe('CTM outbound SMS reconciliation (webhook side)', () => {
   const OUT_PAYLOAD = {
     message_id: 'MSG2001',
-    account_id: 596375,
+    account_id: 500001,
     caller_number: '+12019037784',
     called_number: '+12015551234',
     direction: 'msg_outbound',
@@ -488,7 +488,7 @@ describe('CTM status_change carries outbound texts (the outbound_text hook never
   const STATUS_CHANGE_TEXT = {
     sid: '1056366839',
     message_id: 'MSGA9B07EC712F11C71FF8D9CB2DB3A28D80EBAA4A638C1559085F6E896A61189CC',
-    account_id: 596375,
+    account_id: 500001,
     caller_number: '+15555550199',
     contact_number: '+15555550199',
     called_number: '+12015551234',

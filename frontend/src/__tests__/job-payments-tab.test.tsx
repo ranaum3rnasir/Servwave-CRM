@@ -296,7 +296,7 @@ describe('JobDetailPage — Payments tab', () => {
 
 // The estimate-anchored job shape: the R6 conversion sets Estimate.job_id and leaves
 // jobs.estimate_id null, so the job has a paid DEPOSIT invoice and no STANDARD one. Reproduces
-// staging job 698630 (Alpha Doors & Security), which showed a paid $3,467.67 deposit in Payment
+// staging job 698630 (Northwind Services), which showed a paid $3,467.67 deposit in Payment
 // history while the Invoice card read "No invoice yet" and the masthead read "No contract yet".
 describe('JobDetailPage - job linked to its estimate via EstimateJobLink', () => {
   const LINKED_ESTIMATE = {

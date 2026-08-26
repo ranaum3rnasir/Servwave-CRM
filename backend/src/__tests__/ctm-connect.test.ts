@@ -47,8 +47,8 @@ beforeEach(() => {
 
   client.isCtmConfigured.mockReturnValue(true);
   client.listAccounts.mockResolvedValue([
-    { id: 596375, name: 'Alpha Doors & Security' },
-    { id: 597911, name: 'Servwave' },
+    { id: 500001, name: 'Northwind Services' },
+    { id: 500002, name: 'Servwave' },
   ]);
   client.listNumbers.mockResolvedValue([
     { id: 'TPN-A', number: '+12019037784', name: 'Main line' },
@@ -61,7 +61,7 @@ beforeEach(() => {
   client.getA2pStatus.mockResolvedValue({ a2p_campaigns: [{ name: 'contact Customer', status: 'Approved' }] });
 
   p.organization.update.mockResolvedValue({ id: 'org-1' });
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   p.phoneNumber.upsert.mockResolvedValue({ id: 'pn-1' });
   p.phoneNumber.updateMany.mockResolvedValue({ count: 0 });
   p.auditLog.create.mockResolvedValue({});
@@ -69,7 +69,7 @@ beforeEach(() => {
 
 describe('connectCtmSchema', () => {
   it('requires exactly one of ctm_account_id / createNew', () => {
-    expect(connectCtmSchema.safeParse({ ctm_account_id: '596375' }).success).toBe(true);
+    expect(connectCtmSchema.safeParse({ ctm_account_id: '500001' }).success).toBe(true);
     expect(connectCtmSchema.safeParse({ createNew: true, name: 'New Org' }).success).toBe(true);
     expect(connectCtmSchema.safeParse({}).success).toBe(false);
     expect(connectCtmSchema.safeParse({ ctm_account_id: '1', createNew: true, name: 'x' }).success).toBe(false);
@@ -81,7 +81,7 @@ describe('connectCtm', () => {
   it('503s when CTM keys are not configured', async () => {
     client.isCtmConfigured.mockReturnValue(false);
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
     expect(res.status).toHaveBeenCalledWith(503);
   });
 
@@ -94,10 +94,10 @@ describe('connectCtm', () => {
 
   it('connects: stores the account id, imports BOTH numbers, provisions the four live hooks, flips sms_ready', async () => {
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
 
     expect(p.organization.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'org-1' }, data: { ctm_account_id: '596375' } }),
+      expect.objectContaining({ where: { id: 'org-1' }, data: { ctm_account_id: '500001' } }),
     );
     expect(p.phoneNumber.upsert).toHaveBeenCalledTimes(2);
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
@@ -132,13 +132,13 @@ describe('connectCtm', () => {
 
   it('sends CTM the position it validates (`start`) while keeping our `starts` route path', async () => {
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
 
     const startCall = client.createWebhook.mock.calls.find(
       (c: any[]) => String(c[1].weburl).includes('/ctm/starts?'),
     );
     expect(startCall).toBeDefined();
-    // Probed live against account 596375 on 2026-08-05: CTM 406s `starts` with
+    // Probed live against account 500001 on 2026-08-05: CTM 406s `starts` with
     // {"position":["is not included in the list"]}. `start` is accepted.
     expect(startCall![1].position).toBe('start');
     // The path is OURS and must not follow the position - ctm-webhook.controller
@@ -154,7 +154,7 @@ describe('connectCtm', () => {
       })),
     );
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
     expect(client.createWebhook).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].webhooks_provisioned).toHaveLength(4);
   });
@@ -162,7 +162,7 @@ describe('connectCtm', () => {
   it('409s a claim-jack (account already connected to another org)', async () => {
     p.organization.update.mockRejectedValueOnce({ code: 'P2002' });
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
     expect(res.status).toHaveBeenCalledWith(409);
     expect(p.phoneNumber.upsert).not.toHaveBeenCalled();
   });
@@ -170,7 +170,7 @@ describe('connectCtm', () => {
   it('connects without provisioning when BACKEND_PUBLIC_URL is unset (warning, not failure)', async () => {
     mockEnv.env.BACKEND_PUBLIC_URL = undefined;
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
     expect(client.createWebhook).not.toHaveBeenCalled();
     const body = res.json.mock.calls[0][0];
     expect(body.connected).toBe(true);
@@ -180,7 +180,7 @@ describe('connectCtm', () => {
   it('surfaces enable_sms failure per number instead of failing the connect', async () => {
     client.enableSms.mockResolvedValueOnce('failure').mockResolvedValueOnce('alreadyenabled');
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
     const body = res.json.mock.calls[0][0];
     expect(body.connected).toBe(true);
     expect(body.warnings.join(' ')).toMatch(/SMS not enabled \(failure\)/);
@@ -215,7 +215,7 @@ describe('disconnectCtm', () => {
     const res = mockRes();
     await disconnectCtm(req(), res);
     expect(client.deleteWebhook).toHaveBeenCalledTimes(1);
-    expect(client.deleteWebhook).toHaveBeenCalledWith('596375', '1');
+    expect(client.deleteWebhook).toHaveBeenCalledWith('500001', '1');
     expect(p.organization.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { ctm_account_id: null, ctm_sms_ready: false } }),
     );
@@ -235,7 +235,7 @@ describe('disconnectCtm', () => {
 
   it('a re-connect reactivates previously imported numbers (importNumbers upsert sets active)', async () => {
     const res = mockRes();
-    await connectCtm(req({ ctm_account_id: '596375' }), res);
+    await connectCtm(req({ ctm_account_id: '500001' }), res);
 
     // BOTH the create and the update arm of the import upsert force status active.
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];

@@ -22,7 +22,7 @@ const mockPrisma = prisma as unknown as {
 
 const ORG_ROW = {
   id: ALPHA_ORG_ID,
-  name: 'Alpha Doors',
+  name: 'Northwind Services',
   logo_url: null,
   brand_color: '#0C2D3A',
   currency: 'USD',
@@ -40,7 +40,7 @@ const DRAFT_PO = {
   job_id: null,
 };
 
-const SENT_RESULT = { status: 'sent' as const, subject: 'Purchase Order PO-1001 from Alpha Doors', html: '<html>po</html>' };
+const SENT_RESULT = { status: 'sent' as const, subject: 'Purchase Order PO-1001 from Northwind Services', html: '<html>po</html>' };
 
 beforeEach(() => {
   vi.clearAllMocks();

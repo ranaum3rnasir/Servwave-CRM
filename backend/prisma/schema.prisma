@@ -2182,7 +2182,7 @@ model Organization {
   state                    String    @db.VarChar(50)
   postal_code              String    @db.VarChar(20)
   country                  String    @default("US") @db.VarChar(2)
-  timezone                 String?   @default("America/New_York") @db.VarChar(64) // IANA tz for server-side date rendering (emails/PDFs). Nullable: ServWave shares the staging DB and created this column nullable; code falls back to DEFAULT_TIMEZONE. See lib/timezone.ts. VarChar(64) matches the live staging column (org_settings migration created it 64; the idempotent B&G migration's VARCHAR(50) ADD COLUMN IF NOT EXISTS no-op'd).
+  timezone                 String?   @default("America/New_York") @db.VarChar(64) // IANA tz for server-side date rendering (emails/PDFs). Nullable: ServWave shares the staging DB and created this column nullable; code falls back to DEFAULT_TIMEZONE. See lib/timezone.ts. VarChar(64) matches the live staging column (org_settings migration created it 64; the idempotent Lakeside migration's VARCHAR(50) ADD COLUMN IF NOT EXISTS no-op'd).
   email                    String    @db.VarChar(200)
   phone                    String?   @db.VarChar(50)
   website                  String?   @db.VarChar(200)
@@ -2204,7 +2204,7 @@ model Organization {
   platform_fee_bps         Int       @default(50) // per-org platform fee, bps (50 = 0.5%); support-only knob. Card payments no longer use it - it survives as the disclosed_fee_bps written onto a TermsAcceptance.
   // NOTE: there is deliberately NO card-service-fee column. Paying by card always carries the
   // card service fee, so it has no per-org switch; the RATE is the CARD_SERVICE_FEE_BPS constant.
-  ctm_account_id           String?   @unique // CTM sub-account id ("596375"); null = phone module not connected. UNIQUE = claim-jack guard across orgs.
+  ctm_account_id           String?   @unique // CTM sub-account id ("500001"); null = phone module not connected. UNIQUE = claim-jack guard across orgs.
   ctm_sms_ready            Boolean   @default(false) // A2P campaign approved on the CTM side — gates outbound SMS.
   accepted_payment_methods Json      @default("[]") // §4.5: array of PaymentMethod strings (CARD, EXTERNAL_CARD, BANK_TRANSFER, CHECK, CASH). Pre-fills Send Estimate modal + filters public estimate/invoice pages.
   source_options           Json      @default("[\"Google\",\"Referral\",\"Facebook\",\"Instagram\",\"Yelp\",\"Direct Mail\",\"Door Hanger\",\"Other\"]")

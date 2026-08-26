@@ -67,7 +67,7 @@ function fakeTx(orgName: string) {
 
 describe('purgeOrganization', () => {
   it('refuses when the org name does not match the guard prefix', async () => {
-    const { tx } = fakeTx('B&G Mechanical'); // the real demo org
+    const { tx } = fakeTx('Lakeside Mechanical'); // the real demo org
     await expect(purgeOrganization(tx, ORG, 'e2e-qa-')).rejects.toThrow(/Refusing to purge/);
   });
 
@@ -137,7 +137,7 @@ describe('purgeOrganization', () => {
     });
 
     it('does not touch them at all when the name guard rejects', async () => {
-      const { tx, calls } = fakeTx('B&G Mechanical');
+      const { tx, calls } = fakeTx('Lakeside Mechanical');
       await expect(purgeOrganization(tx, ORG, 'e2e-qa-')).rejects.toThrow(/Refusing to purge/);
       expect(calls).toEqual([]);
     });

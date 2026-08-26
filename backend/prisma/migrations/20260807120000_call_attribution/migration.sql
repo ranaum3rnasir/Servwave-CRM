@@ -3,7 +3,7 @@
 -- CTM's webhook already carries a full attribution block - source, medium,
 -- campaign, keyword, referrer, ad_network, ad_group/creative ids, gclid - and
 -- ingest persisted exactly ONE of them (`tracking_source` <- payload.source),
--- discarding the rest. Alpha Doors runs campaign numbers that forward to the
+-- discarding the rest. Northwind Services runs campaign numbers that forward to the
 -- office, so "which campaign did this caller come from" is a reporting
 -- requirement, not a nicety.
 --

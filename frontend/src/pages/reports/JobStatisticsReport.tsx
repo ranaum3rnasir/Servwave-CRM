@@ -38,7 +38,7 @@ import { chartPalette, token } from '@/design-system';
 import { formatCurrencyWhole } from '@/lib/utils';
 import { hashStr, mulberry32 } from '@/lib/reports/random';
 
-// ── Domain vocab (Alpha Security US) ─────────────────────────────────────────
+// ── Domain vocab (Northwind Services) ─────────────────────────────────────────
 const STATUSES = ['Submitted', 'In progress', 'Done', 'Canceled'] as const;
 type Status = (typeof STATUSES)[number];
 // weighted draw so most jobs are Done/Submitted

@@ -9,7 +9,7 @@
  */
 import { hashStr, mulberry32 } from './random';
 
-// ── Domain vocab (Alpha Security US) ─────────────────────────────────────────
+// ── Domain vocab (Northwind Services) ─────────────────────────────────────────
 export const STATUSES = ['Open', 'Converted', 'Sold', 'Sold-done', 'Lost'] as const;
 export type Status = (typeof STATUSES)[number];
 // Statuses that count as a win for the conversion KPIs.

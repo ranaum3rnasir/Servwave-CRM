@@ -30,7 +30,7 @@ export const JOB_SORT_FIELDS: SortFieldMap = {
   status: ['status'],
   // A1 (RATIFIED, multi-visit S8 §4) - NOT scheduled_start. That column is the FORWARD-looking
   // mirror and goes null the moment a job's last live visit is worked; staging measures 7,492
-  // jobs (7,349 Talon Septic + 141 ServWave Test + 2 Alpha Doors) with scheduled_start set but no
+  // jobs (7,349 Riverbend Septic + 141 ServWave Test + 2 Northwind Services) with scheduled_start set but no
   // live visit, so sorting on it would blank the Scheduled column for every completed job in the
   // biggest org. first_visit_start is the BACKWARD-looking span start (A2+): it equals
   // scheduled_start's value for every single-visit job, never reverts to null once a visit has

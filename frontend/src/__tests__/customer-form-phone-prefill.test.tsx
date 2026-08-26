@@ -27,7 +27,7 @@ describe('CustomerFormPage — ?phone= create-prefill (dialer slice 2.2)', () =>
     });
 
     await waitFor(() =>
-      expect(screen.getByDisplayValue('(609) 874-5252')).toBeInTheDocument(),
+      expect(screen.getByDisplayValue('(555) 555-0199')).toBeInTheDocument(),
     );
   });
 

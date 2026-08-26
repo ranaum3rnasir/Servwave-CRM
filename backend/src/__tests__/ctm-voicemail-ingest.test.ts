@@ -2,8 +2,8 @@
  * ctm-voicemail-ingest.test.ts — Phone master plan Phase C, Task C4.
  *
  * RESEARCH NOTE (Supabase MCP, project redacted-staging-ref, 2026-07-16): the
- * live `ctm_events` table holds 15 stored `end` events for Alpha Doors
- * (596375) and NONE of them are a voicemail — every one is either
+ * live `ctm_events` table holds 15 stored `end` events for Northwind Services
+ * (500001) and NONE of them are a voicemail — every one is either
  * agent-answered (`agent` present, dial_status "answered") or forwarded to an
  * external phone (`agent` null, dial_status "answered"/"completed",
  * `call_path`'s only hop is a `PhysicalPhoneNumber`/`CallQueue`/
@@ -30,11 +30,11 @@ const p = prisma as any;
 
 const ORG_ID = 'org-1';
 
-// Real-shape base (from the live Alpha Doors rows above) — inbound, no
+// Real-shape base (from the live Northwind Services rows above) — inbound, no
 // agent, answered by CTM's IVR rather than a human.
 const BASE_END = {
   sid: 'CA9101',
-  account_id: 596375,
+  account_id: 500001,
   caller_number: '+15555550199',
   caller_number_complete: '+15555550199',
   tracking_number: '+12017401509',
@@ -53,8 +53,8 @@ const VOICEMAIL_END = {
   call_status: 'answered',
   duration: 42,
   talk_time: 38,
-  audio: 'https://app.calltrackingmetrics.com/api/v1/accounts/596375/calls/CA9101/recording',
-  transcription: '/api/v1/accounts/596375/calls/CA9101/transcription.json',
+  audio: 'https://app.calltrackingmetrics.com/api/v1/accounts/500001/calls/CA9101/recording',
+  transcription: '/api/v1/accounts/500001/calls/CA9101/transcription.json',
   transcription_text: 'Hi, this is Greg — please call me back about the leak.',
   call_path: [
     {
@@ -81,7 +81,7 @@ const ANSWERED_END = {
   call_status: 'answered',
   duration: 24,
   talk_time: 16,
-  agent: { id: 'USR1', name: 'Emanuel Dahan', email: 'emanuel@alphasecurityus.com' },
+  agent: { id: 'USR1', name: 'Emanuel Dahan', email: 'emanuel@northwind.example.com' },
   call_path: [
     {
       route_id: 'COR1819B95F1F30B8D29D6074F01BE71F04D8CBF51A96',

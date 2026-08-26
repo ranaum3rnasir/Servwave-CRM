@@ -36,7 +36,7 @@ const p = prisma as any;
 const client = ctmClient as any;
 
 const ORG_ID = 'a0000000-0000-0000-0000-0000000000aa';
-const ACCOUNT_ID = '597911';
+const ACCOUNT_ID = '500002';
 const TRACKING = '+16097191235';
 
 const SHERRY_ID = 'b0000000-0000-0000-0000-00000000000b';

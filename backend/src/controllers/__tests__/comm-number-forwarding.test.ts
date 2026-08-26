@@ -22,7 +22,7 @@ const p = prisma as any;
 const client = ctmClient as any;
 
 const PN1 = '00000000-0000-0000-0000-0000000000e1';
-const CTM_ACCOUNT_ID = '596375';
+const CTM_ACCOUNT_ID = '500001';
 
 const numberRow = (over: Record<string, unknown> = {}) => ({
   id: PN1,

@@ -23,7 +23,7 @@ const ADMIN = buildAbility([{ action: 'manage', subject: 'all' }]);
 const LIVE_ADDRESS = 'ops@realorg.example.com';
 const NO_MAILBOX = 'No mailbox connected';
 // Assembled from parts so the source-scan guards below cannot match this file.
-const SEED_ADDRESS_NEEDLE = ['emanuel', '@', 'alphasecurityus.com'].join('');
+const SEED_ADDRESS_NEEDLE = ['emanuel', '@', 'northwind.example.com'].join('');
 const DEAD_READ_NEEDLE = ['acct', '.address'].join('');
 
 const COMPOSE: ComposeState = {
@@ -141,7 +141,7 @@ describe('ComposeWindow From identity', () => {
     );
 
     expect(screen.getByText(NO_MAILBOX)).toBeInTheDocument();
-    expect(container.textContent).not.toMatch(/@alphasecurityus\.com/);
+    expect(container.textContent).not.toMatch(/@northwind\.com/);
   });
 
   it('renders a live mailbox address verbatim', () => {
@@ -202,7 +202,7 @@ describe('InlineComposer From identity', () => {
     // Twice: the header From label and the single honest chip that replaces the
     // two-item prototype account list.
     expect(screen.getAllByText(NO_MAILBOX)).toHaveLength(2);
-    expect(container.textContent).not.toMatch(/@alphasecurityus\.com/);
+    expect(container.textContent).not.toMatch(/@northwind\.com/);
     expect(container.textContent).not.toContain('no-reply@servwave.app');
   });
 });
@@ -223,7 +223,7 @@ describe('CustomerDetailPage composer From identity', () => {
     await user.click(screen.getByRole('button', { name: CUSTOMER.email }));
 
     expect(await screen.findByText(NO_MAILBOX)).toBeInTheDocument();
-    expect(container.textContent).not.toMatch(/@alphasecurityus\.com/);
+    expect(container.textContent).not.toMatch(/@northwind\.com/);
     expect(container.textContent).not.toContain('no-reply@servwave.app');
   });
 });

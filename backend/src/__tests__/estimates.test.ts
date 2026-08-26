@@ -7488,7 +7488,7 @@ describe('GET /api/estimates/:id/public', () => {
       mockPrisma.estimate.findFirst.mockResolvedValue(withMethods(['CARD', 'CHECK', 'CASH']));
       mockPrisma.appSetting.findUnique.mockResolvedValue(null);
       mockPrisma.organization.findUnique.mockResolvedValue({
-        id: 'org-test-1', name: 'Alpha Doors',
+        id: 'org-test-1', name: 'Northwind Services',
         accepted_payment_methods: ['CARD', 'CHECK', 'CASH'],
         stripe_charges_enabled: false,
       });
@@ -7507,7 +7507,7 @@ describe('GET /api/estimates/:id/public', () => {
         value: JSON.stringify(['CHECK', 'CASH']),
       });
       mockPrisma.organization.findUnique.mockResolvedValue({
-        id: 'org-test-1', name: 'Alpha Doors',
+        id: 'org-test-1', name: 'Northwind Services',
         accepted_payment_methods: ['CARD', 'CHECK'],
         stripe_charges_enabled: true,
       });
@@ -7523,7 +7523,7 @@ describe('GET /api/estimates/:id/public', () => {
       mockPrisma.estimate.findFirst.mockResolvedValue(withMethods(['CARD', 'EXTERNAL_CARD', 'CHECK']));
       mockPrisma.appSetting.findUnique.mockResolvedValue(null);
       mockPrisma.organization.findUnique.mockResolvedValue({
-        id: 'org-test-1', name: 'Alpha Doors',
+        id: 'org-test-1', name: 'Northwind Services',
         accepted_payment_methods: ['CARD', 'CHECK'],
         stripe_charges_enabled: true,
       });
@@ -7610,7 +7610,7 @@ describe('GET /api/estimates/:id/public', () => {
       lead: { customer: { first_name: 'John', last_name: 'Doe', company_name: null } },
     });
     mockPrisma.organization.findUnique.mockResolvedValueOnce({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#242424',
+      name: 'Northwind Services', logo_url: null, brand_color: '#242424',
       email: 'info@alpha.com', website: null, estimate_terms: 'Sample terms.',
       estimate_notes: 'Notes', estimate_payment_terms: 'Payment terms', country: 'US',
     });
@@ -7621,7 +7621,7 @@ describe('GET /api/estimates/:id/public', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.organization).toMatchObject({
-      name: 'Alpha Doors',
+      name: 'Northwind Services',
       brand_color: '#242424',
       email: 'info@alpha.com',
       estimate_terms: 'Sample terms.',
@@ -7640,7 +7640,7 @@ describe('GET /api/estimates/:id/public', () => {
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
     mockPrisma.organization.findUnique.mockResolvedValue({
-      id: 'org-test-1', name: 'Alpha Doors',
+      id: 'org-test-1', name: 'Northwind Services',
       accepted_payment_methods: ['CARD', 'CHECK'],
       stripe_charges_enabled: true,
     });
@@ -7663,7 +7663,7 @@ describe('GET /api/estimates/:id/public', () => {
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
     mockPrisma.organization.findUnique.mockResolvedValue({
-      id: 'org-test-1', name: 'Alpha Doors',
+      id: 'org-test-1', name: 'Northwind Services',
       accepted_payment_methods: ['CARD', 'CHECK'],
       stripe_charges_enabled: true,
     });
@@ -7687,7 +7687,7 @@ describe('GET /api/estimates/:id/public', () => {
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
     mockPrisma.organization.findUnique.mockResolvedValue({
-      id: 'org-test-1', name: 'Alpha Doors',
+      id: 'org-test-1', name: 'Northwind Services',
       accepted_payment_methods: ['CARD', 'CHECK'],
       stripe_charges_enabled: true,
       card_service_fee_enabled: false, // stale/ignored - must not suppress anything

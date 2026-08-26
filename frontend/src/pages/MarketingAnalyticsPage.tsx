@@ -42,7 +42,7 @@ import { Heading } from '@/components/ui/heading';
  * reports once their own data is in it. Two consequences for the mock data below.
  *
  * 1. Channels mirror what an electronic-security / door-installation contractor
- *    actually records - Alpha Doors' live `ad_source` values are Google, Website -
+ *    actually records - Northwind Services' live `ad_source` values are Google, Website -
  *    Submission, Referral, return-customer buckets, Account and SUB Company. Angi and
  *    paid social were removed: they are residential home-services channels and a
  *    commercial access-control buyer reads them as generic template data.

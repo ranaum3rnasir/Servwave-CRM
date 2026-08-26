@@ -2,16 +2,16 @@ import { useAuthStore } from '@/stores/auth.store';
 
 /**
  * Which real (non-demo) organizations are the Phase-0 CTM pilot — currently
- * just Alpha Doors & Security. Unrelated to the `phone` plan entitlement
+ * just Northwind Services. Unrelated to the `phone` plan entitlement
  * (module access is gated by `useFeature('phone')` now); this is a narrower
  * allowlist for the still-unfinished CTM sub-surfaces below.
  *
  * The allowlist is org ids, overridable via VITE_COMMUNICATION_ALLOWED_ORG_IDS
- * (comma-separated). Alpha Doors carries the same id in staging and prod, so
+ * (comma-separated). Northwind Services carries the same id in staging and prod, so
  * the hardcoded default works in every environment.
  */
-// Alpha Doors & Security — same org id in staging and prod.
-const DEFAULT_ALLOWED_ORG_IDS = ['d40afcec-0ddf-471f-b99d-8e5f23cbdadf'];
+// Northwind Services — same org id in staging and prod.
+const DEFAULT_ALLOWED_ORG_IDS = ['11111111-2222-4333-8444-555555555555'];
 
 /** The org-id allowlist, from VITE_COMMUNICATION_ALLOWED_ORG_IDS or the default. */
 export function communicationAllowedOrgIds(): string[] {
@@ -26,7 +26,7 @@ export function communicationAllowedOrgIds(): string[] {
 }
 
 /**
- * True ONLY for an allowlisted real CTM pilot org (currently just Alpha Doors &
+ * True ONLY for an allowlisted real CTM pilot org (currently just Northwind Services &
  * Security) — NOT demo orgs.
  *
  * Drives access (alongside `useIsDemoOrg`) to the phone-module surfaces not

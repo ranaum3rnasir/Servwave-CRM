@@ -257,7 +257,7 @@ export async function getArAging(req: Request, res: Response) {
     // DSO denominator = credit sales actually ISSUED in the window. Anchored on
     // sent_at (falling back to created_at for never-sent rows) because the Workiz
     // importer backdates created_at, and DRAFT invoices were never issued at all.
-    // Verified against the B&G clone: this choice moves DSO from 65 to 26 days.
+    // Verified against the Lakeside clone: this choice moves DSO from 65 to 26 days.
     const since = new Date(Date.now() - DSO_WINDOW_DAYS * 86_400_000);
     const sales = await prisma.invoice.aggregate({
       where: {

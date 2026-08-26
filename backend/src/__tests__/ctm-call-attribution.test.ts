@@ -45,7 +45,7 @@ const OUT_BODY = {
 /** Org connected to CTM with one active tracking number to dial from. */
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   p.phoneNumber.findFirst.mockResolvedValue({ ctm_number_id: 'TPN-A' });
   client.placeCall.mockResolvedValue({ status: 'success' });
   p.auditLog.create.mockResolvedValue({});
@@ -431,7 +431,7 @@ const ORG_ID = 'org-1';
 
 const OUT_STARTS = {
   sid: 'CA8001',
-  account_id: 596375,
+  account_id: 500001,
   direction: 'outbound',
   tracking_number: '+12395395911',
   called_number: '+15551234567',
@@ -465,7 +465,7 @@ const PLACER_ROW = {
 // reach a cell). This is exactly the flow Ran demoed.
 const OUT_END_EDITED = {
   sid: 'CA8009',
-  account_id: 596375,
+  account_id: 500001,
   direction: 'outbound',
   tracking_number: '+12395395911',
   called_number: '+15555550199',

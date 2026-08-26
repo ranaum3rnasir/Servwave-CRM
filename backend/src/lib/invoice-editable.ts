@@ -2,7 +2,7 @@
  * Invoice edit-lock policy (P2). An invoice's line items, billing, and due date stay editable
  * until it is *settled* — i.e. fully PAID (or otherwise closed). A SENT or PARTIAL invoice is
  * still editable: a partial payment does NOT lock it; only full payment does. This replaced the
- * earlier DRAFT-only rule so migrated/open invoices (e.g. Talon Septic's unpaid balances) and
+ * earlier DRAFT-only rule so migrated/open invoices (e.g. Riverbend Septic's unpaid balances) and
  * normal partial-pay workflows can be corrected after sending.
  */
 

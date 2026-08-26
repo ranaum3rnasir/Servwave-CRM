@@ -26,10 +26,10 @@ function mockIdentity(over: Partial<{ localPart: string; localPartIsCustom: bool
     if (url === '/api/communication/sending-identity') {
       return {
         data: {
-          address: `${over.localPart ?? 'alphadoorssecurity'}@${DOMAIN}`,
-          name: 'Alpha Doors & Security',
+          address: `${over.localPart ?? 'northwindservices'}@${DOMAIN}`,
+          name: 'Northwind Services',
           sendingEnabled: true,
-          localPart: over.localPart ?? 'alphadoorssecurity',
+          localPart: over.localPart ?? 'northwindservices',
           localPartIsCustom: over.localPartIsCustom ?? false,
           senderDomain: DOMAIN,
         },
@@ -71,14 +71,14 @@ describe('EmailSenderPage - what is editable', () => {
   it('seeds the field with the address the org currently sends from', async () => {
     render();
 
-    expect(await screen.findByDisplayValue('alphadoorssecurity')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('northwindservices')).toBeInTheDocument();
   });
 
   it('shows the domain as fixed text, never as an input', async () => {
     // The whole point: an org cannot choose a domain, so the suffix must not be
     // an editable control that re-offers the retired custom-domain model.
     render();
-    await screen.findByDisplayValue('alphadoorssecurity');
+    await screen.findByDisplayValue('northwindservices');
 
     expect(screen.getByText(`@${DOMAIN}`)).toBeInTheDocument();
     expect(screen.queryByDisplayValue(DOMAIN)).not.toBeInTheDocument();
@@ -109,7 +109,7 @@ describe('EmailSenderPage - saving', () => {
   it('sends only the local part, never a domain', async () => {
     const user = userEvent.setup();
     render();
-    const input = await screen.findByDisplayValue('alphadoorssecurity');
+    const input = await screen.findByDisplayValue('northwindservices');
 
     await user.clear(input);
     await user.type(input, 'service');
@@ -136,7 +136,7 @@ describe('EmailSenderPage - saving', () => {
 
   it('cannot save an unchanged value', async () => {
     render();
-    await screen.findByDisplayValue('alphadoorssecurity');
+    await screen.findByDisplayValue('northwindservices');
 
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
   });
@@ -146,10 +146,10 @@ describe('EmailSenderPage - saving', () => {
     // address; catching it client-side explains why rather than 400ing.
     const user = userEvent.setup();
     render();
-    const input = await screen.findByDisplayValue('alphadoorssecurity');
+    const input = await screen.findByDisplayValue('northwindservices');
 
     await user.clear(input);
-    await user.type(input, 'service@alphadoors.com');
+    await user.type(input, 'service@northwind.com');
 
     expect(screen.getByText(/no spaces, dots or @/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled();
@@ -159,7 +159,7 @@ describe('EmailSenderPage - saving', () => {
   it('rejects spaces and dots the same way', async () => {
     const user = userEvent.setup();
     render();
-    const input = await screen.findByDisplayValue('alphadoorssecurity');
+    const input = await screen.findByDisplayValue('northwindservices');
 
     await user.clear(input);
     await user.type(input, 'front.desk');
@@ -172,7 +172,7 @@ describe('EmailSenderPage - saving', () => {
     // from server data on every change would yank the field back mid-edit.
     const user = userEvent.setup();
     render();
-    const input = await screen.findByDisplayValue('alphadoorssecurity');
+    const input = await screen.findByDisplayValue('northwindservices');
 
     await user.clear(input);
     await user.type(input, 'service');

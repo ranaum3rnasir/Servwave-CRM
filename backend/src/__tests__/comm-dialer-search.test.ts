@@ -155,7 +155,7 @@ describe('GET /api/communication/dialer-search', () => {
     p.customer.findMany.mockResolvedValue([CUSTOMER_ROW]);
 
     const res = await request(app)
-      .get('/api/communication/dialer-search?q=(609)%20874-5252')
+      .get('/api/communication/dialer-search?q=(555)%20555-0199')
       .set(authHeader('dispatcher'));
 
     expect(res.status).toBe(200);

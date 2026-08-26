@@ -28,7 +28,7 @@ const OUT_BODY = {
 /** Org connected to CTM with one active tracking number to dial from. */
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   p.phoneNumber.findFirst.mockResolvedValue({ ctm_number_id: 'TPN-A' });
   client.placeCall.mockResolvedValue({ status: 'success' });
   p.auditLog.create.mockResolvedValue({});
@@ -67,7 +67,7 @@ describe('POST /api/communication/calls — click-to-call (CTM-connected, direct
 
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ queued: true });
-    expect(client.placeCall).toHaveBeenCalledWith('596375', {
+    expect(client.placeCall).toHaveBeenCalledWith('500001', {
       from_number: 'TPN-A',
       call_number: '+15551234567',
     });

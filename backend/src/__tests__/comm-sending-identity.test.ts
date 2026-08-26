@@ -29,8 +29,8 @@ describe('GET /api/communication/sending-identity', () => {
     mockAuthAs('admin');
     const { orgSendingIdentity } = await import('../lib/email.js');
     (orgSendingIdentity as any).mockResolvedValue({
-      address: 'alphadoors@mail.servwave.com',
-      name: 'Alpha Doors',
+      address: 'northwind@mail.servwave.com',
+      name: 'Northwind Services',
       sendingEnabled: true,
     });
 
@@ -40,8 +40,8 @@ describe('GET /api/communication/sending-identity', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
-      address: 'alphadoors@mail.servwave.com',
-      name: 'Alpha Doors',
+      address: 'northwind@mail.servwave.com',
+      name: 'Northwind Services',
       sendingEnabled: true,
     });
   });
@@ -53,8 +53,8 @@ describe('GET /api/communication/sending-identity', () => {
     mockAuthAs('admin');
     const { orgSendingIdentity } = await import('../lib/email.js');
     (orgSendingIdentity as any).mockResolvedValue({
-      address: 'alphadoors@mail.servwave.com',
-      name: 'Alpha Doors',
+      address: 'northwind@mail.servwave.com',
+      name: 'Northwind Services',
       sendingEnabled: false,
     });
 
@@ -70,8 +70,8 @@ describe('GET /api/communication/sending-identity', () => {
     mockAuthAs('admin');
     const { orgSendingIdentity } = await import('../lib/email.js');
     (orgSendingIdentity as any).mockResolvedValue({
-      address: 'alphadoors@mail.servwave.com',
-      name: 'Alpha Doors',
+      address: 'northwind@mail.servwave.com',
+      name: 'Northwind Services',
       sendingEnabled: true,
     });
 

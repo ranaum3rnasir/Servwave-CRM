@@ -45,7 +45,7 @@ const envSchema = z.object({
   // Dedicated secret for verifying CTM's X-CTM-Signature on inbound webhooks.
   // Deliberately SEPARATE from CTM_SECRET_KEY (the outbound-API secret): CTM
   // signs sub-account webhooks with a different secret, so reusing the API
-  // secret fail-closes every real webhook (401 storm, Alpha Doors 596375
+  // secret fail-closes every real webhook (401 storm, Northwind Services 500001
   // 2026-07-13). Left UNSET → the signature gate is skipped and the query
   // token is the sole auth (the plan's documented Phase-0 posture). Set this
   // only after the P4 probe confirms CTM's real signing secret + formula.

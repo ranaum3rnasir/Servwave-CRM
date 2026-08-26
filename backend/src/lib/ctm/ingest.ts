@@ -109,7 +109,7 @@ export function transcriptOf(a: Record<string, any>): string | null {
   return text.length > TRANSCRIPT_MAX_CHARS ? text.slice(0, TRANSCRIPT_MAX_CHARS) : text;
 }
 
-// Marketing attribution: which campaign produced this call. Alpha Doors runs
+// Marketing attribution: which campaign produced this call. Northwind Services runs
 // campaign numbers that FORWARD to the office, so the only durable link between
 // a conversation and the ad that paid for it is what CTM hands us here. Ingest
 // used to keep `source` alone (as tracking_source) and drop the rest.
@@ -221,7 +221,7 @@ export function transcriptTurnsOf(a: Record<string, any> | null | undefined): Tr
 //     summary. The other eight (demo / sales / project_kick_off / …) are
 //     B2B-SaaS template prose that reads as noise on a field-service call
 //     ("No product or feature was demonstrated"), so they stay unread.
-//  3. `notes` - the manual agent-typed note, empty on every stored Alpha Doors
+//  3. `notes` - the manual agent-typed note, empty on every stored Northwind Services
 //     payload, which is why reading it alone left the Insights column stuck on
 //     its empty-state dash forever.
 const SUMMARY_MAX_CHARS = 4_000;
@@ -414,7 +414,7 @@ export async function resolveAssignedAnswerer(
 
 // Voicemail disposition (Phase C, Task C4 — resolves plan open item #3).
 // RESEARCHED (Supabase MCP, 2026-07-16): the live ctm_events table holds 15
-// stored `end` events for Alpha Doors (596375) and NOT ONE is a voicemail —
+// stored `end` events for Northwind Services (500001) and NOT ONE is a voicemail —
 // every row is either agent-answered or forwarded to an external phone, and
 // `dial_status`/`call_status` are never literally "voicemail" in any of them
 // (there's also no dedicated `voicemail` key in the payload at all). So this

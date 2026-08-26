@@ -40,7 +40,7 @@ beforeEach(() => {
 });
 
 const ORG_ID = '00000000-0000-0000-0000-000000000001';
-const ORG = { id: ORG_ID, name: 'Alpha Doors', logo_url: null, brand_color: '#0C2D3A' };
+const ORG = { id: ORG_ID, name: 'Northwind Services', logo_url: null, brand_color: '#0C2D3A' };
 
 const BASE_PARAMS = {
   organizationId: ORG_ID,
@@ -61,12 +61,12 @@ describe('sendPurchaseOrderEmail (P2 item 6c)', () => {
     const result = await sendPurchaseOrderEmail({ ...BASE_PARAMS });
 
     expect(result.status).toBe('sent');
-    expect(result.subject).toBe('Purchase Order PO-1001 from Alpha Doors');
+    expect(result.subject).toBe('Purchase Order PO-1001 from Northwind Services');
 
     expect(resendSend).toHaveBeenCalledTimes(1);
     const payload = resendSend.mock.calls[0][0];
     expect(payload.to).toBe('orders@acme.com');
-    expect(payload.subject).toBe('Purchase Order PO-1001 from Alpha Doors');
+    expect(payload.subject).toBe('Purchase Order PO-1001 from Northwind Services');
     expect(payload.text).toContain('PO-1001');
     // Line table content: sku, name, qty, unit cost, extended, and the total row.
     expect(payload.html).toContain('LOCK-100');
@@ -108,7 +108,7 @@ describe('sendPurchaseOrderEmail (P2 item 6c)', () => {
     await sendPurchaseOrderEmail({ ...BASE_PARAMS, subject: 'Custom PO subject' });
     expect(resendSend.mock.calls[0][0].subject).toBe('Custom PO subject');
     expect((await sendPurchaseOrderEmail({ ...BASE_PARAMS })).subject).toBe(
-      'Purchase Order PO-1001 from Alpha Doors',
+      'Purchase Order PO-1001 from Northwind Services',
     );
   });
 

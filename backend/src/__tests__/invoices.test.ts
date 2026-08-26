@@ -4706,7 +4706,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings();
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_mid_onboarding',
       stripe_charges_enabled: false,
       accepted_payment_methods: ['CARD', 'EXTERNAL_CARD', 'CHECK'],
@@ -4726,7 +4726,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings({ available_payment_methods: '30' });
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_live',
       stripe_charges_enabled: true,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -4744,7 +4744,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings();
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_live',
       stripe_charges_enabled: true,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -4764,7 +4764,7 @@ describe('GET /api/invoices/:id/public', () => {
     // org's Stripe capability has since gone away/never arrived, so it must not leak through.
     mockAppSettings({ available_payment_methods: JSON.stringify(['CARD', 'CHECK', 'CASH']) });
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_mid_onboarding',
       stripe_charges_enabled: false,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -4784,7 +4784,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings();
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_live',
       stripe_charges_enabled: true,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -4806,7 +4806,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings();
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_live',
       stripe_charges_enabled: true,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -4827,7 +4827,7 @@ describe('GET /api/invoices/:id/public', () => {
     mockPrisma.invoice.findFirst.mockResolvedValue(invoice);
     mockAppSettings();
     (prisma.organization.findUnique as any).mockResolvedValue({
-      name: 'Alpha Doors', logo_url: null, brand_color: '#000000', phone: null,
+      name: 'Northwind Services', logo_url: null, brand_color: '#000000', phone: null,
       stripe_account_id: 'acct_live',
       stripe_charges_enabled: true,
       accepted_payment_methods: ['CARD', 'CHECK'],
@@ -6937,7 +6937,7 @@ describe('POST /api/invoices — standalone (customer-anchored, no job/estimate)
     // (the resolveOrAccreteLocation write must stay atomic), so the tax-rate read must run on
     // the SAME tx connection. Reading it on the global `prisma` client mid-transaction asks the
     // pooler for a 2nd connection that won't free until the txn commits → deadlock/error → 500.
-    // (Reproduced live on Talon NM customers; cf. learning-mocked-transaction-hides-connection-bugs.)
+    // (Reproduced live on Riverbend NM customers; cf. learning-mocked-transaction-hides-connection-bugs.)
     mockAuthAs('admin');
     mockPrisma.customer.findFirst.mockResolvedValue({
       id: CUSTOMER_FIXTURE.id,

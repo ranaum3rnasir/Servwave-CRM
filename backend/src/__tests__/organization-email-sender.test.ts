@@ -24,13 +24,13 @@ beforeEach(() => {
   mockAuthAs('admin');
   (prisma.organization.update as ReturnType<typeof vi.fn>).mockResolvedValue({
     id: ORG_ID,
-    name: 'Alpha Doors & Security',
+    name: 'Northwind Services',
     email_sender_local_part: 'service',
     email_sending_enabled: true,
   });
   (prisma.organization.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
     id: ORG_ID,
-    name: 'Alpha Doors & Security',
+    name: 'Northwind Services',
     email_sender_local_part: 'service',
     email_sending_enabled: true,
   });
@@ -68,7 +68,7 @@ describe('PATCH /api/organization/email-sender - validation', () => {
 
   it('rejects a full email address - the domain is not the org to choose', async () => {
     // The single most likely thing an admin types into a field like this.
-    const res = await patch({ local_part: 'service@alphadoors.com' });
+    const res = await patch({ local_part: 'service@northwind.com' });
 
     expect(res.status).toBe(400);
   });
@@ -86,7 +86,7 @@ describe('PATCH /api/organization/email-sender - validation', () => {
   it('clears the override when sent an empty value, returning to the derived name', async () => {
     (prisma.organization.update as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: ORG_ID,
-      name: 'Alpha Doors & Security',
+      name: 'Northwind Services',
       email_sender_local_part: null,
       email_sending_enabled: true,
     });

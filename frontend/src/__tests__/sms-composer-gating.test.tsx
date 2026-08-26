@@ -90,7 +90,7 @@ describe('SmsInboxView — composer gating', () => {
   });
 
   it('shows the A2P-approval banner when connected but smsReady is false', async () => {
-    mockOrg({ ctm_account_id: '596375', ctm_sms_ready: false });
+    mockOrg({ ctm_account_id: '500001', ctm_sms_ready: false });
     renderWithProviders(
       <SmsInboxView threads={[CUSTOMER_THREAD]} setThreads={vi.fn()} onToast={vi.fn()} />,
     );
@@ -101,7 +101,7 @@ describe('SmsInboxView — composer gating', () => {
   });
 
   it('shows the buy-a-number banner when connected + ready but no number can text', async () => {
-    mockOrg({ ctm_account_id: '596375', ctm_sms_ready: true }, [
+    mockOrg({ ctm_account_id: '500001', ctm_sms_ready: true }, [
       { ...SMS_NUMBER, sms_enabled: false },
     ]);
     renderWithProviders(
@@ -114,7 +114,7 @@ describe('SmsInboxView — composer gating', () => {
   });
 
   it('enables the composer with no banner when connected + smsReady + an SMS number', async () => {
-    mockOrg({ ctm_account_id: '596375', ctm_sms_ready: true }, [SMS_NUMBER]);
+    mockOrg({ ctm_account_id: '500001', ctm_sms_ready: true }, [SMS_NUMBER]);
     renderWithProviders(
       <SmsInboxView threads={[CUSTOMER_THREAD]} setThreads={vi.fn()} onToast={vi.fn()} />,
     );
@@ -130,7 +130,7 @@ describe('SmsInboxView — composer gating', () => {
 
 describe('SmsInboxView — segment hint', () => {
   it('shows "{n} segments" (ceil(len/160)) once the draft passes 160 chars', async () => {
-    mockOrg({ ctm_account_id: '596375', ctm_sms_ready: true }, [SMS_NUMBER]);
+    mockOrg({ ctm_account_id: '500001', ctm_sms_ready: true }, [SMS_NUMBER]);
     renderWithProviders(
       <SmsInboxView threads={[CUSTOMER_THREAD]} setThreads={vi.fn()} onToast={vi.fn()} />,
     );
@@ -149,7 +149,7 @@ describe('SmsInboxView — segment hint', () => {
 
 describe('SmsInboxView — failed delivery bubbles', () => {
   it('marks a failed message with a danger indicator + tooltip', async () => {
-    mockOrg({ ctm_account_id: '596375', ctm_sms_ready: true }, [SMS_NUMBER]);
+    mockOrg({ ctm_account_id: '500001', ctm_sms_ready: true }, [SMS_NUMBER]);
     renderWithProviders(
       <SmsInboxView threads={[CUSTOMER_THREAD]} setThreads={vi.fn()} onToast={vi.fn()} />,
     );

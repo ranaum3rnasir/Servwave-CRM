@@ -23,9 +23,9 @@ const adminAbility = buildAbility([{ action: 'update', subject: 'Organization' }
 
 /** The provider account id as it really looks - six digits, and a plausible
  *  substring of unrelated copy only if the page prints it verbatim. */
-const ACCOUNT_ID = '596375';
+const ACCOUNT_ID = '500001';
 
-const BANNED = [/\bCTM\b/i, /CallTrackingMetrics/i, /A2P/i, /sub-account/i, /Alpha Doors/i];
+const BANNED = [/\bCTM\b/i, /CallTrackingMetrics/i, /A2P/i, /sub-account/i, /Northwind Services/i];
 
 function mockOrg(over: { ctm_account_id?: string | null; ctm_sms_ready?: boolean } = {}) {
   mockApi.get.mockImplementation(async (url: string) => {

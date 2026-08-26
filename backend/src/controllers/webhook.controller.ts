@@ -47,7 +47,7 @@ function readUuidMetadata(metadata: unknown, key: 'invoiceId'): string | null {
  * MULTI-TENANT NOTE (2026-05-13):
  * Stripe webhook handlers do NOT currently validate that metadata.invoiceId,
  * etc., belong to the org resolved by resolveOrgFromEvent().
- * For B&G launch this is acceptable because B&G has no Stripe (CARD not in
+ * For Lakeside launch this is acceptable because Lakeside has no Stripe (CARD not in
  * accepted_payment_methods, gate below short-circuits). Alpha continues to use
  * Stripe in prod — the gap is theoretical (would require crafting a malicious
  * checkout with someone else's invoice ID in metadata). Fix scheduled for

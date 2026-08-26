@@ -39,7 +39,7 @@ beforeAll(async () => {
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
   p.organization.findUnique.mockResolvedValue({
-    ctm_account_id: '596375',
+    ctm_account_id: '500001',
     ctm_sms_ready: true,
     sms_sending_enabled: true,
     plan: 'PRO',
@@ -150,8 +150,8 @@ describe('SMS delivery gate — allowlist wiring', () => {
     expect(result).toEqual({ delivered: true });
     expect(client.isOutboundAllowed).toHaveBeenCalledWith(TO);
     // The gate advances past the guard to the normal opt-out + send path.
-    expect(client.isOptedOut).toHaveBeenCalledWith('596375', TO);
-    expect(client.sendSms).toHaveBeenCalledWith('596375', {
+    expect(client.isOptedOut).toHaveBeenCalledWith('500001', TO);
+    expect(client.sendSms).toHaveBeenCalledWith('500001', {
       from: 'TPN-A',
       to: TO,
       msg: 'Guard test',
@@ -182,7 +182,7 @@ const OUT_BODY = {
 /** Org connected to CTM with one active tracking number to dial from. */
 function mockConnectedCallOrg() {
   client.isCtmConfigured.mockReturnValue(true);
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   p.phoneNumber.findFirst.mockResolvedValue({ ctm_number_id: 'TPN-A' });
   client.placeCall.mockResolvedValue({ status: 'success' });
   p.auditLog.create.mockResolvedValue({});
@@ -220,7 +220,7 @@ describe('POST /api/communication/calls — click-to-call allowlist guard', () =
 
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ queued: true });
-    expect(client.placeCall).toHaveBeenCalledWith('596375', {
+    expect(client.placeCall).toHaveBeenCalledWith('500001', {
       from_number: 'TPN-A',
       call_number: '+12015550123',
     });

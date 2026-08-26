@@ -45,7 +45,7 @@ describe('formatPhone — display formatter', () => {
   it('is null-tolerant — customers.phone is nullable and dropdowns render it raw off the API', () => {
     // Regression guard for the review blocker: PickOrCreateCustomer/JobFormPage
     // call formatPhone(c.phone) on search results; a null-phone customer
-    // (Talon import, or junk NULLed by the #352 backfill) must not crash.
+    // (Riverbend import, or junk NULLed by the #352 backfill) must not crash.
     expect(formatPhone(null)).toBe('');
     expect(formatPhone(undefined)).toBe('');
   });

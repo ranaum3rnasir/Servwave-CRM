@@ -56,7 +56,7 @@ describe('POST /api/communication/numbers/buy — behavioral 403', () => {
 });
 
 describe('POST /api/organization/connect-ctm — behavioral 403', () => {
-  const body = { ctm_account_id: '596375' };
+  const body = { ctm_account_id: '500001' };
 
   it('403s DISPATCHER before any CTM call or org write', async () => {
     mockAuthAs('dispatcher');

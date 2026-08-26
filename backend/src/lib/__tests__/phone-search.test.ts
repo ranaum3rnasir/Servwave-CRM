@@ -100,7 +100,7 @@ describe('phoneRelationSearchClauses', () => {
     expect(relationContainsSet('917-817-6226')).toEqual(scalar);
   });
 
-  it('finds a Talon-style digits-only store from a canonical query and vice-versa', () => {
+  it('finds a Riverbend-style digits-only store from a canonical query and vice-versa', () => {
     expect(relationMatchesStored('(917) 817-6226', '9178176226')).toBe(true);
     expect(relationMatchesStored('9178176226', '(917) 817-6226')).toBe(true);
   });

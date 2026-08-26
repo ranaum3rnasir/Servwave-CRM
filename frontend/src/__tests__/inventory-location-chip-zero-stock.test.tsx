@@ -3,7 +3,7 @@
 //
 // LocationBreakdown filtered its rows with `s.onHand > 0`, so an item assigned to a
 // van but sitting at 0 rendered a bare dash - visually identical to "not assigned
-// to any location at all". The Alpha Doors Zoho import surfaced this: 66 item/location
+// to any location at all". The Northwind Services Zoho import surfaced this: 66 item/location
 // memberships legitimately carry 0 on hand, and every one of them looked unassigned.
 //
 // The filter is gone, so those rows render again and the cases below pin them there: a

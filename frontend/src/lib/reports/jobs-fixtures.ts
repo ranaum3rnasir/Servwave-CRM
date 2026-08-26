@@ -10,7 +10,7 @@
  */
 import { hashStr, mulberry32 } from './random';
 
-// ── Domain vocab (Alpha Security US) ─────────────────────────────────────────
+// ── Domain vocab (Northwind Services) ─────────────────────────────────────────
 export const STATUSES = [
   'Submitted',
   'In progress',

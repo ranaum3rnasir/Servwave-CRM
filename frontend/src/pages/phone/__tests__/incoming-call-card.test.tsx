@@ -29,7 +29,7 @@ type Customer = { id: string; name: string; contacts: Contact[] };
 
 const CALLER: Customer = {
   id: "cust-1",
-  name: "Alpha Doors",
+  name: "Northwind Services",
   contacts: [
     {
       id: "contact-1",
@@ -154,7 +154,7 @@ describe.runIf(BROWSER_INBOUND_ANSWER_ENABLED)("/phone incoming-call UI (Task C2
     ring();
 
     expect(screen.getByText("Incoming call")).toBeInTheDocument();
-    expect(screen.getByText("Alpha Doors")).toBeInTheDocument();
+    expect(screen.getByText("Northwind Services")).toBeInTheDocument();
     expect(screen.getByText(/Jamie Rivera/)).toBeInTheDocument();
   });
 

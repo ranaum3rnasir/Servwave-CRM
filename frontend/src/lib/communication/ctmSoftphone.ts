@@ -142,7 +142,7 @@ export interface CreateCtmSoftphoneOptions {
 }
 
 /**
- * Feature flag — default ON (flipped from OFF for the Alpha Doors pilot after
+ * Feature flag — default ON (flipped from OFF for the Northwind Services pilot after
  * live two-device QA verified the embed). The WebRTC softphone is now the office
  * outbound/inbound path on the `/phone` tab. Because the flip lives in code on
  * the staging branch, prod keeps the pre-flip (default-OFF) behavior until this

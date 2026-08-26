@@ -20,7 +20,7 @@ vi.mock('sharp', () => ({
 
 const MOCK_ORG = {
   id: '00000000-0000-0000-0000-000000000001',
-  name: 'Alpha Doors & Security INC.',
+  name: 'Northwind Services LLC',
   legal_name: null,
   address_line1: '1001 Willow Avenue',
   address_line2: null,
@@ -28,7 +28,7 @@ const MOCK_ORG = {
   state: 'NJ',
   postal_code: '07030',
   country: 'US',
-  email: 'info@alphasecurityus.com',
+  email: 'info@northwind.example.com',
   phone: null,
   website: null,
   logo_url: null,
@@ -85,7 +85,7 @@ describe('GET /api/organization', () => {
       .set(authHeader('admin'));
 
     expect(res.status).toBe(200);
-    expect(res.body.name).toBe('Alpha Doors & Security INC.');
+    expect(res.body.name).toBe('Northwind Services LLC');
     expect(res.body.brand_color).toBe('#E11D2E');
   });
 

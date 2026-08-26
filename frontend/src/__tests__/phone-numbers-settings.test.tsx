@@ -77,7 +77,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
 
     // Numbers render human-formatted (never raw E.164).
-    expect(await screen.findByText('(609) 874-5252')).toBeInTheDocument();
+    expect(await screen.findByText('(555) 555-0199')).toBeInTheDocument();
     expect(screen.getByText('(929) 403-9424')).toBeInTheDocument();
 
     // Assigned-user chip is shown.
@@ -155,7 +155,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     });
 
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(609) 874-5252');
+    await screen.findByText('(555) 555-0199');
 
     // Ran is assigned but not default → clicking his star makes him default.
     fireEvent.click(screen.getByRole('button', { name: "Make this Art Nakamura's default number" }));
@@ -191,7 +191,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     expect(mockApi.get).not.toHaveBeenCalledWith('/api/communication/number-assignments');
     // No management controls can render — they only exist in the data branch.
     expect(screen.queryByRole('button', { name: /edit users/i })).toBeNull();
-    expect(screen.queryByText('(609) 874-5252')).toBeNull();
+    expect(screen.queryByText('(555) 555-0199')).toBeNull();
   });
 
   it('assigning a user reports no routing outcome and shows no routing guidance', async () => {

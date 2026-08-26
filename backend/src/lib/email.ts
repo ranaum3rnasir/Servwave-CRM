@@ -147,8 +147,8 @@ export function formatSenderIdentity(orgName: string | null | undefined, address
 const MAX_SENDER_LOCAL_PART = 40;
 
 /**
- * The org's half of a shared-domain sending address: `Alpha Doors` becomes
- * `alphadoors`, for `alphadoors@mail.servwave.com`.
+ * The org's half of a shared-domain sending address: `Northwind Services` becomes
+ * `northwind`, for `northwind@mail.servwave.com`.
  *
  * Every org on the shared domain used to send as a flat `no-reply@`, so a
  * recipient's inbox showed an address that named nobody and leaned entirely on

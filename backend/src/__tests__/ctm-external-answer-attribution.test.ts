@@ -1,7 +1,7 @@
 /**
  * ctm-external-answer-attribution.test.ts - name whoever picked up a forwarded call.
  *
- * Alpha Doors runs campaign numbers that forward to staff mobiles and to the
+ * Northwind Services runs campaign numbers that forward to staff mobiles and to the
  * office, so most answered inbound calls carry NO CTM agent object. Ingest
  * classified those as `{ kind: 'external', receiving_number_id }` and stopped
  * there: the row knew a human had answered and could not say which one, and
@@ -40,7 +40,7 @@ const p = prisma as any;
 const client = ctmClient as any;
 
 const ORG_ID = 'a0000000-0000-0000-0000-0000000000aa';
-const ACCOUNT_ID = '596375';
+const ACCOUNT_ID = '500001';
 
 const SAGIV_ID = 'b0000000-0000-0000-0000-00000000000b';
 

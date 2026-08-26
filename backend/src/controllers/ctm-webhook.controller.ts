@@ -25,7 +25,7 @@ import { warmReceivingNumbers } from '../lib/ctm/receivingNumbers';
  *     present AND CTM_WEBHOOK_SIGNING_SECRET is configured — a DEDICATED secret,
  *     NOT the CTM_SECRET_KEY API secret. CTM signs sub-account webhooks with a
  *     different secret than the API key, so reusing the API secret here rejects
- *     every real webhook (401 storm, Alpha Doors 596375, 2026-07-13). Unset by
+ *     every real webhook (401 storm, Northwind Services 500001, 2026-07-13). Unset by
  *     default → gate skipped, token (gate 1) is the sole auth (Phase-0 posture).
  *  3. Basic auth (defense-in-depth): we provision hooks with
  *     username 'servwave' / password = webhook token; verified when present.

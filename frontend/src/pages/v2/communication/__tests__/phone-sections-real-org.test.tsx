@@ -1,11 +1,11 @@
 /// <reference types="@testing-library/jest-dom/vitest" />
 // Locks the surface a newly phone-enabled real org sees: Calls and Phone
 // numbers, nothing else. Ran's call (2026-08-13) when the `phone` entitlement
-// was turned on for B&G Cabinet - Call flows, Call masking, Call groups,
+// was turned on for Lakeside Cabinets - Call flows, Call masking, Call groups,
 // Training and Blocked callers all stay hidden. Most are half-built; Blocked
 // callers is fully backed and is hidden on scope grounds alone.
 //
-// The pilot org (Alpha Doors) and the demo org keep those tabs, so the suite
+// The pilot org (Northwind Services) and the demo org keep those tabs, so the suite
 // asserts both directions: widening OR narrowing the gate goes red on purpose.
 //
 // Retargeted at `pages/v2/communication/PhonePage` during the 2026-08-17
@@ -67,10 +67,10 @@ import PhonePage from '@/pages/v2/communication/PhonePage';
 const mockApi = vi.mocked(api);
 const COMM_READ = buildAbility([{ action: 'read', subject: 'Communication' }]);
 
-// The CTM pilot allowlist default (Alpha Doors & Security), same id in staging
+// The CTM pilot allowlist default (Northwind Services), same id in staging
 // and prod - see lib/useIsCommunicationPilotOrg.ts.
-const PILOT_ORG_ID = 'd40afcec-0ddf-471f-b99d-8e5f23cbdadf';
-// B&G Cabinet - a real, non-pilot, phone-entitled org.
+const PILOT_ORG_ID = '11111111-2222-4333-8444-555555555555';
+// Lakeside Cabinets - a real, non-pilot, phone-entitled org.
 const REAL_ORG_ID = '00000000-0000-0000-0000-0000bcab0001';
 
 const HIDDEN_TABS = ['Call flows', 'Call masking', 'Call groups', 'Training', 'Blocked callers'];

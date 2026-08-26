@@ -23,7 +23,7 @@ import { mockAuthAs, authHeader } from '../../__tests__/helpers';
 const p = prisma as any;
 const client = ctmClient as any;
 
-const CTM_ACCOUNT_ID = '597911';
+const CTM_ACCOUNT_ID = '500002';
 
 const FORWARDING = {
   id: 'TPN-forwarding',

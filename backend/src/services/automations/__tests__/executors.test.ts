@@ -353,7 +353,7 @@ describe('executeAction — SEND_SMS dispatch outcomes (send-run honesty)', () =
   function mockConnectedSmsOrg() {
     mockCtmClient.isCtmConfigured.mockReturnValue(true);
     mockPrisma.organization.findUnique.mockResolvedValue({
-      ctm_account_id: '596375',
+      ctm_account_id: '500001',
       ctm_sms_ready: true,
       sms_sending_enabled: true,
       plan: 'PRO',
@@ -386,7 +386,7 @@ describe('executeAction — SEND_SMS dispatch outcomes (send-run honesty)', () =
     mockSmsRecordWrites();
     mockConnectedSmsOrg();
     mockPrisma.organization.findUnique.mockResolvedValue({
-      ctm_account_id: '596375',
+      ctm_account_id: '500001',
       ctm_sms_ready: true,
       sms_sending_enabled: false,
       plan: 'PRO',
@@ -404,7 +404,7 @@ describe('executeAction — SEND_SMS dispatch outcomes (send-run honesty)', () =
     mockSmsRecordWrites();
     mockConnectedSmsOrg();
     mockPrisma.organization.findUnique.mockResolvedValue({
-      ctm_account_id: '596375',
+      ctm_account_id: '500001',
       ctm_sms_ready: true,
       sms_sending_enabled: true,
       plan: 'STARTER',
@@ -433,7 +433,7 @@ describe('executeAction — SEND_SMS dispatch outcomes (send-run honesty)', () =
     mockSmsRecordWrites();
     mockConnectedSmsOrg();
     mockPrisma.organization.findUnique.mockResolvedValue({
-      ctm_account_id: '596375',
+      ctm_account_id: '500001',
       ctm_sms_ready: false,
       sms_sending_enabled: true,
       plan: 'PRO',

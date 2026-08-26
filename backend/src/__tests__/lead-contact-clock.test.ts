@@ -125,7 +125,7 @@ function sendText(body: Record<string, unknown>) {
 function mockDeliveringOrg() {
   client.isCtmConfigured.mockReturnValue(true);
   p.organization.findUnique.mockResolvedValue({
-    ctm_account_id: '596375',
+    ctm_account_id: '500001',
     ctm_sms_ready: true,
     sms_sending_enabled: true,
     plan: 'PRO',

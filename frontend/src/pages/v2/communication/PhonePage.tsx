@@ -80,7 +80,7 @@ const DEMO_ONLY_SECTIONS: ModuleSection[] = ['masking'];
 // simulated.
 //
 // `blocked` is the exception: it IS fully backed (real BlockedNumber rows,
-// honoured by call ingest). It sits here on Ran's scope call (2026-08-13, B&G
+// honoured by call ingest). It sits here on Ran's scope call (2026-08-13, Lakeside
 // Cabinet's phone launch): a newly phone-enabled org gets the two pages it needs
 // to buy a number and watch its calls, and nothing else. Move it out of this
 // list when call screening is part of the launch surface.

@@ -199,7 +199,7 @@ describe('createConnectedAccount', () => {
     await createConnectedAccount({
       orgId: 'org_1',
       email: 'owner@example.com',
-      businessName: 'Alpha Doors',
+      businessName: 'Northwind Services',
       mcc: '1731',
     });
 

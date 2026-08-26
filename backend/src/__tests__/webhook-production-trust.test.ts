@@ -31,7 +31,7 @@ describe('production webhook trust (regression)', () => {
     // Same guarantee for the CTM door: absent in production even with the flag on.
     const ctmDoor = await request(app)
       .post('/api/test/ctm-webhook')
-      .send({ position: 'end', payload: { sid: 'CA_x', account_id: '596375' } });
+      .send({ position: 'end', payload: { sid: 'CA_x', account_id: '500001' } });
     expect(ctmDoor.status).toBe(404);
 
     // The real route still demands a signature → 400 (signature missing).

@@ -286,8 +286,8 @@ describe('Tenant isolation — app settings', () => {
   });
   it('PATCH /api/settings/:key upserts under requesting org', async () => {
     mockAuthAs('orgB_admin');
-    (prisma.appSetting.upsert as Mock).mockResolvedValue({ organization_id: ORG_B_ID, key: 'company_name', value: 'B&G', updated_at: new Date() });
-    await request(app).patch('/api/settings/company_name').set(authHeader('orgB_admin')).send({ value: 'B&G' });
+    (prisma.appSetting.upsert as Mock).mockResolvedValue({ organization_id: ORG_B_ID, key: 'company_name', value: 'Lakeside', updated_at: new Date() });
+    await request(app).patch('/api/settings/company_name').set(authHeader('orgB_admin')).send({ value: 'Lakeside' });
     expect(prisma.appSetting.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({

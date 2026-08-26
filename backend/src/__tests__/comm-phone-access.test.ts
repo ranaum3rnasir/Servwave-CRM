@@ -26,14 +26,14 @@ const client = ctmClient as any;
  *  returns a token. */
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   // CTM's phone_access payload carries the account-binding fields the embed's
   // `accessToken` setter reads (account_id / user.account) — not just the token.
   client.requestPhoneAccess.mockResolvedValue({
     token: 'CTM-TOKEN-XYZ',
     valid_until: 1799999999,
-    account_id: '596375',
-    user: { account: '596375' },
+    account_id: '500001',
+    user: { account: '500001' },
     session_id: 'ctm-sess-1',
   });
 }
@@ -136,12 +136,12 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
     expect(res.body).toMatchObject({
       token: 'CTM-TOKEN-XYZ',
       valid_until: 1799999999,
-      account_id: '596375',
-      user: { account: '596375' },
+      account_id: '500001',
+      user: { account: '500001' },
     });
     // camelCase sessionId is added alongside CTM's fields (embed convention).
     expect(res.body.sessionId).toBe('ctm-sess-1');
-    expect(client.requestPhoneAccess).toHaveBeenCalledWith('596375', {
+    expect(client.requestPhoneAccess).toHaveBeenCalledWith('500001', {
       email: TEST_USERS.admin.email,
       first_name: TEST_USERS.admin.first_name,
       last_name: TEST_USERS.admin.last_name,
@@ -152,11 +152,11 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
   it('proxies the account-binding fields (account_id / user) — regression for the {token}-only drop', async () => {
     mockAuthAs('admin');
     client.isCtmConfigured.mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     client.requestPhoneAccess.mockResolvedValue({
       token: 'T',
-      account_id: '596375',
-      user: { account: '596375', id: 42 },
+      account_id: '500001',
+      user: { account: '500001', id: 42 },
     });
 
     const res = await request(app)
@@ -165,14 +165,14 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
       .send({});
 
     expect(res.status).toBe(200);
-    expect(res.body.account_id).toBe('596375');
-    expect(res.body.user).toEqual({ account: '596375', id: 42 });
+    expect(res.body.account_id).toBe('500001');
+    expect(res.body.user).toEqual({ account: '500001', id: 42 });
   });
 
   it('does not fabricate valid_until when CTM omits it; sessionId falls back to the user id', async () => {
     mockAuthAs('admin');
     client.isCtmConfigured.mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     client.requestPhoneAccess.mockResolvedValue({ token: 'CTM-TOKEN-ONLY' });
 
     const res = await request(app)
@@ -186,7 +186,7 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
     expect(res.body.sessionId).toBe(TEST_USERS.admin.id);
   });
 
-  // Live incident 2026-08-06 (account 597911): the softphone sat on
+  // Live incident 2026-08-06 (account 500002): the softphone sat on
   // "Connecting..." forever with no error anywhere - 200 from this route,
   // `status: "ok"` from CTM, both embed scripts loading fine. CTM's shipped
   // device_embed builds the WebRTC iframe URL straight off this response body:
@@ -200,7 +200,7 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
   it('returns the agent email the device embed reads, not just sessionId', async () => {
     mockAuthAs('admin');
     client.isCtmConfigured.mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     client.requestPhoneAccess.mockResolvedValue({ token: 'CTM-TOKEN-ONLY' });
 
     const res = await request(app)
@@ -219,7 +219,7 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
   it('502 CTM_TOKEN_FAILED when CTM rejects the token request (typed error) — no leak', async () => {
     mockAuthAs('admin');
     client.isCtmConfigured.mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     const err = new client.CtmApiError('CTM API error 406: bad request');
     client.requestPhoneAccess.mockRejectedValue(err);
 
@@ -236,7 +236,7 @@ describe('POST /api/communication/phone-access — per-agent CTM softphone token
   it('502 CTM_TOKEN_FAILED on a non-typed failure too (network throw)', async () => {
     mockAuthAs('admin');
     client.isCtmConfigured.mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     client.requestPhoneAccess.mockRejectedValue(new Error('socket hang up'));
 
     const res = await request(app)

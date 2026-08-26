@@ -16,11 +16,11 @@ import { env } from '../config/env';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const p = prisma as any;
 
-const E2E_ORG = { id: 'org-e2e', name: 'e2e-qa-run1', ctm_account_id: '596375' };
+const E2E_ORG = { id: 'org-e2e', name: 'e2e-qa-run1', ctm_account_id: '500001' };
 
 const CALL_END_PAYLOAD = {
   sid: 'CA_DOOR_1',
-  account_id: 596375,
+  account_id: 500001,
   caller_number: '+12015551234',
   tracking_number: '+12019037784',
   direction: 'inbound',
@@ -77,8 +77,8 @@ describe('POST /api/test/ctm-webhook', () => {
   it('403s when the account_id resolves to a REAL (non-E2E) org — no ingest', async () => {
     p.organization.findFirst.mockResolvedValue({
       id: 'org-real',
-      name: 'Alpha Doors & Security INC.',
-      ctm_account_id: '596375',
+      name: 'Northwind Services LLC',
+      ctm_account_id: '500001',
     });
     const res = await request(app)
       .post('/api/test/ctm-webhook')

@@ -40,7 +40,7 @@ beforeEach(() => {
   sentEmails.length = 0;
 });
 
-const ORG = { id: '00000000-0000-0000-0000-000000000001', name: 'B&G', logo_url: null, brand_color: '#0C2D3A' };
+const ORG = { id: '00000000-0000-0000-0000-000000000001', name: 'Lakeside', logo_url: null, brand_color: '#0C2D3A' };
 // 2026-06-10T15:00:00Z === 11:00 AM US Eastern (EDT).
 const easternElevenAM = new Date('2026-06-10T15:00:00Z');
 

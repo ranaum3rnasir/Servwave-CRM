@@ -156,7 +156,7 @@ describe("InsightCell", () => {
 });
 
 describe("AnsweredBy", () => {
-  // Alpha Doors answers on a forwarded external line: ingest maps that to
+  // Northwind Services answers on a forwarded external line: ingest maps that to
   // kind 'external', but the shared cell used to fall through to "No answer".
   it("reports a forwarded-phone answer as answered, not as No answer", () => {
     render(<AnsweredBy call={{ ...BASE_CALL, answeredBy: { kind: "external" } } as CallSession} />);

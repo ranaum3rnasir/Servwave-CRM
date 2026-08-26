@@ -765,7 +765,7 @@ describe('GET /api/workflows/catalog', () => {
   describe('capabilities.sms_available', () => {
     function orgRow(overrides: Record<string, unknown> = {}) {
       return {
-        ctm_account_id: '596375',
+        ctm_account_id: '500001',
         ctm_sms_ready: true,
         sms_sending_enabled: true,
         plan: 'PRO',
