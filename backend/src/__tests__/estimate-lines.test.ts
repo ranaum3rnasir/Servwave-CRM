@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import app from '../app';
+import { LINE_DESCRIPTION_MAX } from '../lib/line-items';
 import { prisma } from '../lib/prisma';
 import { supabaseAdmin } from '../lib/supabase';
 import { TEST_USERS, mockAuthAs, authHeader, ESTIMATE_FIXTURE } from './helpers';
@@ -230,13 +231,13 @@ describe('POST /api/estimates/:id/line-items', () => {
     expect(res.status).toBe(404);
   });
 
-  it('rejects a description over 5000 chars', async () => {
+  it('rejects a description over the shared line-description cap', async () => {
     mockPrisma.estimate.findUnique.mockResolvedValue(guardRow());
 
     const res = await request(app)
       .post(`/api/estimates/${ESTIMATE_ID}/line-items`)
       .set(authHeader('admin'))
-      .send({ description: 'x'.repeat(5001), quantity: 1, unit_price: 50 });
+      .send({ description: 'x'.repeat(LINE_DESCRIPTION_MAX + 1), quantity: 1, unit_price: 50 });
 
     expect(res.status).toBe(400);
     expect(mockPrisma.estimateLineItem.create).not.toHaveBeenCalled();

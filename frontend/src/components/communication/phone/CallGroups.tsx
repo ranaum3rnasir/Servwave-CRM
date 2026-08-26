@@ -34,6 +34,7 @@ import { useAuthStore } from "@/stores/auth.store";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
 /* ─────────────────────────── Roster helpers ─────────────────────────── */
 
@@ -58,6 +59,7 @@ export function CallGroupsView({
   setGroups: React.Dispatch<React.SetStateAction<CallGroup[]>>;
   onToast: (m: string) => void;
 }) {
+  const tz = useScheduleTimezone();
   const [editing, setEditing] = useState<CallGroup | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -152,7 +154,7 @@ export function CallGroupsView({
                     )}
                   </td>
                   <td className="px-4 py-3 text-[12px] text-text-secondary">
-                    {new Date(g.updatedAt).toLocaleDateString('en-US', { month: "short", day: "numeric" })}
+                    {formatInstant(g.updatedAt, tz, { month: "short", day: "numeric" })}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button

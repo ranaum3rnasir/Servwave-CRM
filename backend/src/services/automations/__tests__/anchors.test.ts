@@ -48,9 +48,16 @@ describe('anchors — invoice + estimate', () => {
   });
 
   it('labels every anchor with the approved mockup wording', () => {
+    // Typed as Record<AnchorKey, string>, so this stays an EXHAUSTIVE assertion: adding an anchor
+    // without a label fails to compile here, and adding one with a label fails this equality
+    // until it is listed. That is why the three spec #1751 clocks are added rather than the
+    // assertion being loosened to a subset check.
     const expected: Record<AnchorKey, string> = {
       'job.scheduled_start': 'the appointment',
       'lead.walkthrough_scheduled_at': 'the walkthrough',
+      'lead.created_at': 'the lead arriving',
+      'lead.contacted_at': 'first contact',
+      'lead.last_visit_completed_at': 'the completed walkthrough',
       'invoice.due_date': 'the invoice due date',
       'estimate.valid_until': 'the estimate expiration',
     };

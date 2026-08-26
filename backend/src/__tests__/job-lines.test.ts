@@ -448,7 +448,7 @@ describe('POST /api/jobs/:id/line-items — RBAC (update Job)', () => {
       // itself (one action without the other) is pinned in job-manage-lines-routes.test.ts.
       { action: 'manage_lines', subject: 'Job', conditions: OWN_JOB },
     ] as any);
-    mockPrisma.job.findUnique.mockResolvedValue(jobRow({ techId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.job.findUnique.mockResolvedValue(jobRow({ techId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.job.findFirst.mockResolvedValue(null); // canAccessRow → false
 
     const res = await request(app)
@@ -694,7 +694,7 @@ describe('PATCH /api/jobs/:id/line-items/:lineId — edit', () => {
       { action: 'manage_lines', subject: 'Job', conditions: OWN_JOB },
     ] as any);
     mockPrisma.job.findUnique.mockResolvedValue(
-      jobRow({ techId: '99555555-0224-9999-9999-995555550224', jobLineItems: [existingLine()] }),
+      jobRow({ techId: '99999999-9999-9999-9999-999999999999', jobLineItems: [existingLine()] }),
     );
     mockPrisma.job.findFirst.mockResolvedValue(null); // canAccessRow → false
 
@@ -784,7 +784,7 @@ describe('DELETE /api/jobs/:id/line-items/:lineId — delete', () => {
       { action: 'manage_lines', subject: 'Job', conditions: OWN_JOB },
     ] as any);
     mockPrisma.job.findUnique.mockResolvedValue(
-      jobRow({ techId: '99555555-0224-9999-9999-995555550224', jobLineItems: [existingLine()] }),
+      jobRow({ techId: '99999999-9999-9999-9999-999999999999', jobLineItems: [existingLine()] }),
     );
     mockPrisma.job.findFirst.mockResolvedValue(null); // canAccessRow → false
 
@@ -1038,7 +1038,7 @@ describe('PATCH /api/jobs/:id/line-items/reorder — reorder', () => {
       { action: 'manage_lines', subject: 'Job', conditions: OWN_JOB },
     ] as any);
     mockPrisma.job.findUnique.mockResolvedValue(
-      jobRow({ techId: '99555555-0224-9999-9999-995555550224', jobLineItems: threeLines() }),
+      jobRow({ techId: '99999999-9999-9999-9999-999999999999', jobLineItems: threeLines() }),
     );
     mockPrisma.job.findFirst.mockResolvedValue(null); // canAccessRow → false
 
@@ -1519,7 +1519,7 @@ describe('PATCH /api/jobs/:id/scopes/reorder — reorder', () => {
       { action: 'manage_lines', subject: 'Job', conditions: OWN_JOB },
     ] as any);
     mockPrisma.job.findUnique.mockResolvedValue(
-      jobRow({ techId: '99555555-0224-9999-9999-995555550224', scopes: threeScopes() }),
+      jobRow({ techId: '99999999-9999-9999-9999-999999999999', scopes: threeScopes() }),
     );
     mockPrisma.job.findFirst.mockResolvedValue(null); // canAccessRow → false
 

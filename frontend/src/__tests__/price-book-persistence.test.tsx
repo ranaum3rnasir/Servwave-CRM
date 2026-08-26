@@ -118,6 +118,9 @@ describe('PriceBookPage — item save persists through useUpsertItem (P0 §D)', 
       await screen.findByPlaceholderText('e.g. Dual Run Capacitor 45/5 MFD 440V'),
       { target: { value: 'Test Widget' } },
     );
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    fireEvent.change(screen.getByLabelText(/^SKU/), { target: { value: 'TESTW-1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save Item' }));
 
     await waitFor(() => expect(h.upsertItemMutateAsync).toHaveBeenCalledTimes(1));
@@ -141,12 +144,16 @@ describe('PriceBookPage — Track inventory toggle (Inventory P1)', () => {
       await screen.findByPlaceholderText('e.g. Dual Run Capacitor 45/5 MFD 440V'),
       { target: { value: 'Tracked Widget' } },
     );
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    fireEvent.change(screen.getByLabelText(/^SKU/), { target: { value: 'TRACKW-1' } });
 
-    // The helper copy pins what the toggle does. It was shortened on 2026-08-07
-    // (Ran's call) - the plan-§3.2 "newly added lines only" caveat is still the
-    // engine's behaviour, it is just no longer spelled out in the dialog.
+    // What the toggle does now rides as the row's tooltip rather than a line of
+    // helper text under the flags (2026-08-12 dialog restructure - Ran's call:
+    // the strings restated their own labels). The plan-§3.2 "newly added lines
+    // only" caveat is still the engine's behaviour either way.
     expect(
-      screen.getByText(/Track inventory: deducts stock when added to jobs\/invoices\./),
+      screen.getByTitle(/deducts stock when this item is added to a job or invoice/i),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText('Track inventory'));
@@ -170,6 +177,9 @@ describe('PriceBookPage — Track inventory toggle (Inventory P1)', () => {
       await screen.findByPlaceholderText('e.g. Dual Run Capacitor 45/5 MFD 440V'),
       { target: { value: 'Untracked Widget' } },
     );
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    fireEvent.change(screen.getByLabelText(/^SKU/), { target: { value: 'UNTRACKW-1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save Item' }));
 
     await waitFor(() => expect(h.upsertItemMutateAsync).toHaveBeenCalledTimes(1));

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import app from '../app';
+import { LINE_DESCRIPTION_MAX } from '../lib/line-items';
 import { prisma } from '../lib/prisma';
 import { supabaseAdmin } from '../lib/supabase';
 import { isStripeConfigured, createCheckoutSession, createRefund, getStripeForOrg } from '../lib/stripe';
@@ -87,7 +88,7 @@ const mockPrisma = prisma as unknown as {
     upsert: ReturnType<typeof vi.fn>;
   };
   // Walkthrough-as-entity redesign, PR-B2: D8/D9's silent instrumentation reads this on send.
-  walkthrough: { count: ReturnType<typeof vi.fn> };
+  visit: { count: ReturnType<typeof vi.fn> };
   user: { findUnique: ReturnType<typeof vi.fn>; findMany: ReturnType<typeof vi.fn> };
   rolePermission: { findMany: ReturnType<typeof vi.fn> };
   invoice: {
@@ -133,6 +134,41 @@ const mockPrisma = prisma as unknown as {
   $transaction: ReturnType<typeof vi.fn>;
 };
 
+// ─── Lead status writes (spec #1751 D6) ───────────────
+//
+// Every estimate door that moves a lead's status now goes through transitionLeadStatus: the
+// status is written with `lead.updateMany` (its guards live in the WHERE clause) and a
+// STATUS_CHANGE timeline event carrying `from` and `to` is filed alongside it.
+//
+// The `data.status` filter is load-bearing rather than cosmetic: the same `lead.updateMany` mock
+// also receives the stage-clock stamps (`first_estimate_sent_at` on every first send, `won_at` on
+// every win), so an unfiltered call count cannot tell "the lead moved" from "a clock ticked".
+
+function leadStatusWrites(updateMany: ReturnType<typeof vi.fn>) {
+  return updateMany.mock.calls
+    .map((c: any[]) => c[0])
+    .filter((args: any) => args?.data?.status !== undefined);
+}
+
+function statusChangeEvents(create: ReturnType<typeof vi.fn>) {
+  return create.mock.calls
+    .map((c: any[]) => c[0]?.data)
+    .filter((data: any) => data?.event_type === 'STATUS_CHANGE');
+}
+
+/**
+ * The lead half of a `$transaction` double, for the doors that touch a lead.
+ *
+ * `{ count: 1 }` = the row moved, which is what makes transitionLeadStatus file its ledger
+ * entry; `{ count: 0 }` would be read as "the guard refused" and silently skip it.
+ */
+function txLeadDouble(row: unknown = {}) {
+  return {
+    update: vi.fn().mockResolvedValue(row),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   // `vi.clearAllMocks()` clears call history but NOT `mockResolvedValue` implementations.
@@ -144,7 +180,7 @@ beforeEach(() => {
   // Walkthrough-as-entity redesign, PR-B2: D8/D9's silent instrumentation on send() defaults to
   // "no COMPLETED visit" so existing send()/markSent() tests that don't care about this don't
   // need to know it exists.
-  mockPrisma.walkthrough.count.mockResolvedValue(0);
+  mockPrisma.visit.count.mockResolvedValue(0);
 });
 
 // ═══════════════════════════════════════════════════════
@@ -913,7 +949,7 @@ describe('POST /api/estimates', () => {
     expect(res.status).toBe(201);
   });
 
-  it('rejects create with a line-item description over 5000 chars', async () => {
+  it('rejects create with a line-item description over the shared cap', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({
       id: ESTIMATE_FIXTURE.lead_id,
@@ -926,7 +962,7 @@ describe('POST /api/estimates', () => {
       .set(authHeader('admin'))
       .send({
         ...validBody,
-        line_items: [{ description: 'x'.repeat(5001), quantity: 1, unit_price: 100, is_taxable: true }],
+        line_items: [{ description: 'x'.repeat(LINE_DESCRIPTION_MAX + 1), quantity: 1, unit_price: 100, is_taxable: true }],
       });
 
     expect(res.status).toBe(400);
@@ -1106,11 +1142,12 @@ describe('POST /api/estimates - job-anchored create (SERV10X-61)', () => {
   // uuid-validated), preserving the "resolve everything from the job" intent.
   const JOB_ANCHOR_ID = 'a0000000-0000-0000-0000-000000000009';
 
+  // S8 (D6): crew is reached through the job's trips, so the fixture states it there.
   const jobRow = (assignees: { user_id: string }[] = []) => ({
     id: JOB_ANCHOR_ID,
     customer_id: JOB_FIXTURE.customer_id,
     service_location_id: JOB_FIXTURE.service_location_id,
-    assignees,
+    visits: [{ assignees }],
     service_location: { state: 'TX' },
   });
 
@@ -1199,7 +1236,7 @@ describe('POST /api/jobs/:id/estimates - create from job items (SERV10X-60)', ()
       customer_id: 'c0000000-0000-0000-0000-000000000001',
       service_location_id: 'sl000000-0000-0000-0000-000000000001',
       customer: { tax_exempt: false },
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
       job_line_items: [TAXED_LINE],
       scopes: [],
       tax_rate: 0,
@@ -1322,7 +1359,7 @@ describe('POST /api/jobs/:id/estimates - create from job items (SERV10X-60)', ()
 
   it('F-004 - SALES CAN create from a job they ARE assigned to (201)', async () => {
     mockAuthAs('sales');
-    mockPrisma.job.findUnique.mockResolvedValue(jobItemsRow({ assignees: [{ user_id: TEST_USERS.sales.id }] }));
+    mockPrisma.job.findUnique.mockResolvedValue(jobItemsRow({ visits: [{ assignees: [{ user_id: TEST_USERS.sales.id }] }] }));
     captureJobEstimateTransaction();
     const res = await request(app).post(`/api/jobs/${JOB_ID}/estimates`).set(authHeader('sales')).send({});
     expect(res.status).toBe(201);
@@ -1358,7 +1395,7 @@ describe('POST /api/estimates/:id/attach-to-job (transition 16)', () => {
       id: ATTACH_JOB_ID,
       customer_id: CUSTOMER_A,
       source_plan_id: null,
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
       ...overrides,
     };
   }
@@ -3286,6 +3323,9 @@ describe('POST /api/estimates/:id/send', () => {
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // Spec #1751 D2: a first send stamps the lead's first_estimate_sent_at clock, so EVERY
+        // lead-anchored send now touches tx.lead — whether or not the status also moves.
+        lead: txLeadDouble(),
       };
       return fn(tx);
     });
@@ -3398,6 +3438,63 @@ describe('POST /api/estimates/:id/send', () => {
     expect(updateData.status).toBeUndefined();
     // No SENT timeline entry for a terminal "send a copy".
     expect((txProxy.timelineEvent as any).create).not.toHaveBeenCalled();
+  });
+
+  // ── #1522: the emailed link must be the link that gets stored ──────────────
+  // A token-less non-draft estimate is ordinary, not exotic: `materialChangeGuardrail` nulls
+  // public_token on every material edit to a sent estimate, and terminal "send a copy" rides the
+  // same resend branch. Both mint the customer's token here, and only `isFirstSend` (DRAFT-only)
+  // persists the one that went into the email — so the resend branch used to store a SECOND,
+  // unrelated randomUUID() and the customer's link 404'd with nothing surfacing the failure.
+  it('resending a token-less estimate stores the SAME token it emailed', async () => {
+    mockAuthAs('admin');
+    const tokenless = {
+      ...mockDraftEstimate,
+      status: 'SENT',
+      public_token: null,
+      send_config: { id: 'sc-1' },
+    };
+    mockPrisma.estimate.findUnique.mockResolvedValue(tokenless);
+    mockPrisma.appSetting.findUnique.mockResolvedValue(null);
+    // Set explicitly rather than relying on an earlier test's mock leaking forward - several
+    // neighbours in this block do lean on that and fail when run with -t in isolation.
+    mockPrisma.organization.findUnique.mockResolvedValue({
+      id: 'org-1', name: 'Test Org', logo_url: null, brand_color: null,
+      estimate_terms: 'T', estimate_notes: 'N', estimate_payment_terms: 'P',
+      deposit_default_type: 'PERCENTAGE', deposit_default_percentage: 50, deposit_default_fixed_amount: 0,
+    });
+
+    let txProxy: Record<string, unknown> = {};
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        estimate: {
+          update: vi.fn().mockResolvedValue({ ...tokenless }),
+          findUnique: vi.fn().mockResolvedValue({ ...tokenless }),
+        },
+        estimateSendConfig: { create: vi.fn().mockResolvedValue({}), update: vi.fn().mockResolvedValue({}), upsert: vi.fn().mockResolvedValue({}) },
+        invoice: { create: vi.fn().mockResolvedValue({}), findFirst: vi.fn().mockResolvedValue(null) },
+        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+      };
+      txProxy = tx;
+      return fn(tx);
+    });
+
+    const res = await request(app)
+      .post(`/api/estimates/${ESTIMATE_FIXTURE.id}/send`)
+      .set(authHeader('admin'))
+      .send({ deposit_required: false });
+
+    expect(res.status).toBe(200);
+
+    // The token the customer actually received, read off the link in the dispatched email.
+    const emailArgs = vi.mocked(emailLib.sendEstimateEmail).mock.calls.at(-1)?.[0] as { publicUrl: string };
+    const emailedToken = new URL(emailArgs.publicUrl).searchParams.get('token');
+
+    // The token the row ends up holding.
+    const storedToken = (txProxy.estimate as any).update.mock.calls[0][0].data.public_token;
+
+    expect(emailedToken).toBeTruthy();
+    expect(storedToken).toBe(emailedToken);
   });
 
   it('allows a resend on a PENDING (customer-signed) estimate — status stays PENDING', async () => {
@@ -4002,7 +4099,7 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    mockPrisma.walkthrough.count.mockResolvedValue(0); // no COMPLETED visit
+    mockPrisma.visit.count.mockResolvedValue(0); // no COMPLETED visit
     mockTransactionForSend(sentEstimate);
 
     const res = await request(app)
@@ -4031,7 +4128,7 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    mockPrisma.walkthrough.count.mockResolvedValue(0);
+    mockPrisma.visit.count.mockResolvedValue(0);
     let txTimelineCreate!: ReturnType<typeof vi.fn>;
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       txTimelineCreate = vi.fn().mockResolvedValue({});
@@ -4042,6 +4139,8 @@ describe('POST /api/estimates/:id/send', () => {
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
         timelineEvent: { create: txTimelineCreate },
+        // Spec #1751 D2: a first send stamps the lead's first_estimate_sent_at clock.
+        lead: txLeadDouble(),
       };
       return fn(tx);
     });
@@ -4054,7 +4153,7 @@ describe('POST /api/estimates/:id/send', () => {
     expect(res.status).toBe(200);
     const sentCall = txTimelineCreate.mock.calls.find((c: any[]) => c[0].data.event_type === 'SENT');
     expect(sentCall![0].data.metadata).toEqual({ walkthrough_completed: false });
-    expect(mockPrisma.walkthrough.count).toHaveBeenCalledWith(
+    expect(mockPrisma.visit.count).toHaveBeenCalledWith(
       expect.objectContaining({ where: { lead_id: ESTIMATE_FIXTURE.lead_id, status: 'COMPLETED' } }),
     );
   });
@@ -4075,7 +4174,7 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    mockPrisma.walkthrough.count.mockResolvedValue(1); // a COMPLETED visit exists
+    mockPrisma.visit.count.mockResolvedValue(1); // a COMPLETED visit exists
     let txTimelineCreate!: ReturnType<typeof vi.fn>;
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       txTimelineCreate = vi.fn().mockResolvedValue({});
@@ -4086,6 +4185,8 @@ describe('POST /api/estimates/:id/send', () => {
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
         timelineEvent: { create: txTimelineCreate },
+        // Spec #1751 D2: a first send stamps the lead's first_estimate_sent_at clock.
+        lead: txLeadDouble(),
       };
       return fn(tx);
     });
@@ -4116,7 +4217,12 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    const txLeadUpdate = vi.fn().mockResolvedValue({});
+    // Spec #1751 D6: the status write is transitionLeadStatus's `updateMany` (its NEW/CONTACTED
+    // guard lives in the WHERE clause), and D2's first_estimate_sent_at stamp lands on the same
+    // mock — hence leadStatusWrites() rather than a bare call count. The timeline double is
+    // captured because the from/to ledger entry is the point of routing this through one writer.
+    const txLead = txLeadDouble();
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       const tx = {
         estimate: {
@@ -4127,8 +4233,8 @@ describe('POST /api/estimates/:id/send', () => {
         deposit: { create: vi.fn().mockResolvedValue({}) },
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
-        lead: { update: txLeadUpdate },
+        timelineEvent: { create: txTimelineCreate },
+        lead: txLead,
       };
       return fn(tx);
     });
@@ -4139,12 +4245,14 @@ describe('POST /api/estimates/:id/send', () => {
       .send({ deposit_required: true, payment_methods: ['CARD'] });
 
     expect(res.status).toBe(200);
-    // Verify lead was transitioned to ESTIMATED
-    expect(txLeadUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { status: 'ESTIMATED' },
-      }),
-    );
+    // Verify lead was transitioned to ESTIMATED — through the one writer (spec #1751 D6), which
+    // also files the from/to ledger entry the hand-rolled timeline event it replaces lacked.
+    const statusWrites = leadStatusWrites(txLead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('ESTIMATED');
+    const ledger = statusChangeEvents(txTimelineCreate);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'CONTACTED', to: 'ESTIMATED' });
   });
 
   // PR-C2: shouldTransitionLead only fires from NEW/CONTACTED now (WALKTHROUGH_COMPLETED left
@@ -4166,7 +4274,12 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    const txLeadUpdate = vi.fn().mockResolvedValue({});
+    // Spec #1751 D6: the status write is transitionLeadStatus's `updateMany` (its NEW/CONTACTED
+    // guard lives in the WHERE clause), and D2's first_estimate_sent_at stamp lands on the same
+    // mock — hence leadStatusWrites() rather than a bare call count. The timeline double is
+    // captured because the from/to ledger entry is the point of routing this through one writer.
+    const txLead = txLeadDouble();
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       const tx = {
         estimate: {
@@ -4177,8 +4290,8 @@ describe('POST /api/estimates/:id/send', () => {
         deposit: { create: vi.fn().mockResolvedValue({}) },
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
-        lead: { update: txLeadUpdate },
+        timelineEvent: { create: txTimelineCreate },
+        lead: txLead,
       };
       return fn(tx);
     });
@@ -4189,7 +4302,11 @@ describe('POST /api/estimates/:id/send', () => {
       .send({ deposit_required: true, payment_methods: ['CARD'] });
 
     expect(res.status).toBe(200);
-    expect(txLeadUpdate).not.toHaveBeenCalled();
+    // Spec #1751 D6: the lead IS touched now — a first send stamps first_estimate_sent_at (D2) —
+    // so "no re-transition" is proved on the status specifically: no guarded status write, and
+    // no ledger entry claiming a move that did not happen.
+    expect(leadStatusWrites(txLead.updateMany)).toHaveLength(0);
+    expect(statusChangeEvents(txTimelineCreate)).toHaveLength(0);
   });
 
   it('auto-transitions lead to ESTIMATED from NEW on send', async () => {
@@ -4208,7 +4325,12 @@ describe('POST /api/estimates/:id/send', () => {
       send_config: null,
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    const txLeadUpdate = vi.fn().mockResolvedValue({});
+    // Spec #1751 D6: the status write is transitionLeadStatus's `updateMany` (its NEW/CONTACTED
+    // guard lives in the WHERE clause), and D2's first_estimate_sent_at stamp lands on the same
+    // mock — hence leadStatusWrites() rather than a bare call count. The timeline double is
+    // captured because the from/to ledger entry is the point of routing this through one writer.
+    const txLead = txLeadDouble();
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       const tx = {
         estimate: {
@@ -4219,8 +4341,8 @@ describe('POST /api/estimates/:id/send', () => {
         deposit: { create: vi.fn().mockResolvedValue({}) },
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
-        lead: { update: txLeadUpdate },
+        timelineEvent: { create: txTimelineCreate },
+        lead: txLead,
       };
       return fn(tx);
     });
@@ -4231,11 +4353,12 @@ describe('POST /api/estimates/:id/send', () => {
       .send({ deposit_required: true, payment_methods: ['CARD'] });
 
     expect(res.status).toBe(200);
-    expect(txLeadUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { status: 'ESTIMATED' },
-      }),
-    );
+    const statusWrites = leadStatusWrites(txLead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('ESTIMATED');
+    const ledger = statusChangeEvents(txTimelineCreate);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'NEW', to: 'ESTIMATED' });
   });
 
   // NOTE: the old 'blocks send when lead status is WALKTHROUGH_SCHEDULED' test was removed here.
@@ -5218,7 +5341,9 @@ describe('POST /api/estimates/:id/mark-sent', () => {
       fn({
         estimate: { update: vi.fn().mockResolvedValue(result) },
         estimateSendConfig: { upsert: vi.fn().mockResolvedValue({}) },
-        lead: { update: vi.fn().mockResolvedValue({}) },
+        // Spec #1751 D2/D6: mark-sent shares commitFirstSend, so it stamps the lead's
+        // first_estimate_sent_at clock and may move the status — both through `updateMany`.
+        lead: txLeadDouble(),
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
       }),
     );
@@ -5263,7 +5388,7 @@ describe('POST /api/estimates/:id/mark-sent', () => {
       lead: { lead_assignees: [{ user_id: TEST_USERS.sales.id }] },
     });
     mockPrisma.appSetting.findUnique.mockResolvedValue(null);
-    mockPrisma.walkthrough.count.mockResolvedValue(0); // no COMPLETED visit
+    mockPrisma.visit.count.mockResolvedValue(0); // no COMPLETED visit
     mockMarkSentTransaction({ ...ESTIMATE_FIXTURE, status: 'SENT' });
 
     const res = await request(app)
@@ -5307,7 +5432,7 @@ describe('POST /api/estimates/:id/mark-sent', () => {
       fn({
         estimate: { update: vi.fn().mockResolvedValue({ ...ESTIMATE_FIXTURE, status: 'SENT' }) },
         estimateSendConfig: { upsert: vi.fn().mockResolvedValue({}) },
-        lead: { update: vi.fn().mockResolvedValue({}) },
+        lead: txLeadDouble(),
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: invoiceCreate },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
       }),
@@ -5543,10 +5668,374 @@ describe('PATCH /api/estimates/:id/status', () => {
 });
 
 // ═══════════════════════════════════════════════════════
+// PATCH /api/estimates/:id/status — unordered status (Spec B1)
+// ═══════════════════════════════════════════════════════
+// Estimate status stops being an ordered pipeline: any of the six exposed statuses is reachable
+// from any other, matching the Job model and what Workiz lets users do. Only integrity rules
+// block a move. Exercised through the HTTP route (the public interface), never against the
+// transition engine directly, so the engine stays free to be restructured.
+describe('PATCH /api/estimates/:id/status — unordered (Spec B1)', () => {
+  function mockExisting(status: string, extra: Record<string, unknown> = {}) {
+    mockPrisma.estimate.findUnique.mockResolvedValue({
+      id: ESTIMATE_SENT_FIXTURE.id,
+      status,
+      estimate_number: ESTIMATE_SENT_FIXTURE.estimate_number,
+      lead_id: ESTIMATE_SENT_FIXTURE.lead_id,
+      // Anything that has left DRAFT has a live customer link; the never-sent case overrides this.
+      public_token: 'live-token',
+      lead: { lead_assignees: [{ user_id: TEST_USERS.sales.id }], commission_owner_id: null, status: 'ESTIMATED' },
+      job: null,
+      invoices: [],
+      ...extra,
+    });
+  }
+
+  // Captures what the route actually wrote, so a test can assert on the stamps rather than on
+  // which internal function produced them.
+  function captureUpdate(opts: { wonSiblings?: number } = {}) {
+    const captured: {
+      data?: Record<string, unknown>;
+      leadUpdateMany: ReturnType<typeof vi.fn>;
+    } = { leadUpdateMany: vi.fn().mockResolvedValue({ count: 1 }) };
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        estimate: {
+          update: vi.fn().mockImplementation((args: { data: Record<string, unknown> }) => {
+            captured.data = args.data;
+            return Promise.resolve({ ...ESTIMATE_SENT_FIXTURE, ...args.data });
+          }),
+          count: vi.fn().mockResolvedValue(opts.wonSiblings ?? 0),
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+        lead: { updateMany: captured.leadUpdateMany },
+        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        invoice: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        estimateReservation: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({}) },
+      }),
+    );
+    return captured;
+  }
+
+  // The transition from the bug report: a SENT estimate could not be moved to "Approved —
+  // Deposit Pending" because no API path reached PENDING at all.
+  it('moves a SENT estimate forward to PENDING', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'PENDING' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('PENDING');
+  });
+
+  // A status is a bundle of stored state, not a flag. Entering WON is the same business event as
+  // approve-internal, so it must carry the same stamps - otherwise a won estimate reports no
+  // approval date and its lead is left behind in ESTIMATED.
+  it('stamps approved_at and wins the lead when entering WON', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'WON' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('WON');
+    expect(captured.data?.approved_at).toBeInstanceOf(Date);
+    expect(captured.leadUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'WON' } }),
+    );
+  });
+
+  // The mirror of the above. Leaving WON must clear the approval stamp and hand the lead back,
+  // or the estimate reports an approval date for an approval that no longer exists.
+  it('clears approved_at and demotes the lead when leaving WON', async () => {
+    mockAuthAs('admin');
+    mockExisting('WON', { lead: { lead_assignees: [{ user_id: TEST_USERS.sales.id }], commission_owner_id: null, status: 'WON' } });
+    const captured = captureUpdate({ wonSiblings: 0 });
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('SENT');
+    expect(captured.data?.approved_at).toBeNull();
+    expect(captured.leadUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'ESTIMATED' } }),
+    );
+  });
+
+  // ...but only when this was the LAST won estimate on the lead. A lead can hold several won
+  // estimates at once, and demoting it would contradict a sibling that is still won.
+  it('leaves the lead WON when a sibling estimate is still won', async () => {
+    mockAuthAs('admin');
+    mockExisting('WON', { lead: { lead_assignees: [{ user_id: TEST_USERS.sales.id }], commission_owner_id: null, status: 'WON' } });
+    const captured = captureUpdate({ wonSiblings: 1 });
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.leadUpdateMany).not.toHaveBeenCalled();
+  });
+
+  // The ONLY kind of rule that still blocks a move. Ordering is gone; a real money trail is not
+  // negotiable - unwinding a won estimate whose job has already been billed would orphan it.
+  // This guard used to live in voidApproval, so it covered WON -> SENT alone; it now covers every
+  // way out of WON, including the two (-> DRAFT, -> ARCHIVED) that had no route at all before.
+  it.each([
+    ['DRAFT'],
+    ['SENT'],
+    ['ARCHIVED'],
+  ])('refuses to leave WON for %s when the job has already been invoiced', async (target) => {
+    mockAuthAs('admin');
+    mockExisting('WON', {
+      job: { id: 'job-1', job_number: 'J00042', invoices: [{ id: 'inv-1', status: 'SENT', payments: [] }] },
+    });
+    captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: target });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/J00042/);
+  });
+
+  it('refuses to leave WON when the deposit has payments recorded', async () => {
+    mockAuthAs('admin');
+    mockExisting('WON', {
+      invoices: [{ id: 'dep-1', status: 'PAID', payments: [{ id: 'pay-1' }] }],
+    });
+    captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'DRAFT' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/deposit/i);
+  });
+
+  // DECLINED carries a required reason - the S1 win/loss reporting signal depends on it, and a
+  // staff member recording a loss has no excuse not to capture why (declineInternal's rule).
+  it('rejects a move to DECLINED with no lost_reason', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'DECLINED' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('stamps declined_at and the lost_reason when entering DECLINED', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'DECLINED', lost_reason: 'PRICE' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.declined_at).toBeInstanceOf(Date);
+    expect(captured.data?.lost_reason).toBe('PRICE');
+  });
+
+  it('stamps cancelled_at and the reason when entering ARCHIVED', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'ARCHIVED', cancelled_reason: 'Customer went quiet' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.cancelled_at).toBeInstanceOf(Date);
+    expect(captured.data?.cancelled_reason).toBe('Customer went quiet');
+  });
+
+  // Reviving a dead estimate is now legal, and the stamps from its old life must not survive it -
+  // a re-opened estimate that still reports a decline date and a lost reason is lying.
+  it('clears the decline stamps when moving back out of DECLINED', async () => {
+    mockAuthAs('admin');
+    mockExisting('DECLINED');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.declined_at).toBeNull();
+    expect(captured.data?.lost_reason).toBeNull();
+  });
+
+  it('clears the cancel stamps when moving back out of ARCHIVED', async () => {
+    mockAuthAs('admin');
+    mockExisting('ARCHIVED');
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'DRAFT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.cancelled_at).toBeNull();
+    expect(captured.data?.cancelled_reason).toBeNull();
+  });
+
+  // SENT is a LABEL, not a delivery receipt. It says where the estimate sits in the pipeline; it
+  // does NOT assert that a customer link exists. Only send/resend/mark-sent mint a public_token,
+  // and this endpoint must never do it as a side effect of a status pick - re-arming a customer's
+  // link on an estimate somebody deliberately archived is not a thing a label change may do.
+  //
+  // This replaces a 409 SEND_CEREMONY_REQUIRED that told the client to run POST /:id/mark-sent
+  // instead. That advice was a dead end: mark-sent gates on DRAFT, so every token-less
+  // WON/DECLINED/ARCHIVED estimate answered 409 here and 400 there, with nothing in between.
+  it('stamps SENT on an estimate that has never been sent, and mints no customer link', async () => {
+    mockAuthAs('admin');
+    mockExisting('ARCHIVED', { public_token: null });
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('SENT');
+    expect(captured.data).not.toHaveProperty('public_token');
+  });
+
+  it('stamps SENT directly when the estimate still has a live public link', async () => {
+    mockAuthAs('admin');
+    mockExisting('WON', { public_token: 'live-token' });
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('SENT');
+  });
+
+  // Winning an estimate reserves its materials. Reaching WON through the picker is the same
+  // business event as reaching it through approve-internal, so it must reserve too - otherwise
+  // which button was pressed silently decides whether stock gets held.
+  it('reserves materials when entering WON, same as approve-internal', async () => {
+    mockAuthAs('admin');
+    mockExisting('SENT');
+    const reservationCreate = vi.fn().mockResolvedValue({});
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        estimate: {
+          update: vi.fn().mockResolvedValue({ ...ESTIMATE_SENT_FIXTURE, status: 'WON' }),
+          count: vi.fn().mockResolvedValue(0),
+          findUnique: vi.fn().mockResolvedValue({
+            estimate_number: ESTIMATE_SENT_FIXTURE.estimate_number,
+            approved_at: null,
+            customer_id: null,
+            customer: null,
+            lead: null,
+            line_items: [{ description: 'Condenser', quantity: 1, unit_price: 500, line_total: 500, price_book_item_id: null, price_book_item: { sku: 'CND-1' } }],
+          }),
+        },
+        lead: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        estimateReservation: { findFirst: vi.fn().mockResolvedValue(null), create: reservationCreate },
+      }),
+    );
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'WON' });
+
+    expect(res.status).toBe(200);
+    expect(reservationCreate).toHaveBeenCalled();
+  });
+
+  // A clean won estimate - job exists but nothing billed - still moves freely.
+  it('allows leaving WON when the job carries only a draft invoice with no payments', async () => {
+    mockAuthAs('admin');
+    mockExisting('WON', {
+      job: { id: 'job-1', job_number: 'J00042', invoices: [{ id: 'inv-1', status: 'DRAFT', payments: [] }] },
+    });
+    const captured = captureUpdate();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'SENT' });
+
+    expect(res.status).toBe(200);
+    expect(captured.data?.status).toBe('SENT');
+  });
+
+  // The whole claim of Spec B1 in one table: on an estimate with no money trail and a live
+  // customer link, EVERY ordered pair of the six statuses is accepted. The tests above each pin
+  // one rule; this one pins the absence of a rule, which is what "unordered" actually means and
+  // what no single-pair test can show. If an ordering constraint is ever reintroduced anywhere on
+  // this path - a source-status gate, a terminal status, a one-way stamp - exactly one cell turns red.
+  describe('every from -> to pair is accepted', () => {
+    const STATUSES = ['DRAFT', 'SENT', 'PENDING', 'WON', 'DECLINED', 'ARCHIVED'] as const;
+    const pairs = STATUSES.flatMap((from) => STATUSES.filter((to) => to !== from).map((to) => [from, to] as const));
+
+    it.each(pairs)('%s -> %s', async (from, to) => {
+      mockAuthAs('admin');
+      mockExisting(from, {
+        // Leaving WON demotes the lead only from a WON lead, so the fixture mirrors the source status
+        // rather than pretending every estimate hangs off an ESTIMATED lead.
+        lead: {
+          lead_assignees: [{ user_id: TEST_USERS.sales.id }],
+          commission_owner_id: null,
+          status: from === 'WON' ? 'WON' : 'ESTIMATED',
+        },
+      });
+      const captured = captureUpdate();
+
+      const res = await request(app)
+        .patch(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/status`)
+        .set(authHeader('admin'))
+        // lost_reason is the one field a target demands, and it is a required INPUT rather than an
+        // ordering rule - S1 win/loss reporting is unusable without it.
+        .send({ status: to, ...(to === 'DECLINED' ? { lost_reason: 'PRICE' } : {}) });
+
+      expect(res.status).toBe(200);
+      expect(captured.data?.status).toBe(to);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════
 // POST /api/estimates/bulk-status
 // ═══════════════════════════════════════════════════════
 // Exercises bulkSetStatus(), which loops setStatusInternal() (extracted from setStatus() above)
-// SEQUENTIALLY over the submitted ids - same from-state guard, same messages per id, isolated
+// SEQUENTIALLY over the submitted ids - same source-status guard, same messages per id, isolated
 // per-id failures.
 describe('POST /api/estimates/bulk-status', () => {
   const SENT_A = 'b1000000-0000-0000-0000-000000000001';
@@ -5571,7 +6060,7 @@ describe('POST /api/estimates/bulk-status', () => {
     );
   });
 
-  it('applies backtodraft across a batch and isolates a wrong-from-state id', async () => {
+  it('applies backtodraft across a batch and isolates an id in the wrong source status', async () => {
     mockAuthAs('admin');
 
     const res = await request(app)
@@ -5971,6 +6460,7 @@ describe('POST /api/estimates/:id/void-approval', () => {
     });
     let captured: any;
     let leadArgs: any;
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
       fn({
         estimate: {
@@ -5987,7 +6477,7 @@ describe('POST /api/estimates/:id/void-approval', () => {
             return Promise.resolve({ count: 1 });
           }),
         },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        timelineEvent: { create: txTimelineCreate },
       }),
     );
 
@@ -5999,8 +6489,14 @@ describe('POST /api/estimates/:id/void-approval', () => {
     expect(res.status).toBe(200);
     expect(captured.data.status).toBe('SENT');
     expect(captured.data.approved_at).toBeNull();
-    expect(leadArgs.where).toEqual({ id: 'lead-1', status: 'WON' });
+    // Spec #1751 D6: the same "only demote a lead that is actually WON" restriction, now
+    // expressed as the one writer's `onlyFrom` (an IN clause) and carrying the tenant scope the
+    // helper adds for every door.
+    expect(leadArgs.where).toEqual({ id: 'lead-1', organization_id: ALPHA_ORG_ID, status: { in: ['WON'] } });
     expect(leadArgs.data.status).toBe('ESTIMATED');
+    const ledger = statusChangeEvents(txTimelineCreate);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'WON', to: 'ESTIMATED' });
   });
 
   // SRVW-86 - the same blind spot as copyToInvoice. An estimate ATTACHED to a job via
@@ -6138,6 +6634,7 @@ describe('POST /api/estimates/:id/void-approval', () => {
     });
     const leadUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const estimateCount = vi.fn().mockResolvedValue(0);
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
       fn({
         estimate: {
@@ -6145,7 +6642,7 @@ describe('POST /api/estimates/:id/void-approval', () => {
           count: estimateCount,
         },
         lead: { updateMany: leadUpdateMany },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        timelineEvent: { create: txTimelineCreate },
       }),
     );
 
@@ -6161,8 +6658,13 @@ describe('POST /api/estimates/:id/void-approval', () => {
       status: 'WON',
       id: { not: 'won-est-solo-1' },
     });
-    expect(leadUpdateMany.mock.calls[0][0].where).toEqual({ id: 'lead-solo', status: 'WON' });
+    // Spec #1751 D6: same guard, now the one writer's `onlyFrom` (an IN clause) plus the tenant
+    // scope the helper adds itself.
+    expect(leadUpdateMany.mock.calls[0][0].where).toEqual({ id: 'lead-solo', organization_id: ALPHA_ORG_ID, status: { in: ['WON'] } });
     expect(leadUpdateMany.mock.calls[0][0].data.status).toBe('ESTIMATED');
+    const ledger = statusChangeEvents(txTimelineCreate);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'WON', to: 'ESTIMATED' });
   });
 
   it('voids approval when the job exists but has no invoices or payments — lead stays WON', async () => {
@@ -6797,6 +7299,8 @@ describe('one WON estimate per lead', () => {
       estimate_number: 'E00002',
       lead_id: ESTIMATE_FIXTURE.lead_id,
       organization_id: 'org-test-1',
+      // Spec #1751 D6 records the lead's current status as the ledger entry's `from`.
+      lead: { commission_owner_id: null, status: 'ESTIMATED' },
       total_amount: 1062.5,
       valid_until: new Date('2027-12-31'),
       signature_data: null,
@@ -7204,6 +7708,11 @@ describe('POST /api/estimates/:id/approve', () => {
     status: 'SENT',
     estimate_number: ESTIMATE_SENT_FIXTURE.estimate_number,
     lead_id: ESTIMATE_SENT_FIXTURE.lead_id,
+    // The public door reads both of these off the estimate: the org because there is no signed-in
+    // user to take a tenant from, and the lead's CURRENT status because spec #1751 D6 records it
+    // as the ledger entry's `from`. Both are in approvePublic's select; the fixture omitted them.
+    organization_id: 'org-test-1',
+    lead: { commission_owner_id: null, status: 'ESTIMATED' },
     total_amount: 1062.5,
     valid_until: new Date('2027-12-31'),
     signature_data: null,
@@ -7249,6 +7758,53 @@ describe('POST /api/estimates/:id/approve', () => {
       accepted_payment_methods: ['CARD', 'CHECK', 'BANK_TRANSFER'],
     },
   };
+
+  // Spec B1 safety property. Staff can now set PENDING by hand, and such a row is honestly
+  // UNSIGNED (only this route ever captures a signature). The retry branch must therefore key off
+  // the signature actually on file, not off the status - otherwise a hand-set PENDING would skip
+  // signature capture entirely and the estimate could reach WON with no consent record.
+  it('still requires a signature on a hand-set PENDING that was never signed', async () => {
+    mockPrisma.estimate.findFirst.mockResolvedValue({
+      ...sentFixtureNoDeposit,
+      status: 'PENDING',
+      signature_data: null,
+    });
+
+    const res = await request(app)
+      .post(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/approve?token=${ESTIMATE_SENT_FIXTURE.public_token}`)
+      .send({ payment_method: null });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/signature/i);
+  });
+
+  // The other half of the same rule: a GENUINE retry (customer signed, then abandoned the card
+  // checkout) must still skip re-capture, so the original consent record stays immutable.
+  it('does not re-demand a signature on a genuinely-signed PENDING estimate', async () => {
+    mockPrisma.estimate.findFirst.mockResolvedValue({
+      ...sentFixtureNoDeposit,
+      status: 'PENDING',
+      signature_data: 'data:image/png;base64,originalconsent',
+    });
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        estimate: {
+          update: vi.fn().mockResolvedValue({ ...ESTIMATE_SENT_FIXTURE, status: 'WON' }),
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+        lead: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        estimateReservation: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({}) },
+      }),
+    );
+    mockPrisma.estimate.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/approve?token=${ESTIMATE_SENT_FIXTURE.public_token}`)
+      .send({ payment_method: null });
+
+    expect(res.status).toBe(200);
+  });
 
   it('should auto-approve when no deposit required', async () => {
     mockPrisma.estimate.findFirst.mockResolvedValue(sentFixtureNoDeposit);
@@ -7873,20 +8429,23 @@ describe('POST /api/estimates/:id/approve', () => {
   });
 
   it('should not transition a LOST lead to WON on approval', async () => {
-    mockPrisma.estimate.findFirst.mockResolvedValue(sentFixtureNoDeposit);
-    let capturedLeadWhere: Record<string, unknown> = {};
+    // The lead really IS lost here. Before spec #1751 D6 this test could only assert the shape of
+    // the `notIn` guard the door hand-rolled; the one writer now refuses the move on the caller's
+    // own known status and never reaches the database, so the refusal is proved by the absence of
+    // the write — and of any ledger entry claiming the lead was won.
+    mockPrisma.estimate.findFirst.mockResolvedValue({
+      ...sentFixtureNoDeposit,
+      lead: { commission_owner_id: null, status: 'LOST' },
+    });
+    const txLeadUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => {
       const tx = {
         estimate: {
           update: vi.fn().mockResolvedValue({ ...ESTIMATE_SENT_FIXTURE, status: 'WON' }),
         },
-        lead: {
-          updateMany: vi.fn().mockImplementation(({ where }: { where: Record<string, unknown> }) => {
-            capturedLeadWhere = where;
-            return Promise.resolve({ count: 0 });
-          }),
-        },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        lead: { updateMany: txLeadUpdateMany },
+        timelineEvent: { create: txTimelineCreate },
       };
       return fn(tx);
     });
@@ -7896,7 +8455,8 @@ describe('POST /api/estimates/:id/approve', () => {
       .post(`/api/estimates/${ESTIMATE_SENT_FIXTURE.id}/approve?token=${ESTIMATE_SENT_FIXTURE.public_token}`)
       .send({ signature_data: 'data:image/png;base64,abc123' });
 
-    expect(capturedLeadWhere.status).toEqual({ notIn: ['WON', 'LOST', 'CANCELLED'] });
+    expect(leadStatusWrites(txLeadUpdateMany)).toHaveLength(0);
+    expect(statusChangeEvents(txTimelineCreate)).toHaveLength(0);
   });
 
   it('sends sendEstimateApprovedNotification for non-CARD payment method', async () => {

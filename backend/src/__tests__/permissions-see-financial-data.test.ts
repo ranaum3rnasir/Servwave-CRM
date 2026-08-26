@@ -127,7 +127,7 @@ function jobGuardRow(lines: unknown[] = []) {
     source_plan_id: null,
     job_number: 'J00001',
     customer: { tax_exempt: false },
-    assignees: [{ user_id: TEST_USERS.technician.id }],
+    visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
     estimate: { lead: { lead_assignees: [{ user_id: TEST_USERS.sales.id }] } },
     job_line_items: lines,
     invoices: [],
@@ -453,7 +453,7 @@ describe('PUT /api/roles/:role/permissions - the switch is the single writer of 
   const upsert = vi.fn();
   const deleteMany = vi.fn();
 
-  const OWN_INVOICE_VIA_JOB = { job: { assignees: { some: { user_id: '{{userId}}' } } } };
+  const OWN_INVOICE_VIA_JOB = { job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } };
 
   const upserted = () =>
     upsert.mock.calls.map((c) => ({

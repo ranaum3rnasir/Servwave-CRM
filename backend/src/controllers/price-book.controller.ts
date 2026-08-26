@@ -11,7 +11,7 @@ import { canSeePricing } from '../lib/permissions/enforce';
 import { emitBackorderIfFlipped } from '../services/notifications/inventoryEmit';
 // Brand/item-group reads stay on inv-catalog; the write handlers moved here (P0 §D2)
 // and reuse its row mappers so both sides keep emitting the same camelCase shape.
-import { mapBrand, mapItemGroup } from './inv-catalog.controller';
+import { mapBrand, mapItemGroup, mapFinish, mapUomOption } from './inv-catalog.controller';
 
 // Hybrid-delete usage gate, DERIVED not hardcoded: every table that references a
 // price-book item is a *list* relation on the PriceBookItem model (belongs-to
@@ -56,6 +56,7 @@ const itemSupersetFields = {
   model_number: z.string().max(100).nullable().optional(),
   upc: z.string().max(100).nullable().optional(),
   brand_id: z.string().uuid().nullable().optional(),
+  finish_id: z.string().uuid().nullable().optional(),
   vendor_id: z.string().uuid().nullable().optional(),
   trade: z.string().max(50).nullable().optional(),
   kind: z.string().max(50).nullable().optional(),
@@ -104,14 +105,31 @@ export const updateItemSchema = z.object({
 
 // ─── Shared helpers ────────────────────────────────────
 
-// SRVW-90: `kind` is the single catalog control the inventory dialog exposes
-// (material/service/labor/bundle/fee); `type` is its SERVICE|MATERIAL
-// projection, the column estimates/invoices/jobs actually key on. Deriving it
-// in exactly one place keeps the two columns from contradicting each other.
-// Only the literal 'material' bills as a part - null, unknown strings, bundle
-// and fee all fall to SERVICE, which is the schema default today.
+// SRVW-90: `kind` is the single catalog control the inventory dialog exposes;
+// `type` is its SERVICE|MATERIAL projection, the column estimates/invoices/jobs
+// actually key on. Deriving it in exactly one place keeps the two columns from
+// contradicting each other. Only 'material' bills as a part - everything else
+// falls to SERVICE, which is the schema default today.
 export function typeForKind(kind: string | null | undefined): 'SERVICE' | 'MATERIAL' {
-  return kind === 'material' ? 'MATERIAL' : 'SERVICE';
+  return normalizeKind(kind) === 'material' ? 'MATERIAL' : 'SERVICE';
+}
+
+// Item Kind is material|service and nothing else. `labor`, `bundle` and `fee`
+// were offered by the dialog but bought no behaviour: typeForKind already
+// billed all three as SERVICE, and the Stock > Items grid filtered bundle and
+// fee out, so an item saved as either was created successfully and then never
+// appeared. Retiring them is a narrowing of the WRITE side only - the retired
+// tokens are folded into `service` rather than rejected, because a 400 here
+// would break an old client, a saved CSV or anything already in flight, and
+// `service` is the value they behaved as all along.
+//
+// Returns null only for a null/undefined/empty input, so a deliberate clear
+// stays a clear instead of silently reclassifying the item as a service.
+export function normalizeKind(kind: string | null | undefined): 'material' | 'service' | null {
+  if (kind == null) return null;
+  const k = kind.trim().toLowerCase();
+  if (k === '') return null;
+  return k === 'material' ? 'material' : 'service';
 }
 
 // Duplicate SKU (@@unique([organization_id, sku])) → 409 instead of a 500 (QA-106).
@@ -144,6 +162,15 @@ async function guardItemFks(req: Request, res: Response): Promise<boolean> {
     });
     if (!brand) {
       res.status(404).json({ error: 'Brand not found' });
+      return false;
+    }
+  }
+  if (req.body.finish_id) {
+    const finish = await prisma.finish.findFirst({
+      where: { id: req.body.finish_id, ...tenantWhere(req) },
+    });
+    if (!finish) {
+      res.status(404).json({ error: 'Finish not found' });
       return false;
     }
   }
@@ -476,9 +503,10 @@ export async function createItem(req: Request, res: Response) {
         model_number: body.model_number ?? null,
         upc: body.upc ?? null,
         brand_id: body.brand_id ?? null,
+        finish_id: body.finish_id ?? null,
         vendor_id: body.vendor_id ?? null,
         trade: body.trade ?? null,
-        kind: body.kind ?? null,
+        kind: normalizeKind(body.kind),
         uom: body.uom ?? null,
         list_price: body.list_price ?? null,
         serialized: body.serialized ?? false,
@@ -561,7 +589,7 @@ export async function updateItem(req: Request, res: Response) {
     const passthrough = [
       'name', 'description', 'image_url', 'type', 'category_id', 'unit_cost',
       'taxable', 'is_active', 'sort_order',
-      'sku', 'mpn', 'model_number', 'upc', 'brand_id', 'vendor_id', 'trade', 'kind', 'uom',
+      'sku', 'mpn', 'model_number', 'upc', 'brand_id', 'finish_id', 'vendor_id', 'trade', 'kind', 'uom',
       'list_price', 'serialized', 'hazmat', 'status', 'visibility',
       'customer_name', 'customer_description', 'key_features', 'photo_url',
       'track_inventory',
@@ -571,13 +599,19 @@ export async function updateItem(req: Request, res: Response) {
         data[key] = (body as Record<string, unknown>)[key];
       }
     }
+    // A retired kind (labor/bundle/fee) folds into `service` on the way in, so
+    // the stored column only ever holds the two live values. The passthrough
+    // above copied the raw string; overwrite it, but only when the caller
+    // actually sent the key - a PATCH that omits kind must not add it.
+    if (body.kind !== undefined) data.kind = normalizeKind(body.kind);
+
     // SRVW-90: repoint `type` whenever the caller moves `kind`, so correcting the
     // one control the dialog exposes also corrects the column estimates key on.
     // Guarded on a non-empty string: a PATCH that omits kind, or clears it to
     // null, must never move type. An explicit `type` in the body still wins -
     // the passthrough above already wrote it.
     let derivedType: 'SERVICE' | 'MATERIAL' | null = null;
-    if (body.type === undefined && typeof body.kind === 'string' && body.kind !== '') {
+    if (body.type === undefined && typeof body.kind === 'string' && body.kind.trim() !== '') {
       derivedType = typeForKind(body.kind);
       data.type = derivedType;
     }
@@ -766,6 +800,181 @@ export async function deleteBrand(req: Request, res: Response) {
   }
 }
 
+// ─── Finish Handlers ─────────────────────────────────────────────────────────
+// Mirrors the Brand handlers above. The one shape difference is the 409 on a
+// duplicate name: Finish carries @@unique([organization_id, name]) so the
+// dialog's inline "add new" cannot quietly create a second "Satin Chrome".
+
+export const upsertFinishSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1, 'Name is required').max(200),
+  code: z.string().max(50).nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export async function upsertFinish(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const body = req.body as z.infer<typeof upsertFinishSchema>;
+    const data = {
+      name: body.name.trim(),
+      code: body.code?.trim() || null,
+      is_active: body.isActive ?? true,
+    };
+
+    if (body.id) {
+      const result = await prisma.finish.updateMany({ where: { id: body.id, ...tenantWhere(req) }, data });
+      if (result.count === 0) { res.status(404).json({ error: 'Finish not found' }); return; }
+      const finish = await prisma.finish.findFirst({ where: { id: body.id, ...tenantWhere(req) } });
+
+      void logAudit({
+        req,
+        action: 'pricebook.finish_updated',
+        resourceType: 'Finish',
+        resourceId: body.id,
+        metadata: { fields: Object.keys(req.body) },
+      });
+
+      res.json({ finish: mapFinish(finish) });
+      return;
+    }
+
+    const finish = await prisma.finish.create({ data: { ...data, organization_id: orgId } });
+
+    void logAudit({
+      req,
+      action: 'pricebook.finish_created',
+      resourceType: 'Finish',
+      resourceId: finish.id,
+    });
+
+    res.status(201).json({ finish: mapFinish(finish) });
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002') {
+      res.status(409).json({ error: 'A finish with that name already exists' });
+      return;
+    }
+    logger.error('Failed to upsert finish:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteFinish(req: Request, res: Response) {
+  try {
+    const existing: any = await prisma.finish.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      include: { _count: { select: { items: true } } },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Finish not found' });
+      return;
+    }
+    if (existing._count.items > 0) {
+      res.status(400).json({ error: 'Cannot delete finish with items' });
+      return;
+    }
+
+    // deleteMany with id+org filter is atomic — no TOCTOU window.
+    await prisma.finish.deleteMany({ where: { id: req.params.id as string, ...tenantWhere(req) } });
+
+    void logAudit({
+      req,
+      action: 'pricebook.finish_deleted',
+      resourceType: 'Finish',
+      resourceId: req.params.id as string,
+    });
+
+    res.json({ message: 'Finish deleted' });
+  } catch (err) {
+    logger.error('Failed to delete finish:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── UoM Option Handlers ─────────────────────────────────────────────────────
+// These supply the unit dropdown's options. Items still store the CODE STRING,
+// not a foreign key, so deleting an option cannot orphan an item — there is no
+// items relation to count, and any item already carrying the code keeps it.
+
+export const upsertUomOptionSchema = z.object({
+  id: z.string().uuid().optional(),
+  code: z.string().trim().min(1, 'Code is required').max(50),
+  label: z.string().max(100).nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export async function upsertUomOption(req: Request, res: Response) {
+  try {
+    const orgId = req.user!.organization_id;
+    const body = req.body as z.infer<typeof upsertUomOptionSchema>;
+    // Codes are compared and stored upper-case so "pail" and "PAIL" collide on
+    // the unique key instead of becoming two entries in the same dropdown.
+    const data = {
+      code: body.code.trim().toUpperCase(),
+      label: body.label?.trim() || null,
+      is_active: body.isActive ?? true,
+    };
+
+    if (body.id) {
+      const result = await prisma.uomOption.updateMany({ where: { id: body.id, ...tenantWhere(req) }, data });
+      if (result.count === 0) { res.status(404).json({ error: 'Unit not found' }); return; }
+      const option = await prisma.uomOption.findFirst({ where: { id: body.id, ...tenantWhere(req) } });
+
+      void logAudit({
+        req,
+        action: 'pricebook.uom_option_updated',
+        resourceType: 'UomOption',
+        resourceId: body.id,
+      });
+
+      res.json({ uomOption: mapUomOption(option) });
+      return;
+    }
+
+    const option = await prisma.uomOption.create({ data: { ...data, organization_id: orgId } });
+
+    void logAudit({
+      req,
+      action: 'pricebook.uom_option_created',
+      resourceType: 'UomOption',
+      resourceId: option.id,
+    });
+
+    res.status(201).json({ uomOption: mapUomOption(option) });
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002') {
+      res.status(409).json({ error: 'That unit already exists' });
+      return;
+    }
+    logger.error('Failed to upsert uom option:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function deleteUomOption(req: Request, res: Response) {
+  try {
+    const result = await prisma.uomOption.deleteMany({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+    });
+    if (result.count === 0) {
+      res.status(404).json({ error: 'Unit not found' });
+      return;
+    }
+
+    void logAudit({
+      req,
+      action: 'pricebook.uom_option_deleted',
+      resourceType: 'UomOption',
+      resourceId: req.params.id as string,
+    });
+
+    res.json({ message: 'Unit deleted' });
+  } catch (err) {
+    logger.error('Failed to delete uom option:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
 // ─── Item Group Handlers (moved from inv-catalog — P0 §D2) ───────────────────
 
 export const upsertItemGroupSchema = z.object({
@@ -920,7 +1129,7 @@ export async function importItems(req: Request, res: Response) {
             where: { id: existing.id },
             data: {
               name: row.name,
-              kind: row.kind ?? null,
+              kind: normalizeKind(row.kind),
               // SRVW-90: only repoint type when the CSV actually carried a kind,
               // so a re-import with no kind column cannot flip MATERIAL to SERVICE.
               ...(row.kind ? { type: typeForKind(row.kind) } : {}),
@@ -936,7 +1145,7 @@ export async function importItems(req: Request, res: Response) {
             data: {
               name: row.name,
               sku: row.sku ?? null,
-              kind: row.kind ?? null,
+              kind: normalizeKind(row.kind),
               // SRVW-90: same projection as the UI door. Unconditional is safe -
               // a kind-less row yields SERVICE, today's schema default.
               type: typeForKind(row.kind),

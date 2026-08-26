@@ -93,17 +93,12 @@ export function groupTargetOptions(groups: CallGroup[]): { id: string; label: st
 
 /* ─────────────────────────── Phone plan / numbers ─────────────────────────── */
 
-export const BUSINESS_NUMBER = "(555) 555-0208";
+export const BUSINESS_NUMBER = "(551) 282-7064";
 
-// Current billing-cycle plan usage (PHONE-SYSTEM-PRD §14.8). In production these
-// counters come from the provider's usage API; seeded here for the prototype.
-export const PLAN_USAGE = {
-  cycleLabel: "May 1 – 31",
-  calling: { used: 820, limit: 1000, unit: "min" },
-  texting: { used: 1480, limit: 2000, unit: "texts" },
-};
+// Plan usage is no longer seeded here — the Phone header meters read real
+// per-cycle usage from GET /api/communication/usage (see lib/comm-usage.ts).
 
 /** One-time price charged per provisioned number (prototype). */
 export const NUMBER_PRICE = 2;
 
-export const MASKING_NUMBER = "(555) 555-0216";
+export const MASKING_NUMBER = "(646) 718-4893";

@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { tenantWhere } from '../lib/tenant';
+import { jobCrewIds } from '../lib/job-crew';
+import { resolveJobScheduleWindow, type VisitForScheduleProjection } from '../lib/job-schedule-projection';
 
 // ─── Mock-shape types (the frontend API contract) ──────────
 // These mirror frontend/src/lib/api/_mock/inventory/{techs,jobs}.ts exactly.
@@ -66,8 +68,9 @@ function mapUserToTech(u: {
 
 // JobStatus (Prisma) → the prototype's 4-state board status.
 //
-// Spec B1 (Task 5, B-8): EN_ROUTE/ON_SITE already map correctly to 'in_progress' -- no bug here.
-// CANCELLED -> 'on_hold' and UNASSIGNED -> 'scheduled' are deliberate mismatches, NOT left to
+// S4 (D17): EN_ROUTE/ON_SITE retired from JobStatus; the two cases below are dead but harmless
+// and are dropped here rather than left to rot.
+// CANCELLED -> 'on_hold' and UNSCHEDULED -> 'scheduled' are deliberate mismatches, NOT left to
 // widen: 'on_hold' is the closest of this board's four states to cancelled, and there is no
 // board state for "unassigned". Documented here so the next reader does not re-litigate it.
 function mapJobStatus(status: string): InventoryJobStatus {
@@ -75,12 +78,10 @@ function mapJobStatus(status: string): InventoryJobStatus {
     case 'COMPLETED':
       return 'completed';
     case 'IN_PROGRESS':
-    case 'EN_ROUTE':
-    case 'ON_SITE':
       return 'in_progress';
     case 'CANCELLED':
       return 'on_hold';
-    case 'UNASSIGNED':
+    case 'UNSCHEDULED':
     case 'SCHEDULED':
     default:
       return 'scheduled';
@@ -91,8 +92,13 @@ function mapJobToInventoryJob(j: {
   id: string;
   job_number: string;
   status: string;
-  scheduled_start: Date | null;
-  assignees: { user_id: string }[];
+  // S8 (D6): crew reached through the trips.
+  // S8 (A5, RATIFIED): `scheduledFor` below is the SAME "next upcoming live visit, fallback to
+  // earliest non-cancelled" projection the job detail/list payloads serve as `scheduled_start` -
+  // not `first_visit_start` (the span start). Decision (contract 11, Step 3a): this board shows
+  // "when is this job coming up", the exact question the old forward mirror answered; the span
+  // start would show a job's FIRST-ever trip date forever, including long after it was worked.
+  visits: (VisitForScheduleProjection & { assignees: { user_id: string }[] })[];
   scope_notes: string | null;
   customer: { company_name: string | null; first_name: string | null; last_name: string | null };
   service_location: {
@@ -128,9 +134,11 @@ function mapJobToInventoryJob(j: {
     status: mapJobStatus(j.status),
   };
 
-  if (j.scheduled_start) out.scheduledFor = j.scheduled_start.toISOString();
+  const { scheduled_start } = resolveJobScheduleWindow(j.visits);
+  if (scheduled_start) out.scheduledFor = scheduled_start.toISOString();
   // The prototype's single-tech board contract: surface the first crew member.
-  if (j.assignees.length) out.assignedTechId = j.assignees[0].user_id;
+  const crew = jobCrewIds(j);
+  if (crew.length) out.assignedTechId = crew[0];
   if (j.scope_notes) out.notes = j.scope_notes;
 
   return out;
@@ -161,10 +169,20 @@ export async function listInventoryJobs(req: Request, res: Response) {
   try {
     const rows = await prisma.job.findMany({
       where: tenantWhere(req),
-      orderBy: [{ scheduled_start: 'asc' }, { job_number: 'asc' }],
+      // S8 (RATIFIED, A1's precedent): scheduled_start is DROPPED. Prisma cannot ORDER BY a
+      // to-many relation's aggregate, so this orders on first_visit_start (S8 §4, stored and
+      // maintained) - the render-side `scheduledFor` still projects the next upcoming live visit
+      // (see mapJobToInventoryJob), so sort and render can disagree on a multi-visit job exactly
+      // as A1 accepted for the Jobs list.
+      orderBy: [{ first_visit_start: 'asc' }, { job_number: 'asc' }],
       include: {
         customer: { select: { company_name: true, first_name: true, last_name: true } },
-        assignees: { select: { user_id: true } },
+        visits: {
+          select: {
+            status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+            assignees: { select: { user_id: true } },
+          },
+        },
         service_location: {
           select: {
             address_line1: true,
@@ -193,7 +211,12 @@ export async function getInventoryJob(req: Request, res: Response) {
       where: { id: req.params.id as string, ...tenantWhere(req) },
       include: {
         customer: { select: { company_name: true, first_name: true, last_name: true } },
-        assignees: { select: { user_id: true } },
+        visits: {
+          select: {
+            status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+            assignees: { select: { user_id: true } },
+          },
+        },
         service_location: {
           select: {
             address_line1: true,

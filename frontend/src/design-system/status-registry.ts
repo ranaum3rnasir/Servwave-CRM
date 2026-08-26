@@ -167,10 +167,13 @@ const ESTIMATE_STATUS: Record<string, StatusEntry> = {
   SUPERSEDED: { label: 'Superseded', intent: 'neutral' },
 };
 
-// Prisma JobStatus, 7/7.
+// Prisma JobStatus (5/5 after multi-visit S4's D17 narrowing) PLUS the two values that retired
+// from it into VisitStatus. EN_ROUTE and ON_SITE stay here deliberately: this block is what the
+// Visits cards render a visit's status through, and dropping them would leave a crew on site
+// showing a raw enum name.
 const JOB_STATUS: Record<string, StatusEntry> = {
-  // display "Unscheduled" (ratified rename; the enum VALUE stays UNASSIGNED)
-  UNASSIGNED: { label: 'Unscheduled', intent: 'warning' },
+  // display "Unscheduled" (ratified rename; the enum VALUE stays UNSCHEDULED)
+  UNSCHEDULED: { label: 'Unscheduled', intent: 'warning' },
   SCHEDULED: { label: 'Scheduled', intent: 'warning' },
   EN_ROUTE: { label: 'En Route', intent: 'warning' },
   ON_SITE: { label: 'On Site', intent: 'warning' },
@@ -213,12 +216,19 @@ const DEPOSIT_STATUS: Record<string, StatusEntry> = {
   REFUNDED: { label: 'Refunded', intent: 'danger' },
 };
 
-// Prisma TaskStatus, 4/4.
+// Prisma TaskStatus, 5/5.
+//
+// CANCELLED is `danger`, matching SERVICE_PLAN_STATUS' cancelled entry - the registry answers
+// "what does this state mean", and both mean the same thing: the thing was called off. It is
+// also what keeps a cancelled task from reading as a completed one wherever the two sit in the
+// same list (the History tab), where `success` green and `danger` red are the furthest apart
+// two chips in the palette can be.
 const TASK_STATUS: Record<string, StatusEntry> = {
   TODO: { label: 'To Do', intent: 'neutral' },
   IN_PROGRESS: { label: 'In Progress', intent: 'info' },
   BLOCKED: { label: 'Blocked', intent: 'warning' },
   DONE: { label: 'Done', intent: 'success' },
+  CANCELLED: { label: 'Cancelled', intent: 'danger' },
 };
 
 // Prisma TaskPriority, 4/4. Graded severity rather than a lifecycle, but it is exactly

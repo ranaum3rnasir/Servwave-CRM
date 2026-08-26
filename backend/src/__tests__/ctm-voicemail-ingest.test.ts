@@ -1,7 +1,7 @@
 /**
  * ctm-voicemail-ingest.test.ts — Phone master plan Phase C, Task C4.
  *
- * RESEARCH NOTE (Supabase MCP, 2026-07-16): the
+ * RESEARCH NOTE (Supabase MCP, project redacted-staging-ref, 2026-07-16): the
  * live `ctm_events` table holds 15 stored `end` events for Alpha Doors
  * (596375) and NONE of them are a voicemail — every one is either
  * agent-answered (`agent` present, dial_status "answered") or forwarded to an
@@ -35,9 +35,9 @@ const ORG_ID = 'org-1';
 const BASE_END = {
   sid: 'CA9101',
   account_id: 596375,
-  caller_number: '+15555550212',
-  caller_number_complete: '+15555550212',
-  tracking_number: '+15555550201',
+  caller_number: '+15555550199',
+  caller_number_complete: '+15555550199',
+  tracking_number: '+12017401509',
   direction: 'inbound',
   unix_time: 1_784_204_219,
   agent: null,
@@ -81,7 +81,7 @@ const ANSWERED_END = {
   call_status: 'answered',
   duration: 24,
   talk_time: 16,
-  agent: { id: 'USR1', name: 'Jordan Blake', email: 'jordan@example.com' },
+  agent: { id: 'USR1', name: 'Emanuel Dahan', email: 'emanuel@alphasecurityus.com' },
   call_path: [
     {
       route_id: 'COR1819B95F1F30B8D29D6074F01BE71F04D8CBF51A96',
@@ -103,7 +103,7 @@ const MISSED_END = {
   call_path: [
     {
       route_id: 'RPN34D8AC3F61E8848FEA641CEF711011AA',
-      route_name: 'Dome OFFICE (555) 555-0219',
+      route_name: 'Dome OFFICE (929) 403-9424',
       route_type: 'PhysicalPhoneNumber',
       started_at: '2026-07-16T13:33:23Z',
     },

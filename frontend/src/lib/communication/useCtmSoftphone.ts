@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuthStore } from '@/stores/auth.store';
 import { useFeature } from '@/lib/entitlements';
 import { requestPhoneAccessToken } from '@/lib/api/phoneNumbers';
-import { isCtmSoftphoneEnabled, type CtmSoftphone } from './ctmSoftphone';
+import { isCtmSoftphoneEnabled, type CtmSoftphone, type SoftphoneFault } from './ctmSoftphone';
 import {
   ensureOfficeSoftphone,
+  getOfficeSoftphoneFault,
   isOfficeSoftphoneReady,
   subscribeOfficeSoftphoneReady,
+  subscribeOfficeSoftphoneFault,
 } from './officeSoftphone';
 
 /**
@@ -47,6 +49,19 @@ export type IncomingCallInfo = Record<string, unknown>;
 export interface OfficeSoftphone {
   /** True once the embed script loaded, the device mounted, and the token set. */
   ready: boolean;
+  /**
+   * Why the device is not ready, once that is knowable — null while it is
+   * simply still booting, and null again if it eventually boots. Mutually
+   * exclusive with `ready` (officeSoftphone.ts enforces it).
+   *
+   * This rides the SAME handle as `ready` deliberately. Every surface that can
+   * show a softphone — the main app's GlobalDialer popup and the dedicated
+   * `/phone` tab alike — reads the device only through this hook, so one field
+   * here covers both. It stays null on the bridge/`tel:` path for the same
+   * reason `ready` is irrelevant there: the hook returns null outright, so no
+   * inline caller can ever be told a device failed that it never booted.
+   */
+  fault: SoftphoneFault | null;
   /** Place an outbound call through the browser (optionally with a resolved
    *  caller-ID TPN — the per-call picker lands in slice 5). */
   call(e164: string, fromTpnId?: string): void;
@@ -90,6 +105,11 @@ export function useCtmSoftphone(handlers: {
   // 'ready' event (the event already fired once, in the past, and won't fire
   // again for this instance).
   const [ready, setReady] = useState(() => enabled && isOfficeSoftphoneReady());
+  // Seeded from the getter for the same reason `ready` is: the 'fault' event
+  // fires once, in the past, and a dialer opened afterwards must still see it.
+  const [fault, setFault] = useState<SoftphoneFault | null>(() =>
+    enabled ? getOfficeSoftphoneFault() : null,
+  );
 
   // Keep handlers in a ref so the mount effect doesn't re-run when they change.
   const handlersRef = useRef(handlers);
@@ -108,11 +128,16 @@ export function useCtmSoftphone(handlers: {
     // synchronous seed above; this only fires for a device that boots WHILE
     // this hook is mounted.
     const offReady = subscribeOfficeSoftphoneReady(() => setReady(true));
+    // RE-READ, don't assume: this channel also transitions back to null when a
+    // slow device finally boots, so the notification alone says "changed", not
+    // "faulted".
+    const offFault = subscribeOfficeSoftphoneFault(() => setFault(getOfficeSoftphoneFault()));
     return () => {
       offStart();
       offEnd();
       offErr();
       offReady();
+      offFault();
       // The device is a page-load-scoped singleton, not owned by this hook —
       // it survives unmount (the dialer closing). Only a dedicated warm-up
       // owner (OfficeSoftphoneWarmup) tears it down, on real session end.
@@ -122,6 +147,7 @@ export function useCtmSoftphone(handlers: {
   if (!enabled) return null;
   return {
     ready,
+    fault,
     call(e164: string, fromTpnId?: string) {
       if (fromTpnId) spRef.current?.dialFrom(fromTpnId);
       spRef.current?.call(e164);

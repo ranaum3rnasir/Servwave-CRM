@@ -28,7 +28,6 @@ function mockIdentity(over: Partial<{ localPart: string; localPartIsCustom: bool
         data: {
           address: `${over.localPart ?? 'alphadoorssecurity'}@${DOMAIN}`,
           name: 'Alpha Doors & Security',
-          customDomain: false,
           sendingEnabled: true,
           localPart: over.localPart ?? 'alphadoorssecurity',
           localPartIsCustom: over.localPartIsCustom ?? false,

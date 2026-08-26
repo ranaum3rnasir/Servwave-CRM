@@ -76,7 +76,7 @@ describe('GET /api/jobs (LIST) — multi-read scope OR survives a search OR (Fix
       },
     ]);
     // Per-user override `create Job` synthesizes a SECOND distinct conditional read = OWN_JOB
-    // (assignees.some.user_id). Two distinct conditions ⇒ scopeWhereFor returns { OR: [via_estimate, own] }.
+    // (visits.some.assignees.some.user_id). Two distinct conditions => scopeWhereFor returns { OR: [via_estimate, own] }.
     mockPrisma.userPermissionOverride.findMany.mockResolvedValue([
       { action: 'create', subject: 'Job', effect: 'allow' },
     ]);
@@ -86,9 +86,9 @@ describe('GET /api/jobs (LIST) — multi-read scope OR survives a search OR (Fix
     expect(res.status).toBe(200);
     const where = mockPrisma.job.findMany.mock.calls[0][0].where as Record<string, unknown>;
 
-    // Both scope arms survive: the via-estimate arm has `estimate`; the own arm has `assignees`.
+    // Both scope arms survive: the via-estimate arm has `estimate`; the own arm has `visits`.
     expect(deepHas(where, 'estimate')).toBe(true); // unique to OWN_JOB_VIA_ESTIMATE
-    expect(deepHas(where, 'assignees')).toBe(true); // OWN_JOB
+    expect(deepHas(where, 'visits')).toBe(true); // OWN_JOB (S8: the visits path)
     // …and the search clauses are present too (neither OR clobbered the other).
     expect(deepHas(where, 'job_number')).toBe(true);
 
@@ -98,7 +98,7 @@ describe('GET /api/jobs (LIST) — multi-read scope OR survives a search OR (Fix
     expect(Array.isArray(where.AND)).toBe(true);
     const andArms = where.AND as Record<string, unknown>[];
     // One AND arm is the scope OR (carries the ownership relations); another is the search OR.
-    expect(andArms.some((c) => deepHas(c, 'estimate') && deepHas(c, 'assignees'))).toBe(true);
+    expect(andArms.some((c) => deepHas(c, 'estimate') && deepHas(c, 'visits'))).toBe(true);
     expect(andArms.some((c) => deepHas(c, 'job_number'))).toBe(true);
   });
 
@@ -122,7 +122,7 @@ describe('GET /api/jobs (LIST) — multi-read scope OR survives a search OR (Fix
     // No search → the scope OR is the plain top-level OR (cheap path, unchanged shape).
     expect(Array.isArray(where.OR)).toBe(true);
     expect(deepHas(where, 'estimate')).toBe(true);
-    expect(deepHas(where, 'assignees')).toBe(true);
+    expect(deepHas(where, 'visits')).toBe(true);
   });
 });
 
@@ -135,7 +135,8 @@ describe('POST /api/jobs/:id/start — Phase B pricing strip on advance response
       ...JOB_FIXTURE,
       status: 'IN_PROGRESS',
       amount_invoiced: 400,
-      assignees: [{ user: { id: TEST_USERS.technician.id, first_name: 'Test', last_name: 'Tech' } }],
+      // S8 (D6): crew rides on the trips; `assignees` survives as the DERIVED payload key.
+      visits: [{ assignees: [{ user_id: TEST_USERS.technician.id, user: { id: TEST_USERS.technician.id, first_name: 'Test', last_name: 'Tech' } }] }],
       estimate: {
         id: 'est-x',
         estimate_number: 'E00003',
@@ -152,11 +153,11 @@ describe('POST /api/jobs/:id/start — Phase B pricing strip on advance response
     };
   }
 
-  // The pre-update findUnique in start() selects only id/status/assignees/job_number.
+  // The pre-update findUnique in start() selects only id/status/visits/job_number.
   const START_PRECHECK_OWNED_BY_TECH = {
     id: JOB_ID,
     status: 'SCHEDULED',
-    assignees: [{ user_id: TEST_USERS.technician.id }],
+    visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
     job_number: 'J00001',
   };
 

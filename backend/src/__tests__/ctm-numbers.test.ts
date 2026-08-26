@@ -97,28 +97,28 @@ describe('buyNumberSchema (routing destination required)', () => {
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
       }).success,
     ).toBe(true);
     // The bare 10-digit spelling normalizes too.
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '5555550215',
+        forward_to_e164: '6462023002',
       }).success,
     ).toBe(true);
     // Optional flow metadata still validates as a uuid when present.
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
         call_flow_id: FLOW_ID,
       }).success,
     ).toBe(true);
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
         call_flow_id: 'main_ivr',
       }).success,
     ).toBe(false);
@@ -133,7 +133,7 @@ describe('buyNumberSchema (routing destination required)', () => {
       }).success,
     ).toBe(false);
     expect(
-      numbersController.buyNumberSchema.safeParse({ forward_to_e164: '+15555550215' }).success,
+      numbersController.buyNumberSchema.safeParse({ forward_to_e164: '+16462023002' }).success,
     ).toBe(false);
   });
 });
@@ -281,7 +281,7 @@ describe('searchNumbers', () => {
 // ─── POST /numbers/buy ───────────────────────────────────────────────────────
 
 describe('buyNumber', () => {
-  const FORWARD_TO = '+15555550215';
+  const FORWARD_TO = '+16462023002';
   const buyBody = { phone_number: '+12015550123', forward_to_e164: FORWARD_TO, call_flow_id: FLOW_ID };
 
   it('409s when the org is not CTM-connected', async () => {
@@ -395,16 +395,16 @@ describe('buyNumber', () => {
   // writing a corrupt row.
   it('a purchase response it cannot parse never becomes a garbage row - it warns instead', async () => {
     client.buyNumber.mockResolvedValue({
-      number: { id: 'TPN-WRAPPED', number: '+15555550211', formatted: '(555) 555-0211' },
+      number: { id: 'TPN-WRAPPED', number: '+16095968565', formatted: '(609) 596-8565' },
     });
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+15555550211', forward_to_e164: FORWARD_TO }),
+      req({ phone_number: '+16095968565', forward_to_e164: FORWARD_TO }),
       res,
     );
 
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
-    expect(upsert.create.e164).toBe('+15555550211');
+    expect(upsert.create.e164).toBe('+16095968565');
     expect(upsert.create.e164).not.toContain('object Object');
     expect(upsert.create.formatted).toBeNull();
     expect(upsert.create.ctm_number_id).toBeNull();
@@ -421,13 +421,13 @@ describe('buyNumber', () => {
     client.buyNumber.mockResolvedValue({ unexpected: { shape: true } });
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+15555550211', forward_to_e164: FORWARD_TO }),
+      req({ phone_number: '+16095968565', forward_to_e164: FORWARD_TO }),
       res,
     );
 
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
-    expect(upsert.create.e164).toBe('+15555550211');
-    expect(upsert.where.organization_id_e164.e164).toBe('+15555550211');
+    expect(upsert.create.e164).toBe('+16095968565');
+    expect(upsert.where.organization_id_e164.e164).toBe('+16095968565');
   });
 
   it('buys WITHOUT call_flow_id (optional metadata) — no flow lookup, flow persists null', async () => {
@@ -452,7 +452,7 @@ describe('buyNumber', () => {
   it('normalizes a bare 10-digit forward_to_e164 before routing', async () => {
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+12015550123', forward_to_e164: '5555550215' }),
+      req({ phone_number: '+12015550123', forward_to_e164: '6462023002' }),
       res,
     );
 

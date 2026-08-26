@@ -30,7 +30,7 @@ const CALL_END_PAYLOAD = {
   id: 12345,
   account_id: 596375,
   caller_number: '+12015551234',
-  tracking_number: '+15555550202',
+  tracking_number: '+12019037784',
   direction: 'inbound',
   dial_status: 'answered',
   duration: 62,
@@ -174,6 +174,35 @@ describe('CTM webhook ingestion flow', () => {
     expect(call.create.status).toBe('missed');
   });
 
+  it('stores BOTH clocks: talk_time as duration_sec, duration as connected_sec', async () => {
+    // The payload carries duration 62 / talk_time 48. They are different
+    // quantities and both are needed: the Calls list shows the conversation,
+    // the plan allowance meters the connected time CTM actually invoices.
+    // Collapsing them to one field under-counted billed minutes by 13.6%.
+    await post('end', CALL_END_PAYLOAD);
+    const call = p.callSession.upsert.mock.calls[0][0];
+    expect(call.create.duration_sec).toBe(48);
+    expect(call.create.connected_sec).toBe(62);
+    expect(call.update.connected_sec).toBe(62);
+  });
+
+  it('records the connected clock for a call that rang and was never answered', async () => {
+    // CTM billed 26 of 26 such calls in the live account. talk_time is 0, so
+    // the allowance would see nothing at all without the connected clock.
+    await post('end', {
+      ...CALL_END_PAYLOAD,
+      sid: 'CA0003',
+      dial_status: 'no-answer',
+      talk_time: 0,
+      duration: 32,
+      audio: undefined,
+    });
+    const call = p.callSession.upsert.mock.calls[0][0];
+    expect(call.create.status).toBe('missed');
+    expect(call.create.duration_sec).toBe(0);
+    expect(call.create.connected_sec).toBe(32);
+  });
+
   it('replays are idempotent: pre-recorded event → 200 duplicate, no ingest', async () => {
     p.ctmEvent.findUnique.mockResolvedValue({ id: 'evt-existing' });
     const res = await post('end', CALL_END_PAYLOAD);
@@ -238,7 +267,7 @@ describe('CTM inbound SMS ingestion', () => {
     message_id: 'MSG0001',
     account_id: 596375,
     caller_number: '+12015551234',
-    tracking_number: '+15555550202',
+    tracking_number: '+12019037784',
     direction: 'msg_inbound',
     message_body: 'Hi, is my door fixed?',
     unix_time: 1_752_000_100,
@@ -305,7 +334,7 @@ describe('CTM SMS thread find/create parity (one thread per counterpart)', () =>
     message_id: 'MSG1001',
     account_id: 596375,
     caller_number: '+12015551234',
-    tracking_number: '+15555550202',
+    tracking_number: '+12019037784',
     direction: 'msg_inbound',
     message_body: 'First message',
     unix_time: 1_752_000_100,
@@ -388,7 +417,7 @@ describe('CTM outbound SMS reconciliation (webhook side)', () => {
   const OUT_PAYLOAD = {
     message_id: 'MSG2001',
     account_id: 596375,
-    caller_number: '+15555550202',
+    caller_number: '+12019037784',
     called_number: '+12015551234',
     direction: 'msg_outbound',
     message_body: 'Your technician is on the way',
@@ -460,8 +489,8 @@ describe('CTM status_change carries outbound texts (the outbound_text hook never
     sid: '1056366839',
     message_id: 'MSGA9B07EC712F11C71FF8D9CB2DB3A28D80EBAA4A638C1559085F6E896A61189CC',
     account_id: 596375,
-    caller_number: '+15555550212',
-    contact_number: '+15555550212',
+    caller_number: '+15555550199',
+    contact_number: '+15555550199',
     called_number: '+12015551234',
     direction: 'msg_outbound',
     call_status: 'sent',

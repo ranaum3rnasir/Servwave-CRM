@@ -39,7 +39,6 @@ vi.mock('resend', () => ({
 
 import webhookRoutes from '../routes/webhook.routes';
 import { prisma } from '../lib/prisma';
-import { sendDomainVerifiedEmail } from '../lib/email';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const p = prisma as any;
@@ -108,18 +107,8 @@ const EMAIL_ROW = {
   organization_id: 'org-1',
 };
 
-// Email slice 10 (guided domain verification) fixtures.
-const DOMAIN_ROW = {
-  id: 'orgdomain-1',
-  organization_id: 'org-1',
-  domain_name: 'acmeplumbing.com',
-  resend_domain_id: 'dom_1',
-  status: 'pending',
-  records: [] as unknown[],
-  detected_dns_provider: 'Cloudflare',
-  verified_at: null as Date | null,
-};
-
+// domain.* event fixtures. The events still ARRIVE - Resend sends them for
+// the shared platform domains - they simply correlate to nothing we store.
 function domainEventData(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dom_1',
@@ -132,11 +121,6 @@ function domainEventData(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const DOMAIN_UPDATED_STILL_PENDING = {
-  type: 'domain.updated',
-  created_at: '2026-08-05T00:00:00.000Z',
-  data: domainEventData({ status: 'pending' }),
-};
 const DOMAIN_UPDATED_VERIFIED = {
   type: 'domain.updated',
   created_at: '2026-08-05T00:00:01.000Z',
@@ -167,10 +151,6 @@ beforeEach(() => {
   p.emailSuppression.findFirst.mockResolvedValue(null);
   p.emailSuppression.upsert.mockResolvedValue({});
   p.organization.findUnique.mockResolvedValue({ email_sending_enabled: true, name: 'Test Org' });
-  p.organizationDomain.findUnique.mockResolvedValue({ ...DOMAIN_ROW });
-  p.organizationDomain.update.mockImplementation((args: any) =>
-    Promise.resolve({ ...DOMAIN_ROW, ...args.data }));
-  p.organizationDomain.delete.mockResolvedValue({});
   p.user.findMany.mockResolvedValue([{ email: 'admin@acmeplumbing.com' }]);
   p.$transaction.mockImplementation(async (arg: any) =>
     typeof arg === 'function' ? arg(p) : Promise.all(arg),
@@ -452,90 +432,33 @@ describe('dispatchEmail — TRANSACTIONAL suppression gate', () => {
   });
 });
 
-describe('Resend webhook — domain.* events (email slice 10)', () => {
-  it('domain.updated (still pending) updates the OrganizationDomain row, no email, no verified_at', async () => {
-    const res = await post(DOMAIN_UPDATED_STILL_PENDING);
+describe('Resend webhook — domain.* events', () => {
+  // Per-org sending domains were removed: every org sends from the one shared
+  // platform domain. Resend still emits domain.* for the platform's OWN
+  // domains, so the handler must keep accepting them - it just has nothing to
+  // correlate them to. Recorded in the ledger, acknowledged, no side effect.
+  it.each([
+    ['domain.created', DOMAIN_CREATED_EVENT],
+    ['domain.updated', DOMAIN_UPDATED_VERIFIED],
+    ['domain.deleted', DOMAIN_DELETED_EVENT],
+  ])('%s is recorded and acknowledged with no side effect', async (_type, event) => {
+    const res = await post(event);
 
     expect(res.status).toBe(200);
-    expect(p.organizationDomain.findUnique).toHaveBeenCalledWith({ where: { resend_domain_id: 'dom_1' } });
-    expect(p.organizationDomain.update).toHaveBeenCalledTimes(1);
-    const call = p.organizationDomain.update.mock.calls[0][0];
-    expect(call.where).toEqual({ id: 'orgdomain-1' });
-    expect(call.data.status).toBe('pending');
-    expect(call.data.verified_at).toBeUndefined();
-    expect(sendDomainVerifiedEmail).not.toHaveBeenCalled();
-  });
-
-  it('domain.updated transitioning INTO verified for the first time sets verified_at and sends the success email to every org admin', async () => {
-    const res = await post(DOMAIN_UPDATED_VERIFIED);
-
-    expect(res.status).toBe(200);
-    const call = p.organizationDomain.update.mock.calls[0][0];
-    expect(call.data.status).toBe('verified');
-    expect(call.data.verified_at).toBeInstanceOf(Date);
-    expect(p.user.findMany).toHaveBeenCalledWith({
-      where: { organization_id: 'org-1', role: 'ADMIN', is_active: true },
-      select: { email: true },
-    });
-    expect(sendDomainVerifiedEmail).toHaveBeenCalledTimes(1);
-    expect(sendDomainVerifiedEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: 'org-1', to: 'admin@acmeplumbing.com', domainName: 'acmeplumbing.com' }),
-    );
-  });
-
-  it('does NOT re-send the success email on a subsequent domain.updated for an already-verified domain', async () => {
-    // Row is ALREADY verified (verified_at set) — a later domain.updated
-    // confirming the same status must not re-fire the one-time email.
-    p.organizationDomain.findUnique.mockResolvedValue({ ...DOMAIN_ROW, status: 'verified', verified_at: new Date('2026-08-01T00:00:00Z') });
-
-    const res = await post(DOMAIN_UPDATED_VERIFIED);
-
-    expect(res.status).toBe(200);
-    expect(p.organizationDomain.update).toHaveBeenCalledTimes(1);
-    const call = p.organizationDomain.update.mock.calls[0][0];
-    expect(call.data.verified_at).toBeUndefined();
-    expect(sendDomainVerifiedEmail).not.toHaveBeenCalled();
-  });
-
-  it('domain.created for an unknown resend_domain_id -> recorded, 200, no update, no email', async () => {
-    p.organizationDomain.findUnique.mockResolvedValue(null);
-
-    const res = await post(DOMAIN_CREATED_EVENT);
-
-    expect(res.status).toBe(200);
+    // Recorded in the idempotency ledger like every other event type...
     expect(p.resendEvent.create).toHaveBeenCalledTimes(1);
-    expect(p.organizationDomain.update).not.toHaveBeenCalled();
-    expect(sendDomainVerifiedEmail).not.toHaveBeenCalled();
+    // ...but touches no Email row: these carry no email_id to correlate on.
+    expect(p.email.update).not.toHaveBeenCalled();
   });
 
-  it('domain.deleted removes the local OrganizationDomain row', async () => {
-    const res = await post(DOMAIN_DELETED_EVENT);
-
-    expect(res.status).toBe(200);
-    expect(p.organizationDomain.delete).toHaveBeenCalledWith({ where: { id: 'orgdomain-1' } });
-    expect(p.organizationDomain.update).not.toHaveBeenCalled();
-  });
-
-  it('domain.deleted for an unknown resend_domain_id -> recorded, 200, no delete', async () => {
-    p.organizationDomain.findUnique.mockResolvedValue(null);
-
-    const res = await post(DOMAIN_DELETED_EVENT);
-
-    expect(res.status).toBe(200);
-    expect(p.organizationDomain.delete).not.toHaveBeenCalled();
-  });
-
-  it('a duplicate domain.updated delivery (idempotency) never double-processes', async () => {
+  it('a duplicate domain.updated delivery is still deduplicated', async () => {
     p.resendEvent.findUnique.mockResolvedValueOnce(null);
     const first = await post(DOMAIN_UPDATED_VERIFIED);
     expect(first.status).toBe(200);
-    expect(sendDomainVerifiedEmail).toHaveBeenCalledTimes(1);
 
     p.resendEvent.findUnique.mockResolvedValueOnce({ id: 'evt-row-1' });
     const second = await post(DOMAIN_UPDATED_VERIFIED);
     expect(second.status).toBe(200);
     expect(second.body.duplicate).toBe(true);
-
-    expect(sendDomainVerifiedEmail).toHaveBeenCalledTimes(1);
   });
 });

@@ -128,7 +128,7 @@ describe('POST /api/inventory/purchase-orders/from-job (D16 entry 2)', () => {
     mockPrisma.job.findFirst.mockResolvedValue(null);
 
     const res = await request(app).post('/api/inventory/purchase-orders/from-job').set(authHeader('admin'))
-      .send({ jobId: '99555555-0224-9999-9999-995555550224', lines: [{ jobLineItemId: JOB_LINE_ID, qty: 1 }] });
+      .send({ jobId: '99999999-9999-9999-9999-999999999999', lines: [{ jobLineItemId: JOB_LINE_ID, qty: 1 }] });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/job/i);

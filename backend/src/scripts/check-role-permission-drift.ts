@@ -32,7 +32,7 @@
  * shows up as "extra" in a report, it was written by hand and should be removed, not kept.
  */
 import { prisma } from '../lib/prisma';
-import { DEFAULT_GRANTS } from '../lib/permissions/defaultGrants';
+import { DEFAULT_GRANTS, PRESERVED_ON_RESET } from '../lib/permissions/defaultGrants';
 
 type GrantRow = { role: string; action: string; subject: string; conditions?: unknown };
 
@@ -42,7 +42,15 @@ export function diffGrants(defaults: GrantRow[], existing: GrantRow[]) {
   const existingByKey = new Map(existing.map((g) => [grantKey(g), g]));
   const defaultKeys = new Set(defaults.map(grantKey));
   const missing = defaults.filter((g) => !existingByKey.has(grantKey(g)));
-  const extra = existing.filter((g) => !defaultKeys.has(grantKey(g)));
+  // D15a: a grant the platform deliberately stopped seeding is NOT drift on an org that still
+  // holds it - reporting it as "extra" invites an operator to remove exactly the row D15 promised
+  // those orgs they would keep. shouldFail() is `strict && changedCount > 0` and treats extras as
+  // informational, so this is cosmetic for CI but not for the human reading the output.
+  const extra = existing.filter(
+    (g) =>
+      !defaultKeys.has(grantKey(g)) &&
+      !PRESERVED_ON_RESET.some((p) => p.action === g.action && p.subject === g.subject),
+  );
   // Same role/action/subject exists on both sides, but the condition JSON differs — the additive
   // sync won't touch these (never updates existing rows), so they need a human decision.
   const changed = defaults

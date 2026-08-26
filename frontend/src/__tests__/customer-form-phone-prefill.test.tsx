@@ -23,11 +23,11 @@ beforeEach(() => {
 describe('CustomerFormPage — ?phone= create-prefill (dialer slice 2.2)', () => {
   it('seeds the phone field from /customers/new?phone=<e164>', async () => {
     renderWithProviders(<CustomerFormPage />, {
-      initialEntries: ['/customers/new?phone=%2B15555550212'],
+      initialEntries: ['/customers/new?phone=%2B15555550199'],
     });
 
     await waitFor(() =>
-      expect(screen.getByDisplayValue('(555) 555-0212')).toBeInTheDocument(),
+      expect(screen.getByDisplayValue('(609) 874-5252')).toBeInTheDocument(),
     );
   });
 

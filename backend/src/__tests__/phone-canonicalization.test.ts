@@ -160,7 +160,7 @@ describe('POST /api/leads — new_customer phone canonicalization', () => {
         // create() seeds a default REQUESTED Walkthrough row per new lead in the same
         // transaction (PR-B2) - unrelated to this test's phone-canonicalization concern, but
         // the tx mock must cover every call the handler makes or it 500s.
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'new-walkthrough-id' }) },
+        visit: { create: vi.fn().mockResolvedValue({ id: 'new-walkthrough-id' }) },
       });
     });
 
@@ -188,7 +188,7 @@ describe('POST /api/leads — new_customer phone canonicalization', () => {
       return fn({
         customer: { create: customerCreate },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue(LEAD_FIXTURE) },
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'new-walkthrough-id' }) },
+        visit: { create: vi.fn().mockResolvedValue({ id: 'new-walkthrough-id' }) },
       });
     });
 

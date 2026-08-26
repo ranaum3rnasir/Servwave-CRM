@@ -9,7 +9,7 @@ const FIXTURE_ORG = {
   city: 'Hoboken',
   state: 'NJ',
   postal_code: '07030',
-  email: 'info@example.com',
+  email: 'info@alphasecurityus.com',
   phone: null,
   website: 'https://alphadoorsnewjersey.com/',
   logo_url: null,

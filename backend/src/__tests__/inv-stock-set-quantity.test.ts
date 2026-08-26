@@ -89,7 +89,7 @@ describe('POST /api/inventory/stock/set-quantity (P1 §3.3)', () => {
     mockPrisma.priceBookItem.findFirst.mockResolvedValue(null);
 
     const res = await request(app).post('/api/inventory/stock/set-quantity').set(authHeader('admin'))
-      .send({ item_id: '99555555-0224-9999-9999-995555550224', location_id: LOCATION_ID, counted_qty: 3 });
+      .send({ item_id: '99999999-9999-9999-9999-999999999999', location_id: LOCATION_ID, counted_qty: 3 });
 
     expect(res.status).toBe(404);
     expect(mockPrisma.stockMovement.create).not.toHaveBeenCalled();
@@ -99,7 +99,7 @@ describe('POST /api/inventory/stock/set-quantity (P1 §3.3)', () => {
     mockPrisma.inventoryLocation.findFirst.mockResolvedValue(null);
 
     const res = await request(app).post('/api/inventory/stock/set-quantity').set(authHeader('admin'))
-      .send({ item_id: ITEM_ID, location_id: '99555555-0224-9999-9999-995555550224', counted_qty: 3 });
+      .send({ item_id: ITEM_ID, location_id: '99999999-9999-9999-9999-999999999999', counted_qty: 3 });
 
     expect(res.status).toBe(404);
     expect(mockPrisma.stockMovement.create).not.toHaveBeenCalled();

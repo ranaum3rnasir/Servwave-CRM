@@ -19,8 +19,10 @@ import { createCtmSoftphone } from '@/lib/communication/ctmSoftphone';
 import {
   ensureOfficeSoftphone,
   getOfficeSoftphone,
+  getOfficeSoftphoneFault,
   isOfficeSoftphoneReady,
   subscribeOfficeSoftphoneReady,
+  subscribeOfficeSoftphoneFault,
   teardownOfficeSoftphone,
 } from '@/lib/communication/officeSoftphone';
 
@@ -151,6 +153,145 @@ describe('officeSoftphone (warm singleton)', () => {
   it('is a safe no-op when no instance exists', () => {
     expect(() => teardownOfficeSoftphone()).not.toThrow();
     expect(getOfficeSoftphone()).toBeNull();
+    expect(isOfficeSoftphoneReady()).toBe(false);
+  });
+});
+
+// Slice 3 — the fault channel. Deliberately the same shape as the ready channel
+// above (getter + subscribe-for-future-transitions + cleared by teardown), and
+// tested case-for-case against it, because "not ready" is not a diagnosis: every
+// distinguishable boot failure used to render as the same eternal "Connecting…".
+describe('officeSoftphone — fault channel', () => {
+  it('getOfficeSoftphoneFault() is null before the instance emits a fault, and the value after', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+
+    ensureOfficeSoftphone({ getToken });
+    expect(getOfficeSoftphoneFault()).toBeNull();
+
+    sp.__emit('fault', 'locked-out');
+    expect(getOfficeSoftphoneFault()).toBe('locked-out');
+  });
+
+  it("subscribeOfficeSoftphoneFault's callback fires when a fault emits, not merely from registering", () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+
+    const cb = vi.fn();
+    subscribeOfficeSoftphoneFault(cb);
+    expect(cb).not.toHaveBeenCalled(); // registering alone must not invoke it
+
+    sp.__emit('fault', 'station-check');
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('the returned unsubscribe function stops further delivery', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+
+    const cb = vi.fn();
+    const unsubscribe = subscribeOfficeSoftphoneFault(cb);
+    unsubscribe();
+
+    sp.__emit('fault', 'unknown');
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('does not re-notify for a repeat of the fault it already holds', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+
+    const cb = vi.fn();
+    subscribeOfficeSoftphoneFault(cb);
+    sp.__emit('fault', 'unknown');
+    sp.__emit('fault', 'unknown');
+
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  // The invariant the UI leans on: a pill can read "Ready" or it can read why
+  // the phone is unavailable, never both at once.
+  it('a device that becomes ready RETRACTS its fault, and tells fault-subscribers so', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+    const cb = vi.fn();
+    subscribeOfficeSoftphoneFault(cb);
+
+    sp.__emit('fault', 'station-check');
+    expect(getOfficeSoftphoneFault()).toBe('station-check');
+
+    sp.__emit('ready');
+
+    expect(isOfficeSoftphoneReady()).toBe(true);
+    expect(getOfficeSoftphoneFault()).toBeNull();
+    expect(cb).toHaveBeenCalledTimes(2); // raised, then retracted
+  });
+
+  it('never faults a device that is already ready', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+    const cb = vi.fn();
+    subscribeOfficeSoftphoneFault(cb);
+
+    sp.__emit('ready');
+    sp.__emit('fault', 'unknown');
+
+    expect(getOfficeSoftphoneFault()).toBeNull();
+    expect(isOfficeSoftphoneReady()).toBe(true);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('teardownOfficeSoftphone() clears the fault, exactly as it clears the ready latch', () => {
+    const sp1 = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp1 as any);
+    ensureOfficeSoftphone({ getToken });
+    sp1.__emit('fault', 'locked-out');
+    expect(getOfficeSoftphoneFault()).toBe('locked-out');
+
+    teardownOfficeSoftphone();
+
+    expect(getOfficeSoftphoneFault()).toBeNull();
+  });
+
+  it('teardownOfficeSoftphone() clears fault-subscribers so a stale callback never fires again', () => {
+    const sp1 = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp1 as any);
+    ensureOfficeSoftphone({ getToken });
+    const cb = vi.fn();
+    subscribeOfficeSoftphoneFault(cb);
+
+    teardownOfficeSoftphone();
+
+    const sp2 = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp2 as any);
+    ensureOfficeSoftphone({ getToken });
+    sp2.__emit('fault', 'unknown');
+
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('reading the fault is a safe no-op when no instance exists', () => {
+    expect(getOfficeSoftphoneFault()).toBeNull();
+    expect(() => subscribeOfficeSoftphoneFault(vi.fn())()).not.toThrow();
+  });
+
+  // Belt-and-braces on the ready channel: adding a second Set must not have made
+  // the two channels notify each other.
+  it('a fault does not notify ready-subscribers', () => {
+    const sp = fakeSp();
+    vi.mocked(createCtmSoftphone).mockReturnValue(sp as any);
+    ensureOfficeSoftphone({ getToken });
+    const readyCb = vi.fn();
+    subscribeOfficeSoftphoneReady(readyCb);
+
+    sp.__emit('fault', 'locked-out');
+
+    expect(readyCb).not.toHaveBeenCalled();
     expect(isOfficeSoftphoneReady()).toBe(false);
   });
 });

@@ -3,7 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { buildAbility } from '@/lib/ability';
 
 // floating-ui (under Radix dropdown) does `new ResizeObserver(...)`
@@ -88,8 +88,8 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('JobDetailPage — 9-tab scaffold', () => {
-  it('renders the 9 command-center tabs in order', async () => {
+describe('JobDetailPage - command-center tab scaffold', () => {
+  it('renders the command-center tabs in order', async () => {
     // Task 10 (Spec A): Logistics/Estimates/Payments are now ALSO ability-gated (read
     // Inventory/Estimate/Invoice respectively), same as the pre-existing Communication gate.
     const ability = buildAbility([
@@ -108,6 +108,8 @@ describe('JobDetailPage — 9-tab scaffold', () => {
     const tabs = (await screen.findAllByRole('tab')).map((t) => t.textContent?.trim());
     expect(tabs).toEqual([
       'Overview',
+      // Multi-visit S2: a job holds its own visits now.
+      'Visits',
       'Items',
       'Logistics',
       'Estimates',
@@ -135,9 +137,11 @@ describe('JobDetailPage — 9-tab scaffold', () => {
 
     const tabs = (await screen.findAllByRole('tab')).map((t) => t.textContent?.trim());
     expect(tabs).not.toContain('Communication');
-    // The other 8 tabs are present
+    // The other tabs are present
     expect(tabs).toEqual([
       'Overview',
+      // Multi-visit S2: a job holds its own visits now.
+      'Visits',
       'Items',
       'Logistics',
       'Estimates',
@@ -180,14 +184,18 @@ describe('JobDetailPage — Command Center header', () => {
     expect(screen.getByText('HVAC Installation')).toBeInTheDocument();
   });
 
-  it('renders the info-band labels: Schedule, Service, and the money block (Technician + Status cards removed)', async () => {
+  // "Schedule" is now "Next Visit" (D14a): the tile describes the next upcoming
+  // visit rather than a single schedule field, and job.scheduled_start IS that
+  // visit by D14's write-through mirror. A rename with a meaning behind it, not
+  // a restyle - pages/v2/jobs/__tests__/jobVisits.test.tsx pins the same label.
+  it('renders the info-band labels: Next Visit, Service, and the money block (Technician + Status cards removed)', async () => {
     mockJobAndFinancials();
 
     renderWithProviders(<JobDetailPage />);
 
     await screen.findByRole('heading', { name: /J00001/ });
 
-    expect(screen.getByText('Schedule')).toBeInTheDocument();
+    expect(screen.getByText('Next Visit')).toBeInTheDocument();
     expect(screen.getByText('Service')).toBeInTheDocument();
     // Money block: this mock has no estimate/invoice → "Balance / No contract yet".
     expect(screen.getByText('Balance')).toBeInTheDocument();
@@ -205,7 +213,15 @@ describe('JobDetailPage — Command Center header', () => {
 });
 
 describe('JobDetailPage — R2 header action-cluster changes', () => {
-  it('omits Status card, View Statement, and Start Job; Actions menu holds Mark Complete + Duplicate', async () => {
+  // R2 consolidated every action into the Actions menu. Mark Complete came back OUT of it:
+  // a technician in the field could not find the one control the whole visit ends with, and
+  // reported the job as impossible to close. Duplicate and the rest stay in the menu.
+  //
+  // The routed page had buried it back inside the menu - the fix above was made on
+  // `pages/JobDetailPage.tsx`, which App.tsx does not route, so it never reached a
+  // user. Repointing this file at the routed page is what surfaced that, and the
+  // header button has been restored there. This assertion is what holds it.
+  it('omits Status card, View Statement, and Start Job; surfaces Mark Complete, Actions menu holds Duplicate', async () => {
     // Admin role so canManage = true → canDuplicate, canComplete (active status), canCreate Invoice, etc.
     const ability = buildAbility([
       { action: 'manage', subject: 'Job' },
@@ -221,8 +237,8 @@ describe('JobDetailPage — R2 header action-cluster changes', () => {
     expect(screen.queryByText('View Statement')).toBeNull();
     // Start Job must be gone
     expect(screen.queryByRole('button', { name: /start job/i })).toBeNull();
-    // Mark Complete is no longer a top-level button — it lives inside the Actions menu now.
-    expect(screen.queryByRole('button', { name: /mark complete/i })).toBeNull();
+    // Mark Complete is a first-class header button, not a menu item.
+    expect(screen.getByRole('button', { name: /mark complete/i })).toBeInTheDocument();
     // Status summary card label must be gone (the card is removed; StatusBadge text stays but the "Status" uppercase label card is gone)
     // There should be NO element with exactly "Status" text used as a summary-card label
     const summaryStatusLabels = screen
@@ -233,11 +249,49 @@ describe('JobDetailPage — R2 header action-cluster changes', () => {
     // Open the consolidated Actions menu
     await userEvent.click(screen.getByRole('button', { name: /actions/i }));
 
-    // Both Mark Complete and Duplicate Job are menu items
-    expect(await screen.findByRole('menuitem', { name: /mark complete/i })).toBeInTheDocument();
+    // Duplicate Job stays a menu item; Mark Complete is not duplicated into the menu.
     expect(await screen.findByText(/duplicate job/i)).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /mark complete/i })).toBeNull();
     // Unschedule must NOT be in the menu
     expect(screen.queryByText(/unschedule/i)).toBeNull();
+  });
+});
+
+describe('JobDetailPage — note composer follows the API permission', () => {
+  // The composer used to render for anyone who could OPEN the job, while POST /notes is
+  // gated on `update Job`. A read-only viewer typed a note, got a 12px "Failed to add note",
+  // and reported that notes do not save. Offer the composer only when the write will land.
+  //
+  // The GATE holds on the live page and is asserted below. The EXPLANATION does
+  // not: `pages/JobDetailPage.tsx` rendered an "Add note" card reading "You do
+  // not have permission to add notes to this job. Ask an admin to assign the job
+  // to you, or to grant your role permission to edit jobs.", and the live page
+  // renders nothing at all - JobNotesPreview simply omits the affordance when
+  // `canAddNotes` is false. So a viewer who cannot add notes is no longer told
+  // that, or told what to ask for. Whether to bring the sentence back is a
+  // separate call; the assertion is dropped rather than softened so it is not
+  // mistaken for coverage that still exists.
+  it('hides the composer when the user cannot update the job', async () => {
+    const ability = buildAbility([{ action: 'read', subject: 'Job' }]);
+    mockJobAndFinancials();
+
+    renderWithProviders(<JobDetailPage />, { ability });
+    await screen.findByRole('heading', { name: /J00001/ });
+    await userEvent.click(await screen.findByRole('tab', { name: 'Notes' }));
+
+    expect(screen.queryByPlaceholderText(/write a note/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /add note/i })).toBeNull();
+  });
+
+  it('renders the composer when the user can update the job', async () => {
+    const ability = buildAbility([{ action: 'manage', subject: 'Job' }]);
+    mockJobAndFinancials();
+
+    renderWithProviders(<JobDetailPage />, { ability });
+    await screen.findByRole('heading', { name: /J00001/ });
+    await userEvent.click(await screen.findByRole('tab', { name: 'Notes' }));
+
+    expect(await screen.findByPlaceholderText(/write a note/i)).toBeInTheDocument();
   });
 });
 
@@ -360,9 +414,12 @@ describe('JobDetailPage — R3 "View All" Communication link', () => {
     // Click "View All" — must switch to the Communication tab
     await userEvent.click(viewAllBtn);
 
-    // The Communication tab trigger must now be active (aria-selected="true")
+    // The Communication tab trigger must now be active. The live tab strip is
+    // `pages/v2/_shared/tabs.tsx`, which exposes the real ARIA contract -
+    // role="tab" plus aria-selected - rather than Radix's `data-state`, so the
+    // attribute read here changed while the behaviour did not.
     const commTab = screen.getByRole('tab', { name: 'Communication' });
-    expect(commTab).toHaveAttribute('data-state', 'active');
+    expect(commTab).toHaveAttribute('aria-selected', 'true');
   });
 });
 

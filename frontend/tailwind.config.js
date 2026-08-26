@@ -1,3 +1,5 @@
+import tailwindcssAnimate from 'tailwindcss-animate';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   // Phase 7c (2026-07-28): `darkMode: ['class']` removed. Nothing in the app
@@ -37,12 +39,21 @@ export default {
         //     specifically to render genuine unthemed white/black for
         //     side-by-side comparison against the token surface - both need
         //     the LITERAL colour, not a token that could be retuned later
-        //     out from under them. `inherit` was never a real Tailwind
-        //     default key (not in tailwindcss/lib/public/colors.js) and has
-        //     zero call sites - not registered, would be inventing a key
-        //     that was never at risk of dropping.
+        //     out from under them.
+        //
+        // `inherit` was in this list as "never a real Tailwind default key
+        // (not in tailwindcss/lib/public/colors.js), zero call sites, not
+        // registered". It has one now, and it is a structural one rather than
+        // a colour choice: a sticky table cell has to be opaque to occlude the
+        // content scrolling under it, but must not name a colour of its own or
+        // it stops following the row through hover and selection. `bg-inherit`
+        // is the only class that expresses "whatever my row is painting" -
+        // see ui-kit/components/ui/table.tsx. Like `transparent` and
+        // `current`, it is a CSS keyword, not a palette entry, so it carries
+        // none of the drift the token rule exists to prevent.
         transparent: 'transparent',
         current: 'currentColor',
+        inherit: 'inherit',
         white: '#ffffff',
         black: '#000000',
         // Calm Intelligence 2.0 — interactive anchor is Deep Ocean (hybrid model)
@@ -119,6 +130,10 @@ export default {
         // so a re-pointed fill token actually repaints its label.
         'on-fill': 'rgb(var(--text-on-fill) / <alpha-value>)',
         notify: 'rgb(var(--notify) / <alpha-value>)', // notification-count badges ONLY — never a general red
+        // Calendar Entry board accent (slice 03, calendar-entries spec §3) — the muted "Event"
+        // type accent in scheduleModel.ts's EVENT_TYPE_META, same DEFAULT-only shape as
+        // info/warning/ai above (not the badge quartet). border-l-event / bg-event/5 / text-event.
+        event: 'rgb(var(--event) / <alpha-value>)',
         // Modal backdrop. Use `bg-scrim/80` instead of `bg-black/80` so how much
         // the app dims behind an overlay is one decision, not a per-overlay guess.
         scrim: 'rgb(var(--scrim) / <alpha-value>)',
@@ -172,6 +187,12 @@ export default {
           foreground: 'rgb(var(--muted-foreground) / <alpha-value>)',
         },
         'subtle-foreground': 'rgb(var(--subtle-foreground) / <alpha-value>)',
+        // The disabled palette. Flat rather than nested under `disabled.*`
+        // because `disabled:` is also a Tailwind VARIANT prefix, and
+        // `disabled:bg-disabled-border` has to stay unambiguous.
+        disabled: 'rgb(var(--disabled) / <alpha-value>)',
+        'disabled-foreground': 'rgb(var(--disabled-foreground) / <alpha-value>)',
+        'disabled-border': 'rgb(var(--disabled-border) / <alpha-value>)',
         accent: {
           DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
           foreground: 'rgb(var(--accent-foreground) / <alpha-value>)',
@@ -322,6 +343,32 @@ export default {
       fontFamily: {
         sans: ['Manrope', 'system-ui', 'sans-serif'],
       },
+      /**
+       * The stacking order for things that float, named once.
+       *
+       * Every layer used to be a bare number chosen at the call site, and the
+       * numbers stopped agreeing: the kit's Select, DropdownMenu and Popover
+       * all sat at z-50, while the Schedule module had grown its own scale on
+       * top of them - menus at 50, the quick-schedule card at 60, its confirm
+       * modals at 70. A time picker opened from that card therefore rendered
+       * BEHIND the card that opened it, which is the reported "the times
+       * dropdown goes behind the new-event window".
+       *
+       * `floating` is the top of the stack and belongs to menus, selects,
+       * popovers and tooltips - the transient things a user opens FROM
+       * something else. They must outrank every surface, including whichever
+       * one spawned them, because there is no case where the answer to "which
+       * should be on top, the menu or the panel it belongs to" is the panel.
+       */
+      zIndex: {
+        // Page-level panels and scrims: dialogs, drawers, the schedule's own
+        // popup surfaces.
+        surface: '50',
+        // A surface raised over another surface - a confirm over a dialog.
+        'surface-raised': '70',
+        // Menus, selects, popovers, tooltips.
+        floating: '100',
+      },
       // Phase 7 (2026-07-28): the 10px rung gets a NAME so components can stop
       // writing it as an arbitrary bracket value. Measured 2026-07-27: 484
       // occurrences across 120 files, the largest single bracket font size in
@@ -386,11 +433,50 @@ export default {
         95: '23.75rem',
       },
       // v2: sidebar.tsx uses duration-250, absent from v3's fixed scale.
+      //
+      // The named `fast`/`panel` keys are the v2 motion scale (tokens-v2.css),
+      // and a NAMED key is the only spelling that works here. An arbitrary one
+      // (a bracketed value on `duration`) matches both Tailwind's own
+      // transition-duration plugin and tailwindcss-animate's animation-duration
+      // one, so Tailwind calls it ambiguous and emits NOTHING for it - a silent
+      // dead class - which is what the two bracketed durations in
+      // components/ui/switch.tsx are today. Check the compiled sheet, not the
+      // warning: the build still exits 0.
+      //
+      // The trade-off is that tailwind-merge validates its duration group on a
+      // number or an arbitrary value, so it does not recognise a named key and
+      // cannot drop a competing `duration-150` from a kit component - both land
+      // in the DOM and the later RULE wins. `extend` keys are emitted after the
+      // default scale, so the named key is the later rule (verified in the
+      // compiled CSS: .duration-150 then .duration-fast).
       transitionDuration: {
         250: '250ms',
+        fast: 'var(--motion-duration-fast)',
+        panel: 'var(--motion-duration-panel)',
+      },
+      transitionTimingFunction: {
+        'out-soft': 'var(--motion-ease-out)',
       },
       // Servy copilot "alive" animations (AI lavender moments only)
       keyframes: {
+        // v2 tab panel enter. TabPanel unmounts the outgoing panel outright,
+        // so the incoming one always mounts fresh and an enter-only keyframe is
+        // the whole animation - there is nothing left on screen to exit.
+        //
+        // TWO keyframes, not one, because the travel and the fade run for
+        // different lengths of time - see the `tab-panel-in` animation below.
+        // The alternative (one keyframe with an intermediate `60%` stop that
+        // lands opacity early) puts a keyframe boundary in the middle of the
+        // transform's interval, and the timing function is re-applied per
+        // interval: the glide would ease twice and stutter at the seam.
+        'tab-panel-glide': {
+          from: { transform: 'translateY(var(--motion-travel-panel))' },
+          to: { transform: 'translateY(0)' },
+        },
+        'tab-panel-fade': {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
         // General-purpose loading indicator (ocean/neutral) — distinct from
         // the servy-dot family below, which is reserved for AI-only moments.
         'loader-jump': {
@@ -419,6 +505,34 @@ export default {
         },
       },
       animation: {
+        // Two animations under one class, the way the shell splits a move: the
+        // sidebar travels for 0.46s while its labels fade for 0.3s, so the
+        // content is fully opaque with a third of the travel still to run and
+        // what you watch is the glide, not a wash. Run at one length instead
+        // and 460ms of fade is just slow. Both properties are compositor-only
+        // (transform, opacity), same reason .nav-rail moves on transform
+        // rather than `top`.
+        //
+        // No fill-mode, unlike servy-in's `both`. `both` would hold the `to`
+        // frame forever, and a settled `transform: translateY(0)` is still a
+        // transform: it makes the panel a containing block for every
+        // position:fixed descendant, which is how the popovers and dropdown
+        // menus inside a tab panel are positioned. Without a fill-mode the
+        // transform is gone the moment the animation ends, and with no delay
+        // there is nothing to fill in at the start either. `will-change:
+        // transform` is out for the same reason - it creates that containing
+        // block too, and permanently.
+        //
+        // The durations are var()s inside the animation SHORTHAND, which is
+        // only safe because these tokens are defined at `:root` in
+        // tokens-v2.css and that file is imported globally from index.css. A
+        // var() that fails to resolve makes the whole shorthand invalid at
+        // computed-value time, and the symptom is a silent
+        // `animation-duration: 0s`, not a build error. Verified in the browser:
+        // 460ms / 300ms, not 0s.
+        'tab-panel-in':
+          'tab-panel-glide var(--motion-duration-panel) var(--motion-ease-out), ' +
+          'tab-panel-fade var(--motion-duration-panel-fade) var(--motion-ease-out)',
         'loader-jump': 'loader-jump 1s ease-in-out infinite',
         'servy-in': 'servy-in 0.25s ease-out both',
         'servy-rotate': 'servy-rotate 6s linear infinite',
@@ -429,5 +543,9 @@ export default {
       },
     },
   },
-  plugins: [require('tailwindcss-animate')],
+  // Imported at the top rather than require()'d here: this file is ESM
+  // (`export default`, and the package is "type": "module"), and Node has no
+  // `require` in an ES module - it threw
+  // `ReferenceError: require is not defined` and took `vite build` with it.
+  plugins: [tailwindcssAnimate],
 };

@@ -19,6 +19,7 @@ import { instantiatePlanMaterials } from '../lib/logisticOrders';
 // Creator tracking (audit only) - never read for authorization here.
 import { CREATED_BY_SYSTEM } from '../lib/created-by';
 import { resolveTaxRateForState } from '../lib/tax/resolveTaxRate';
+import { createJobVisit, nextVisitSeqForJob, replaceWalkthroughPerformers } from '../services/walkthrough.service';
 
 const param = (req: Request, name: string): string => req.params[name] as string;
 
@@ -284,7 +285,7 @@ export const getPlan = async (req: Request, res: Response) => {
       include: {
         line_items: { orderBy: { position: 'asc' } },
         material_lines: { orderBy: { position: 'asc' } },
-        visits: { orderBy: { visit_number: 'asc' }, include: { job: { select: { id: true, job_number: true, status: true, assignees: { select: { user_id: true } } } } } },
+        visits: { orderBy: { visit_number: 'asc' }, include: { job: { select: { id: true, job_number: true, status: true, visits: { select: { assignees: { select: { user_id: true } } } } } } } },
         invoices: { select: { id: true, invoice_number: true, kind: true, status: true, total_amount: true, public_token: true } },
         customer: { select: { id: true, company_name: true, first_name: true, last_name: true } },
         service_location: { select: { id: true, address_line1: true, city: true, state: true } },
@@ -682,21 +683,40 @@ export const scheduleVisit = async (req: Request, res: Response) => {
           service_location_id: plan.service_location_id,
           source_plan_id: plan.id,
           scope_notes: plan.name,
-          scheduled_start: body.scheduled_start,
-          scheduled_end: body.scheduled_end ?? null,
+          // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the real
+          // visit is booked just below (createJobVisit), in the same transaction, and carries the
+          // matching window; the wire keys are a computed projection off it.
           // Scheduler-redesign: status is the scheduling axis (SCHEDULED iff it has a
-          // time); a plan visit always carries scheduled_start. Crew is the independent
-          // M2M — an optional single assignee maps to one job_assignees row.
+          // time); a plan visit always carries scheduled_start. Crew is NOT set here any more -
+          // multi-visit S8 (D6) moved it onto a real job VISIT, booked just below.
           status: 'SCHEDULED',
-          ...(body.assigned_to
-            ? { assignees: { create: { user_id: body.assigned_to, organization_id: orgId } } }
-            : {}),
           // Audit: a plan visit job is materialised from the plan's schedule, not authored by the
           // person who happened to press Schedule, so it is SYSTEM with no creator. The same
           // function is what the future auto-generation cron will call, where there is no user at all.
           ...CREATED_BY_SYSTEM,
         },
       });
+      // Multi-visit S8 (D6/D5): the plan's trip is a real Visit, and the plan's technician goes
+      // on IT. This is not tidiness - it is what closes the second orphan class the S8 migration
+      // header names: a plan-assigned technician is neither the job's creator nor on any visit, so
+      // with the crew relation gone and no trip booked, OWN_JOB would silently 403 them on a job
+      // they are genuinely assigned to. createJobVisit is the existing twin, and it leaves
+      // `lead_id` UNSET (never null) for D5's `visits_exactly_one_parent` CHECK.
+      const visitStart = new Date(body.scheduled_start);
+      const jobVisit = await createJobVisit(tx, {
+        jobId: job.id,
+        orgId,
+        visitSeq: await nextVisitSeqForJob(tx, orgId, job.id),
+        scheduledAt: visitStart,
+        // Same 60-minute default /assign applies to an open-ended window, so the two doors onto a
+        // trip cannot disagree about what "no end given" means.
+        scheduledEnd: body.scheduled_end ? new Date(body.scheduled_end) : new Date(visitStart.getTime() + 60 * 60 * 1000),
+        isAllDay: false,
+      });
+      if (body.assigned_to) {
+        await replaceWalkthroughPerformers(tx, jobVisit.id, null, orgId, [body.assigned_to]);
+      }
+
       const occupied = await tx.planVisit.count({
         where: { service_plan_id: plan.id, status: { in: ['SCHEDULED', 'COMPLETED', 'SKIPPED'] } },
       });

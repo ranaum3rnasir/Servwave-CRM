@@ -486,11 +486,8 @@ function EstimateBreakdownTab({
       </div>
 
       <div className="rounded-md border border-border bg-background-light/60 px-3 py-2 text-[11px] text-text-secondary">
-        Per-line extended prices synthesized proportionally from{" "}
-        <code className="rounded bg-surface-light px-1 py-0.5 text-[10px]">
-          reservedTotal
-        </code>{" "}
-        until the estimate model carries explicit unit prices (PRD §7.X.4).
+        Per-line prices are apportioned from the estimate's reserved total, so they are an
+        estimate until the vendor quote sets explicit unit prices.
       </div>
     </div>
   );

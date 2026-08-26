@@ -103,6 +103,7 @@ import { toCSVRows, downloadCSV } from "@/lib/csv";
 import {
   useCallsPipeline,
   agentName,
+  agentMatchesId,
   userLabel,
   NUMERIC_SORT_KEYS,
   EMPTY_FILTERS,
@@ -129,11 +130,13 @@ import {
 } from "@/components/communication/phone/Dialer";
 import { requestCall } from "@/lib/communication/phoneTabHandoff";
 import { useIsDemoOrg } from "@/lib/useIsDemoOrg";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 /* ─────────────────── Calls-local helpers ─────────────────── */
 
 function agentById(agents: PhoneAgent[], id?: string): PhoneAgent | undefined {
-  return id ? agents.find((a) => a.id === id) : undefined;
+  // Matches on the agent row id OR its linked user id - see agentMatchesId.
+  return id ? agents.find((a) => agentMatchesId(a, id)) : undefined;
 }
 
 function answeredByLabel(kind: CallSession["answeredBy"]["kind"]): string {
@@ -465,6 +468,7 @@ export function CallsView({
 }) {
   const { data: customers = [] } = usePhoneCustomers();
   const { data: agents = [] } = usePhoneAgents();
+  const tz = useScheduleTimezone();
 
   const [query, setQuery] = useState("");
   const [pageSize, setPageSize] = useState(10);
@@ -760,8 +764,8 @@ export function CallsView({
             min: 120,
             cell: (c) => (
               <>
-                <p className="font-semibold text-text-primary">{dateNumeric(c.startedAt)}</p>
-                <p className="text-[11px] text-text-secondary">{timeLabel(c.startedAt)}</p>
+                <p className="font-semibold text-text-primary">{dateNumeric(c.startedAt, tz)}</p>
+                <p className="text-[11px] text-text-secondary">{timeLabel(c.startedAt, tz)}</p>
               </>
             ),
           },
@@ -950,6 +954,7 @@ export function CallDetailDrawer({
   const { data: customers = [] } = usePhoneCustomers();
   const { data: agents = [] } = usePhoneAgents();
 
+  const tz = useScheduleTimezone();
   const cust = customerById(customers, call.customerId);
   const agent = agentById(agents, call.answeredBy.id);
   const isDemo = useIsDemoOrg();
@@ -1127,7 +1132,7 @@ export function CallDetailDrawer({
                 {STATUS_LABELS[call.status]}
               </span>
               <span className="text-sm text-text-secondary">
-                {dayLabel(call.startedAt)}, {shortTime(call.startedAt)}
+                {dayLabel(call.startedAt, tz)}, {shortTime(call.startedAt, tz)}
               </span>
             </div>
 

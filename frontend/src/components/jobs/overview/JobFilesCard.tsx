@@ -11,6 +11,7 @@ import { Upload, Image as ImageIcon, FileText, Film, File, Trash2 } from 'lucide
 import { useDeleteJobAttachment, isDeletableFromJob } from '@/hooks/useDeleteJobAttachment';
 import { useConfirm } from '@/hooks/useConfirm';
 import { deleteAttachmentPrompt } from '@/lib/confirmPrompts';
+import { ACCEPTED_UPLOAD_TYPES } from '@/lib/uploadTypes';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -63,24 +64,33 @@ export function JobFilesCard({ jobId, attachments, onViewAll }: JobFilesCardProp
     if (!files || files.length === 0) return;
     setUploading(true);
     try {
+      const failures: { name: string; reason: string }[] = [];
+      // Per file, not all-or-nothing: the loop used to abort on the first rejection, so a single
+      // unsupported file silently swallowed every file queued behind it and never said which one
+      // failed (#1605).
       for (const file of Array.from(files)) {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('display_name', file.name.replace(/\.[^/.]+$/, ''));
         formData.append('description', '');
         formData.append('context', 'JOB_WORK');
-        await api.post(`/api/attachments/job/${jobId}`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
+        try {
+          await api.post(`/api/attachments/job/${jobId}`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+        } catch (err) {
+          failures.push({ name: file.name, reason: extractApiError(err as Error, 'Upload failed.') });
+        }
       }
       queryClient.invalidateQueries({ queryKey: ['job-attachments-wt', jobId] });
       queryClient.invalidateQueries({ queryKey: ['attachments', 'JOB', jobId] });
-    } catch (err) {
-      toast({
-        variant: 'destructive',
-        title: 'Upload failed',
-        description: extractApiError(err as Error, 'Could not upload the file. Please try again.'),
-      });
+      if (failures.length) {
+        toast({
+          variant: 'destructive',
+          title: failures.length === 1 ? 'Upload failed' : `${failures.length} uploads failed`,
+          description: failures.map((f) => `${f.name}: ${f.reason}`).join('\n'),
+        });
+      }
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -108,6 +118,7 @@ export function JobFilesCard({ jobId, attachments, onViewAll }: JobFilesCardProp
         id="overview-files-upload"
         type="file"
         multiple
+        accept={ACCEPTED_UPLOAD_TYPES}
         className="hidden"
         onChange={(e) => handleUpload(e.target.files)}
       />

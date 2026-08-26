@@ -31,6 +31,28 @@ function dispatchedType(type: string) {
   return mockDispatch.mock.calls.filter((c: any[]) => c[0].type === type).map((c: any[]) => c[0]);
 }
 
+// ─── Lead status writes (spec #1751 D6) ───────────────
+//
+// Every door that moves a lead's status now goes through transitionLeadStatus, which writes the
+// status with `updateMany` (its guards live in the WHERE clause) and files a STATUS_CHANGE
+// timeline event carrying `from` and `to`. The two helpers below read those two facts back.
+//
+// `leadStatusWrites` filters on `data.status` deliberately: the same `lead.updateMany` mock also
+// receives the clock stamps (`won_at`, and the first-touch-wins writes), so an unfiltered call
+// count cannot tell "the status moved" from "a timestamp was stamped".
+
+function leadStatusWrites(updateMany: ReturnType<typeof vi.fn> = prisma.lead.updateMany as any) {
+  return updateMany.mock.calls
+    .map((c: any[]) => c[0])
+    .filter((args: any) => args?.data?.status !== undefined);
+}
+
+function statusChangeEvents(create: ReturnType<typeof vi.fn> = prisma.timelineEvent.create as any) {
+  return create.mock.calls
+    .map((c: any[]) => c[0]?.data)
+    .filter((data: any) => data?.event_type === 'STATUS_CHANGE');
+}
+
 // ─── Typed mocks ──────────────────────────────────────
 
 const mockPrisma = prisma as unknown as {
@@ -41,6 +63,9 @@ const mockPrisma = prisma as unknown as {
     findFirst: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    // Spec #1751 D6: the status write itself — transitionLeadStatus puts its guards in the
+    // WHERE clause, so it is an updateMany, and `lead.update` now only re-reads the row.
+    updateMany: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
     count: ReturnType<typeof vi.fn>;
   };
@@ -77,13 +102,15 @@ const mockPrisma = prisma as unknown as {
   };
   user: { findUnique: ReturnType<typeof vi.fn>; findMany: ReturnType<typeof vi.fn> };
   // Walkthrough-as-entity redesign, PR-B2.
-  walkthrough: {
+  visit: {
     findFirst: ReturnType<typeof vi.fn>;
     findMany: ReturnType<typeof vi.fn>;
+    aggregate: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
   };
-  leadWalkthroughPerformer: {
+  visitAssignee: {
     findMany: ReturnType<typeof vi.fn>;
     createMany: ReturnType<typeof vi.fn>;
     deleteMany: ReturnType<typeof vi.fn>;
@@ -117,6 +144,19 @@ beforeEach(() => {
   (prisma.customer.findMany as any).mockResolvedValue([]);
   (prisma.timelineEvent.create as any).mockResolvedValue({});
   (prisma.lead.delete as any).mockResolvedValue({});
+  // Spec #1751 D6: every lead status change now runs through transitionLeadStatus, whose write
+  // is `tx.lead.updateMany` and which reads `count` off the result to decide whether anything
+  // actually moved. `{ count: 1 }` is "the row changed" — the ordinary case for every door here.
+  // Without a resolution the destructure throws and the door 500s; with `{ count: 0 }` the write
+  // would be treated as refused and no STATUS_CHANGE ledger entry would be written.
+  (prisma.lead.updateMany as any).mockResolvedValue({ count: 1 });
+  // Same hazard on the visit side: completeWalkthroughRow's write is CONDITIONAL
+  // (`tx.visit.updateMany` with the live-status set in its WHERE) and the door reads `count` to
+  // learn whether it was the request that landed the transition — a second, concurrent completion
+  // must not overwrite the first. `{ count: 1 }` is "this caller won", the ordinary case here;
+  // `{ count: 0 }` would make every completion answer 400. setup.ts carries the same default, but
+  // resetAllMocks above wipes it.
+  (prisma.visit.updateMany as any).mockResolvedValue({ count: 1 });
   // attachAbility middleware queries rolePermission for non-ADMIN users;
   // return empty grants so non-ADMIN requests without explicit mock get 403.
   (prisma.rolePermission.findMany as any).mockResolvedValue([]);
@@ -125,7 +165,7 @@ beforeEach(() => {
   // lead update + walkthrough update + timeline write in a $transaction. Default the
   // transaction to hand the SAME mocked `prisma` object back as `tx`, so any test that already
   // configures `mockPrisma.lead.update` / `mockPrisma.timelineEvent.create` /
-  // `mockPrisma.walkthrough.*` at the top level keeps working transparently. Tests that need an
+  // `mockPrisma.visit.*` at the top level keeps working transparently. Tests that need an
   // ISOLATED tx object (e.g. create()'s narrower txMock, scheduleWalkthrough's dedicated wiring)
   // override this with their own `mockPrisma.$transaction.mockImplementation(...)` inside the
   // test body.
@@ -225,7 +265,7 @@ describe('GET /api/leads', () => {
 
     const findManyArgs = mockPrisma.lead.findMany.mock.calls[0][0];
     // Scoped to the technician's own walkthroughs — NOT the lead-owner field, and NOT unscoped.
-    expect(findManyArgs.where.walkthroughs).toEqual({ some: { performers: { some: { user_id: TEST_USERS.technician.id } } } });
+    expect(findManyArgs.where.visits).toEqual({ some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } });
     expect(findManyArgs.where.lead_assignees).toBeUndefined();
   });
 
@@ -549,7 +589,7 @@ describe('POST /api/leads', () => {
     mockPrisma.customer.findUnique.mockResolvedValue(CUSTOMER_FIXTURE);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockResolvedValue(LEAD_FIXTURE),
@@ -580,7 +620,7 @@ describe('POST /api/leads', () => {
     let createData: Record<string, unknown> | undefined;
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockImplementation((args: { data: Record<string, unknown> }) => {
@@ -606,7 +646,7 @@ describe('POST /api/leads', () => {
     let createData: Record<string, unknown> | undefined;
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockImplementation((args: { data: Record<string, unknown> }) => {
@@ -659,7 +699,7 @@ describe('POST /api/leads', () => {
     }]);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           update: vi.fn(),
           findUnique: vi.fn().mockResolvedValue({ phone: CUSTOMER_FIXTURE.phone, email: null, phones: [], extra_emails: [] }),
@@ -684,7 +724,7 @@ describe('POST /api/leads', () => {
     mockAuthAs('admin');
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           create: vi.fn().mockResolvedValue({
             id: 'new-cust-id',
@@ -730,7 +770,7 @@ describe('POST /api/leads', () => {
         service_locations: [{ id: 'new-primary-loc-id' }],
       });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { create: customerCreate },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
@@ -772,7 +812,7 @@ describe('POST /api/leads', () => {
         service_locations: [{ id: 'new-primary-loc-id' }],
       });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { create: customerCreate },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
@@ -810,7 +850,7 @@ describe('POST /api/leads', () => {
     mockAuthAs('admin');
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           create: vi.fn().mockResolvedValue({
             id: 'new-cust-id',
@@ -867,7 +907,7 @@ describe('POST /api/leads', () => {
     (allocateNumber as any).mockResolvedValue('L00099');
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { create: vi.fn().mockResolvedValue({ id: 'new-cust-id', service_locations: [] }) },
         lead: { create: vi.fn().mockResolvedValue(LEAD_FIXTURE) },
         timelineEvent: { create: vi.fn() },
@@ -913,7 +953,7 @@ describe('POST /api/leads', () => {
     });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { create: customerCreate },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
@@ -1021,7 +1061,7 @@ describe('POST /api/leads', () => {
     ]);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           create: vi.fn().mockResolvedValue({ id: 'new-cust-id', service_locations: [{ id: 'new-primary-loc-id' }] }),
         },
@@ -1070,7 +1110,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txTimelineCreate = vi.fn().mockResolvedValue({});
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           create: vi.fn().mockResolvedValue({ id: 'new-cust-id', service_locations: [{ id: 'new-primary-loc-id' }] }),
         },
@@ -1119,7 +1159,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txTimelineCreate = vi.fn().mockResolvedValue({});
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: {
           create: vi.fn().mockResolvedValue({ id: 'new-cust-id', service_locations: [{ id: 'new-primary-loc-id' }] }),
         },
@@ -1156,7 +1196,7 @@ describe('POST /api/leads', () => {
       txLeadCreate = vi.fn().mockResolvedValue({ ...LEAD_FIXTURE, job_type: 'HVAC Service' });
       txCustomerUpdate = vi.fn().mockResolvedValue({ ...CUSTOMER_FIXTURE, ad_source: 'Google' });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         customer: { update: txCustomerUpdate },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'loc-from-legacy' }) },
@@ -1193,7 +1233,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: txLeadCreate,
@@ -1222,7 +1262,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: txLeadCreate,
@@ -1253,7 +1293,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: txLeadCreate,
@@ -1282,7 +1322,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: txLeadCreate,
@@ -1324,7 +1364,7 @@ describe('POST /api/leads', () => {
     const res = await request(app)
       .post('/api/leads')
       .set(authHeader('admin'))
-      .send({ customer_id: '00000000-0000-0000-0000-995555550224', service_request: 'Test' });
+      .send({ customer_id: '00000000-0000-0000-0000-999999999999', service_request: 'Test' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Customer not found');
@@ -1385,7 +1425,7 @@ describe('POST /api/leads', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       leadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: leadCreate },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue(null) },
       };
@@ -1407,7 +1447,7 @@ describe('POST /api/leads', () => {
       customerCreate = vi.fn().mockResolvedValue({ id: 'new-cust-id', service_locations: [] });
       leadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { create: customerCreate },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: leadCreate },
       };
@@ -1468,7 +1508,7 @@ describe('GET /api/leads/:id', () => {
           total_amount: 1062.5,
           created_at: new Date('2026-01-20'),
           creator: { id: TEST_USERS.sales.id, first_name: 'Test', last_name: 'Sales' },
-          job: { id: 'a0000000-0000-0000-0000-000000000001', job_number: 'J00001', status: 'UNASSIGNED' },
+          job: { id: 'a0000000-0000-0000-0000-000000000001', job_number: 'J00001', status: 'UNSCHEDULED' },
         },
         {
           id: 'f0000000-0000-0000-0000-000000000002',
@@ -1488,7 +1528,7 @@ describe('GET /api/leads/:id', () => {
       .set(authHeader('admin'));
 
     expect(res.status).toBe(200);
-    expect(res.body.lead.estimates[0].job).toEqual({ id: 'a0000000-0000-0000-0000-000000000001', job_number: 'J00001', status: 'UNASSIGNED' });
+    expect(res.body.lead.estimates[0].job).toEqual({ id: 'a0000000-0000-0000-0000-000000000001', job_number: 'J00001', status: 'UNSCHEDULED' });
     expect(res.body.lead.estimates[1].job).toBeNull();
     // Verify the select shape includes job for each estimate
     expect((prisma.lead.findUnique as any).mock.calls[0][0].select.estimates.select.job)
@@ -1500,7 +1540,7 @@ describe('GET /api/leads/:id', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .get('/api/leads/00000000-0000-0000-0000-995555550224')
+      .get('/api/leads/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -1566,8 +1606,13 @@ describe('PATCH /api/leads/:id', () => {
       .set(authHeader('admin'))
       .send({ status: 'CONTACTED' });
 
-    const updateArgs = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateArgs.data.status).toBe('CONTACTED');
+    // Spec #1751 D6: the status is written by transitionLeadStatus (an updateMany), and the
+    // ledger entry that makes time-in-stage computable is written alongside it.
+    const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('CONTACTED');
+    expect(statusChangeEvents()).toHaveLength(1);
+    expect(statusChangeEvents()[0].metadata).toMatchObject({ from: 'NEW', to: 'CONTACTED' });
   });
 
   it('strips status from SALES update', async () => {
@@ -1584,8 +1629,13 @@ describe('PATCH /api/leads/:id', () => {
       .send({ status: 'CONTACTED', service_request: 'Updated' });
 
     const updateArgs = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateArgs.data.status).toBeUndefined();
     expect(updateArgs.data.service_request).toBe('Updated');
+    // Spec #1751 D6 moved the status out of this statement for EVERY caller, so
+    // `update.data.status === undefined` no longer distinguishes a stripped status from an
+    // allowed one. The refusal is now proved where the status actually gets written: no
+    // guarded write, and no ledger entry claiming the lead moved.
+    expect(leadStatusWrites(mockPrisma.lead.updateMany)).toHaveLength(0);
+    expect(statusChangeEvents()).toHaveLength(0);
   });
 
   // PR-D2: walkthrough_needed is deleted entirely (Ran's call - see the "Decision update" note
@@ -1656,7 +1706,7 @@ describe('PATCH /api/leads/:id', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .patch('/api/leads/00000000-0000-0000-0000-995555550224')
+      .patch('/api/leads/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'))
       .send({ service_request: 'Updated' });
 
@@ -1737,8 +1787,10 @@ describe('PATCH/contact with NESTED Team scope (#106 P1 — must not 500)', () =
     expect(mockPrisma.lead.update).not.toHaveBeenCalled();
   });
 
-  // "lifecycle verb (contact)" cases removed (D6, PR-B2) — contactLead and POST
-  // /api/leads/:id/contact are deleted; contacted_at is inferred from outbound activity.
+  // "lifecycle verb (contact)" cases were removed by D6, PR-B2. Spec #1751 D5 REINSTATED the
+  // door as a hand CORRECTION and gave contacted_at real automatic writers — the "inferred from
+  // outbound activity" claim this comment used to make described an inference nobody ever built.
+  // Coverage for both lives in lead-contact-clock.test.ts.
 
   // getById is the most-hit endpoint and was the reproduced 500: it still ran the throwing
   // req.ability.can('read', subject('Lead', row)) matcher, which blows up on the nested
@@ -1779,8 +1831,8 @@ describe('PATCH/contact with NESTED Team scope (#106 P1 — must not 500)', () =
       completed_at: null, notes: 'Updated via team', cancelled_at: null, cancelled_reason: null,
       cancelled_by: null, customer_email_sent_at: null, created_at: new Date('2026-03-01'),
     };
-    mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, walkthroughs: [currentVisit] });
-    mockPrisma.walkthrough.findMany.mockResolvedValue([currentVisit]);
+    mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, visits: [currentVisit] });
+    mockPrisma.visit.findMany.mockResolvedValue([currentVisit]);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough`)
@@ -2001,7 +2053,7 @@ describe('POST /api/leads/:id/assign', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(LEAD_FIXTURE);
     (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockImplementation(
       (args: { where: { id: string } }) => {
-        if (args.where.id === '00000000-0000-0000-0000-995555550224') {
+        if (args.where.id === '00000000-0000-0000-0000-999999999999') {
           return Promise.resolve(null);
         }
         const match = Object.values(TEST_USERS).find((u) => u.id === args.where.id);
@@ -2012,7 +2064,7 @@ describe('POST /api/leads/:id/assign', () => {
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/assign`)
       .set(authHeader('admin'))
-      .send({ assigned_to: '00000000-0000-0000-0000-995555550224' });
+      .send({ assigned_to: '00000000-0000-0000-0000-999999999999' });
 
     expect(res.status).toBe(400);
   });
@@ -2022,7 +2074,7 @@ describe('POST /api/leads/:id/assign', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/assign')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/assign')
       .set(authHeader('admin'))
       .send({ assigned_to: TEST_USERS.sales.id });
 
@@ -2205,14 +2257,14 @@ describe('POST /api/leads/:id/assign', () => {
 // Walkthrough-as-entity redesign: this handler writes the CURRENT visit's (D15) own
 // notes/duration_minutes fields on the Walkthrough row - PR-D2 dropped the legacy
 // Lead.walkthrough_notes/walkthrough_duration_minutes columns this used to dual-write, so the
-// Walkthrough row is now the sole target. `mockPrisma.walkthrough.findMany` defaults to `[]` in
+// Walkthrough row is now the sole target. `mockPrisma.visit.findMany` defaults to `[]` in
 // setup.ts, so `findCurrentWalkthroughForLead` resolves no current visit and the Walkthrough-row
 // write is skipped unless a test explicitly stocks a walkthrough row.
 describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
   beforeEach(() => {
     // Default: no current visit — findCurrentWalkthroughForLead resolves null and the extra
     // Walkthrough-row write is skipped. Tests that need a current visit override this.
-    mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+    mockPrisma.visit.findMany.mockResolvedValue([]);
   });
 
   it('updates walkthrough notes successfully', async () => {
@@ -2243,9 +2295,9 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
     };
     mockPrisma.lead.update.mockResolvedValue({
       ...LEAD_FIXTURE,
-      walkthroughs: [currentVisit],
+      visits: [currentVisit],
     });
-    mockPrisma.walkthrough.findMany.mockResolvedValue([currentVisit]);
+    mockPrisma.visit.findMany.mockResolvedValue([currentVisit]);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough`)
@@ -2260,10 +2312,10 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, walkthrough_notes: 'On-site notes' });
-    mockPrisma.walkthrough.findMany.mockResolvedValue([
+    mockPrisma.visit.findMany.mockResolvedValue([
       { id: 'wt-scheduled-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01'), duration_minutes: 60, completed_at: null, cancelled_at: null, created_at: new Date('2026-03-01') },
     ]);
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.update.mockResolvedValue({});
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough`)
@@ -2271,7 +2323,7 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
       .send({ walkthrough_notes: 'On-site notes', walkthrough_duration_minutes: 75 });
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
+    expect(mockPrisma.visit.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'wt-scheduled-1' },
         data: expect.objectContaining({ notes: 'On-site notes', duration_minutes: 75 }),
@@ -2287,7 +2339,7 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'NEW' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, walkthrough_notes: 'Pre-visit note' });
-    mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+    mockPrisma.visit.findMany.mockResolvedValue([]);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough`)
@@ -2295,7 +2347,7 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
       .send({ walkthrough_notes: 'Pre-visit note' });
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.walkthrough.update).not.toHaveBeenCalled();
+    expect(mockPrisma.visit.update).not.toHaveBeenCalled();
   });
 
   it('returns 403 for SALES on another users lead', async () => {
@@ -2319,7 +2371,7 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/walkthrough')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/walkthrough')
       .set(authHeader('admin'))
       .send({ walkthrough_notes: 'Test' });
 
@@ -2333,7 +2385,7 @@ describe('POST /api/leads/:id/walkthrough (notes/duration update)', () => {
 
 describe('POST /api/leads/:id/walkthrough — walkthrough_duration_minutes', () => {
   beforeEach(() => {
-    mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+    mockPrisma.visit.findMany.mockResolvedValue([]);
   });
 
   it('saves walkthrough_duration_minutes and returns it in response', async () => {
@@ -2348,9 +2400,9 @@ describe('POST /api/leads/:id/walkthrough — walkthrough_duration_minutes', () 
     };
     mockPrisma.lead.update.mockResolvedValue({
       ...LEAD_FIXTURE,
-      walkthroughs: [currentVisit],
+      visits: [currentVisit],
     });
-    mockPrisma.walkthrough.findMany.mockResolvedValue([currentVisit]);
+    mockPrisma.visit.findMany.mockResolvedValue([currentVisit]);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough`)
@@ -2398,8 +2450,8 @@ describe('GET /api/leads — walkthrough date filters', () => {
 
     expect(res.status).toBe(200);
     const whereArg = (mockPrisma.lead.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
-    expect(whereArg.walkthroughs).toBeDefined();
-    expect(whereArg.walkthroughs.some.scheduled_at.gte).toBeInstanceOf(Date);
+    expect(whereArg.visits).toBeDefined();
+    expect(whereArg.visits.some.scheduled_at.gte).toBeInstanceOf(Date);
   });
 
   it('filters by walkthrough_before', async () => {
@@ -2414,8 +2466,8 @@ describe('GET /api/leads — walkthrough date filters', () => {
 
     expect(res.status).toBe(200);
     const whereArg = (mockPrisma.lead.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
-    expect(whereArg.walkthroughs).toBeDefined();
-    expect(whereArg.walkthroughs.some.scheduled_at.lte).toBeInstanceOf(Date);
+    expect(whereArg.visits).toBeDefined();
+    expect(whereArg.visits.some.scheduled_at.lte).toBeInstanceOf(Date);
   });
 });
 
@@ -2428,7 +2480,8 @@ describe('GET /api/leads — walkthrough date filters', () => {
 // completed) default is gone, along with the array-order dependency on `status` that
 // produced it; the walkthrough-completed lead status itself was later retired in PR-C2).
 describe('GET /api/leads — walkthrough_status=needs_scheduling filter', () => {
-  it('expands to a walkthroughs relation filter on REQUESTED, no status default', async () => {
+  // Multi-visit D22a: the bucket is the ABSENCE of a live visit, not a REQUESTED placeholder.
+  it('expands to a visits relation filter on having NO live visit, no status default', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findMany.mockResolvedValue([LEAD_FIXTURE]);
     mockPrisma.lead.count.mockResolvedValue(1);
@@ -2440,11 +2493,11 @@ describe('GET /api/leads — walkthrough_status=needs_scheduling filter', () => 
 
     expect(res.status).toBe(200);
     const whereArg = (mockPrisma.lead.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
-    expect(whereArg.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(whereArg.visits).toEqual({ none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
     expect(whereArg.status).toBeUndefined();
   });
 
-  it('returns NEW leads with a REQUESTED walkthrough', async () => {
+  it('returns NEW leads that hold no live visit', async () => {
     mockAuthAs('admin');
     const newLead = { ...LEAD_FIXTURE, status: 'NEW' };
     mockPrisma.lead.findMany.mockResolvedValue([newLead]);
@@ -2457,7 +2510,7 @@ describe('GET /api/leads — walkthrough_status=needs_scheduling filter', () => 
 
     expect(res.status).toBe(200);
     const whereArg = (mockPrisma.lead.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
-    expect(whereArg.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(whereArg.visits).toEqual({ none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
     expect(res.body.leads).toHaveLength(1);
     expect(res.body.leads[0].status).toBe('NEW');
   });
@@ -2474,7 +2527,7 @@ describe('GET /api/leads — walkthrough_status=needs_scheduling filter', () => 
 
     expect(res.status).toBe(200);
     const whereArg = (mockPrisma.lead.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
-    expect(whereArg.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(whereArg.visits).toEqual({ none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
     expect(whereArg.status).toBe('CONTACTED');
   });
 });
@@ -2588,7 +2641,7 @@ describe('POST /api/leads/:id/mark-lost', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/mark-lost')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/mark-lost')
       .set(authHeader('admin'))
       .send({ lost_reason: 'Test' });
 
@@ -2711,7 +2764,7 @@ describe('GET /api/leads/:id/notes', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .get('/api/leads/00000000-0000-0000-0000-995555550224/notes')
+      .get('/api/leads/00000000-0000-0000-0000-999999999999/notes')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -2754,7 +2807,7 @@ describe('GET /api/leads/:id/timeline', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .get('/api/leads/00000000-0000-0000-0000-995555550224/timeline')
+      .get('/api/leads/00000000-0000-0000-0000-999999999999/timeline')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -2803,7 +2856,7 @@ describe('POST /api/leads/:id/notes', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/notes')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/notes')
       .set(authHeader('admin'))
       .send({ content: 'Some note' });
 
@@ -2878,8 +2931,11 @@ describe('PATCH /api/leads/:id (new statuses)', () => {
         .send({ status });
 
       expect(res.status).toBe(200);
-      const updateArgs = mockPrisma.lead.update.mock.calls[0][0];
-      expect(updateArgs.data.status).toBe(status);
+      // Spec #1751 D6: written through transitionLeadStatus, with the from/to ledger entry.
+      const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+      expect(statusWrites).toHaveLength(1);
+      expect(statusWrites[0].data.status).toBe(status);
+      expect(statusChangeEvents()[0].metadata).toMatchObject({ from: 'NEW', to: status });
     });
   });
 
@@ -2984,6 +3040,79 @@ describe('POST /api/tags', () => {
 
     expect(res.status).toBe(400);
   });
+
+  // The length checks must read the TRIMMED name. Chained the other way round
+  // (`.min(1).max(50).trim()`) zod sized the raw string and trimmed afterwards, so
+  // a name of nothing but spaces cleared min(1) and was created as ''. Same root
+  // cause as the PATCH defect covered in tag-management.test.ts.
+  it('returns 400 for a whitespace-only name rather than creating a blank tag', async () => {
+    mockAuthAs('admin');
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/api/tags')
+      .set(authHeader('admin'))
+      .send({ name: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.tag.create).not.toHaveBeenCalled();
+  });
+
+  it('trims a padded name before the duplicate check and the write', async () => {
+    mockAuthAs('admin');
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+    mockPrisma.tag.create.mockResolvedValue({ id: 'new-tag-id', name: 'VIP', color: '#6B7280' });
+
+    const res = await request(app)
+      .post('/api/tags')
+      .set(authHeader('admin'))
+      .send({ name: '  VIP  ' });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.tag.findUnique.mock.calls[0][0].where.organization_id_name.name).toBe('VIP');
+    expect(mockPrisma.tag.create.mock.calls[0][0].data.name).toBe('VIP');
+  });
+
+  it('accepts a name that is exactly the 50-character limit', async () => {
+    mockAuthAs('admin');
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+    mockPrisma.tag.create.mockResolvedValue({ id: 'new-tag-id', name: 'x'.repeat(50), color: '#6B7280' });
+
+    const res = await request(app)
+      .post('/api/tags')
+      .set(authHeader('admin'))
+      .send({ name: 'x'.repeat(50) });
+
+    expect(res.status).toBe(201);
+  });
+
+  // The other half of the same operator-order bug: 52 characters that trim to a
+  // legal 50 were rejected, because max(50) also read the untrimmed string.
+  it('accepts padding around a 50-character name', async () => {
+    mockAuthAs('admin');
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+    mockPrisma.tag.create.mockResolvedValue({ id: 'new-tag-id', name: 'x'.repeat(50), color: '#6B7280' });
+
+    const res = await request(app)
+      .post('/api/tags')
+      .set(authHeader('admin'))
+      .send({ name: `  ${'x'.repeat(50)}  ` });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.tag.create.mock.calls[0][0].data.name).toBe('x'.repeat(50));
+  });
+
+  it('still rejects a name longer than 50 characters once trimmed (400)', async () => {
+    mockAuthAs('admin');
+
+    const res = await request(app)
+      .post('/api/tags')
+      .set(authHeader('admin'))
+      .send({ name: 'x'.repeat(51) });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.tag.create).not.toHaveBeenCalled();
+  });
 });
 
 // ═══════════════════════════════════════════════════════
@@ -3045,7 +3174,7 @@ describe('POST /api/leads/:id/tags', () => {
     mockPrisma.lead.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/tags')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/tags')
       .set(authHeader('admin'))
       .send({ tag_id: TAG_FIXTURE.id });
 
@@ -3254,8 +3383,11 @@ describe('DISPATCHER lead access', () => {
       .send({ status: 'CONTACTED' });
 
     expect(res.status).toBe(200);
-    const updateArgs = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateArgs.data.status).toBe('CONTACTED');
+    // Spec #1751 D6: written through transitionLeadStatus, with the from/to ledger entry.
+    const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('CONTACTED');
+    expect(statusChangeEvents()[0].metadata).toMatchObject({ from: 'NEW', to: 'CONTACTED' });
   });
 });
 
@@ -3411,8 +3543,10 @@ describe('DELETE /api/leads/:id/tags/:tagId', () => {
   });
 });
 
-// POST /api/leads/:id/contact removed entirely (D6, PR-B2): contactLead and its route are
-// deleted — contacted_at is inferred from outbound activity, never set by hand.
+// POST /api/leads/:id/contact was removed by D6, PR-B2 and is BACK under spec #1751 D5, scoped
+// as a correction to an automatic stamp rather than the primary mechanism. See
+// lead-contact-clock.test.ts for the door and for the three channels that set the clock on
+// their own.
 
 // ═══════════════════════════════════════════════════════
 // POST /api/leads/:id/walkthrough/schedule
@@ -3437,18 +3571,22 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
     const txCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const txDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const txLeadUpdate = vi.fn().mockResolvedValue(updatedLead);
+    // Spec #1751 D6: the NEW -> CONTACTED advance is written by transitionLeadStatus, which
+    // updates through `updateMany` and reads `count` off the result to decide whether to file
+    // the ledger entry. `{ count: 1 }` = the row moved.
+    const txLeadUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     const txWalkthroughCreate = vi.fn().mockResolvedValue({ id: 'wt-new-1' });
     const txWalkthroughUpdate = vi.fn().mockResolvedValue({ id: 'wt-active-1' });
     const txTimelineCreate = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        leadWalkthroughPerformer: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
-        walkthrough: { create: txWalkthroughCreate, update: txWalkthroughUpdate },
-        lead: { update: txLeadUpdate },
+        visitAssignee: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: txWalkthroughCreate, update: txWalkthroughUpdate },
+        lead: { update: txLeadUpdate, updateMany: txLeadUpdateMany },
         timelineEvent: { create: txTimelineCreate },
       }),
     );
-    return { txFindMany, txCreateMany, txDeleteMany, txLeadUpdate, txWalkthroughCreate, txWalkthroughUpdate, txTimelineCreate };
+    return { txFindMany, txCreateMany, txDeleteMany, txLeadUpdate, txLeadUpdateMany, txWalkthroughCreate, txWalkthroughUpdate, txTimelineCreate };
   }
 
   beforeEach(() => {
@@ -3470,9 +3608,9 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
     (prisma.timelineEvent.create as any).mockResolvedValue({});
     (prisma.appSetting.findUnique as any).mockResolvedValue(null);
     // findActiveWalkthrough (pre-transaction) default: no active visit — a fresh booking.
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
     // detectPerformerConflicts' "other scheduled walkthroughs" leg (unconditional unless force).
-    mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+    mockPrisma.visit.findMany.mockResolvedValue([]);
   });
 
   it('schedules a walkthrough on a CONTACTED lead (performers≥1 → scheduled + WALKTHROUGH_SCHEDULED dispatch + flag)', async () => {
@@ -3487,16 +3625,37 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
 
     expect(res.status).toBe(200);
     // D5: CONTACTED is not NEW, so status is left untouched (no forced WALKTHROUGH_SCHEDULED).
-    expect(tx.txLeadUpdate.mock.calls[0][0].data.status).toBeUndefined();
+    // Asserted against the status writer itself (spec #1751 D6) — `lead.update` no longer
+    // carries a status for ANY caller, so reading it there would prove nothing.
+    expect(leadStatusWrites(tx.txLeadUpdateMany)).toHaveLength(0);
+    expect(statusChangeEvents(tx.txTimelineCreate)).toHaveLength(0);
     // The Walkthrough row itself is what carries SCHEDULED + the time — created fresh here
     // (no active visit existed).
     expect(tx.txWalkthroughCreate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'SCHEDULED', lead_id: LEAD_FIXTURE.id }) }),
     );
     expect(tx.txCreateMany).toHaveBeenCalled();
-    // PR-D2: the legacy Lead columns are dropped - the lead update carries no data for a
-    // CONTACTED lead (status is left untouched per D5, and there is nothing left to dual-write).
+    // PR-D2: the legacy Lead columns are dropped, so `lead.update` now writes NOTHING at all —
+    // the row is re-read only for the response shape.
     expect(tx.txLeadUpdate.mock.calls[0][0].data).toEqual({});
+    // Spec #1751 D2's booking clock is a CONDITIONAL write of its own (stampLeadClock), not a
+    // patch merged into the statement above. It is monotonic, and deciding "is it still null?"
+    // from a row read before the transaction opened is a read-then-write two concurrent bookings
+    // can both win; the `walkthrough_first_booked_at: null` in the WHERE is what makes
+    // first-touch-wins atomic, so it is asserted rather than assumed.
+    const bookedWrites = tx.txLeadUpdateMany.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((args: any) => args?.data?.walkthrough_first_booked_at !== undefined);
+    expect(bookedWrites).toHaveLength(1);
+    expect(bookedWrites[0].where).toMatchObject({
+      id: LEAD_FIXTURE.id,
+      organization_id: ALPHA_ORG_ID,
+      walkthrough_first_booked_at: null,
+    });
+    // The moment of the BOOKING, not the appointment instant ('2026-04-01T09:00:00Z' in
+    // scheduleBody) — an appointment set three weeks out was still booked on time.
+    expect(bookedWrites[0].data.walkthrough_first_booked_at).toBeInstanceOf(Date);
+    expect(bookedWrites[0].data.walkthrough_first_booked_at.toISOString()).not.toBe('2026-04-01T09:00:00.000Z');
     expect(dispatchedType('WALKTHROUGH_SCHEDULED')).toHaveLength(1);
   });
 
@@ -3511,7 +3670,14 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
       .send(scheduleBody);
 
     expect(res.status).toBe(200);
-    expect(tx.txLeadUpdate.mock.calls[0][0].data.status).toBe('CONTACTED');
+    // Spec #1751 D6: the advance goes through transitionLeadStatus, so it is an updateMany and
+    // it leaves a from/to ledger entry — the advance was previously invisible as a status change.
+    const statusWrites = leadStatusWrites(tx.txLeadUpdateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('CONTACTED');
+    const ledger = statusChangeEvents(tx.txTimelineCreate);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'NEW', to: 'CONTACTED' });
   });
 
   it('D5: never pulls an ESTIMATED lead backward — status stays untouched', async () => {
@@ -3525,7 +3691,10 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
       .send(scheduleBody);
 
     expect(res.status).toBe(200);
-    expect(tx.txLeadUpdate.mock.calls[0][0].data.status).toBeUndefined();
+    // Read off the status writer (spec #1751 D6), not off `lead.update`, which no longer
+    // carries a status for any caller.
+    expect(leadStatusWrites(tx.txLeadUpdateMany)).toHaveLength(0);
+    expect(statusChangeEvents(tx.txTimelineCreate)).toHaveLength(0);
   });
 
   it('state 4: performer_ids:[] + a time → SCHEDULED, 0 performers, NO WALKTHROUGH_SCHEDULED dispatch, flag stays unset', async () => {
@@ -3551,12 +3720,14 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
   it('returns 409 when a per-member schedule conflict is detected (same body shape)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    // Return a conflicting job for the performer (crew M2M overlap)
+    // Return a conflicting job for the performer (crew M2M overlap). Multi-visit close-out: the
+    // job arm is now matched through the job's VISITS relation, not the Job.scheduled_start/end
+    // mirror, so the overlapping window comes back nested under `visits`, mirroring the shape
+    // job.controller.ts's own detectCrewConflicts has used since S6.
     (prisma.job.findMany as any).mockResolvedValue([{
       id: 'conflict-job',
       job_number: 'J00099',
-      scheduled_start: new Date('2026-04-01T08:00:00Z'),
-      scheduled_end: new Date('2026-04-01T10:00:00Z'),
+      visits: [{ id: 'conflict-visit', scheduled_at: new Date('2026-04-01T08:00:00Z'), scheduled_end: new Date('2026-04-01T10:00:00Z') }],
     }]);
     mockPrisma.lead.findMany.mockResolvedValue([]);
 
@@ -3620,9 +3791,9 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     // An active SCHEDULED visit already exists — this call reschedules it (same row), not a
     // fresh one.
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-03-15T09:00:00Z'),
-      customer_email_sent_at: new Date('2026-03-01T00:00:00Z'), performers: [],
+      customer_email_sent_at: new Date('2026-03-01T00:00:00Z'), assignees: [],
     });
     const tx = wireScheduleTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -3647,7 +3818,7 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     // The lead's last visit already finished — findActiveWalkthrough (REQUESTED/SCHEDULED
     // only) correctly sees nothing, so this books a FRESH visit.
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
     const tx = wireScheduleTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
     const res = await request(app)
@@ -3678,7 +3849,7 @@ describe('POST /api/leads/:id/walkthrough/schedule', () => {
 // SALES, OWN_WALKTHROUGH for TECHNICIAN.
 describe('POST /api/leads/:id/walkthrough/complete', () => {
   beforeEach(() => {
-    mockPrisma.leadWalkthroughPerformer.findMany.mockResolvedValue([]);
+    mockPrisma.visitAssignee.findMany.mockResolvedValue([]);
   });
 
   it('completes a lead with a SCHEDULED visit (ADMIN — unconditional, no row probe needed)', async () => {
@@ -3687,8 +3858,7 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
     // lead-status side effect at all; the lead stays wherever the earlier schedule call (or
     // whatever else) left it.
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -3702,15 +3872,20 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
     // The lead.update payload carries no `status` key at all - completion is purely a fact on
     // the Walkthrough row now, not a lead-pipeline transition.
     expect(mockPrisma.lead.update.mock.calls[0][0].data).not.toHaveProperty('status');
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'wt-scheduled-1' }, data: expect.objectContaining({ status: 'COMPLETED' }) }),
+    // The transition is a GUARDED write: the WHERE re-tests the status, so a visit another
+    // request already completed matches nothing instead of being overwritten.
+    expect(mockPrisma.visit.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'wt-scheduled-1' }),
+        data: expect.objectContaining({ status: 'COMPLETED' }),
+      }),
     );
   });
 
   it('returns 400 when the lead has no SCHEDULED visit', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/complete`)
@@ -3724,7 +3899,27 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
   it('returns 403 for SALES on a lead they do not own', async () => {
     mockAuthAs('sales');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    // canAccessRow's scoped probe finds nothing → not visible under SALES' OWN_LEAD scope.
+    mockPrisma.lead.findFirst.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/complete`)
+      .set(authHeader('sales'))
+      .send({});
+
+    expect(res.status).toBe(403);
+  });
+
+  // MV-RBAC-19: authorization must run BEFORE the business-state check, or an unowned lead's
+  // "no scheduled walkthrough" state leaks through a 400 instead of a 403 - telling a caller who
+  // should not even know this lead exists whether it currently has one.
+  it('returns 403, not 400, for SALES on a lead they do not own that ALSO has no scheduled visit', async () => {
+    mockAuthAs('sales');
+    mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
+    // No scheduled visit either - if this were checked first, the response would be a 400
+    // ("Can only complete a scheduled walkthrough"), leaking that fact about an invisible lead.
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
     // canAccessRow's scoped probe finds nothing → not visible under SALES' OWN_LEAD scope.
     mockPrisma.lead.findFirst.mockResolvedValue(null);
 
@@ -3739,8 +3934,7 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
   it('allows a performer (TECHNICIAN) to complete via OWN_WALKTHROUGH', async () => {
     mockAuthAs('technician');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
     // canAccessRow's scoped probe (matches — tech is a performer).
@@ -3757,8 +3951,7 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
   it('DISPATCHER can complete a walkthrough even without being a performer (unconditional read Lead)', async () => {
     mockAuthAs('dispatcher');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -3779,12 +3972,16 @@ describe('POST /api/leads/:id/walkthrough/complete', () => {
 // a cancelled visit with nothing rebooked leaves a FRESH REQUESTED row so the lead reappears in
 // the scheduler bucket — it does not just go CANCELLED and stop.
 describe('POST /api/leads/:id/walkthrough/cancel', () => {
-  it('cancels a lead with a SCHEDULED visit and rebooks a fresh REQUESTED row (D12)', async () => {
+  // Multi-visit D22a: cancelling a visit no longer mints a replacement placeholder. The lead
+  // returns to "needs scheduling" simply by having no live visit, and minting a row would be
+  // actively wrong once a lead can hold several trips - cancelling one of three must not put the
+  // lead in the needs-scheduling bucket while two are still booked.
+  it('cancels the lead\'s live visit WITHOUT rebooking a placeholder row (D22a)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
-    mockPrisma.walkthrough.create.mockResolvedValue({ id: 'wt-rebooked-1' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.update.mockResolvedValue({});
+    mockPrisma.visit.create.mockResolvedValue({ id: 'wt-rebooked-1' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -3795,19 +3992,17 @@ describe('POST /api/leads/:id/walkthrough/cancel', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.lead.status).toBe('CONTACTED');
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
+    expect(mockPrisma.visit.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'wt-scheduled-1' }, data: expect.objectContaining({ status: 'CANCELLED' }) }),
     );
-    // D12: a fresh REQUESTED row is created for the same lead — no performers carried over.
-    expect(mockPrisma.walkthrough.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ lead_id: LEAD_FIXTURE.id, status: 'REQUESTED' }) }),
-    );
+    // No replacement row - the absence of a live visit IS the needs-scheduling signal now.
+    expect(mockPrisma.visit.create).not.toHaveBeenCalled();
   });
 
   it('returns 400 when the lead has no SCHEDULED visit', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/cancel`)
@@ -3914,8 +4109,8 @@ describe('POST /api/leads/:id/cancel', () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CANCELLED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.update.mockResolvedValue({});
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
     const res = await request(app)
@@ -3925,25 +4120,31 @@ describe('POST /api/leads/:id/cancel', () => {
 
     expect(res.status).toBe(200);
     // The Walkthrough row itself is cancelled, no rebooking.
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
+    expect(mockPrisma.visit.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'wt-scheduled-1' },
         data: expect.objectContaining({ status: 'CANCELLED', cancelled_reason: 'Lead cancelled' }),
       }),
     );
-    // PR-D2: the dual-write onto the legacy Lead.walkthrough_* columns is gone - the lead update
-    // only carries the lead's OWN cancellation fields now.
-    const updateCall = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateCall.data.status).toBe('CANCELLED');
-    expect(updateCall.data.cancelled_at).toBeInstanceOf(Date);
-    expect(updateCall.data.cancelled_reason).toBe('Customer cancelled project');
+    // PR-D2: the dual-write onto the legacy Lead.walkthrough_* columns is gone - the write only
+    // carries the lead's OWN cancellation fields. Spec #1751 D6 moved that write into
+    // transitionLeadStatus, which puts the status and the columns that travel with it in ONE
+    // statement, and files the from/to ledger entry the hand-rolled event it replaces lacked.
+    const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('CANCELLED');
+    expect(statusWrites[0].data.cancelled_at).toBeInstanceOf(Date);
+    expect(statusWrites[0].data.cancelled_reason).toBe('Customer cancelled project');
+    const ledger = statusChangeEvents();
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'CONTACTED', to: 'CANCELLED' });
   });
 
   it('does not touch the Walkthrough row when cancelling a lead with no SCHEDULED visit', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CANCELLED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
     const res = await request(app)
@@ -3952,7 +4153,7 @@ describe('POST /api/leads/:id/cancel', () => {
       .send({ cancelled_reason: 'No longer needed' });
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.walkthrough.update).not.toHaveBeenCalled();
+    expect(mockPrisma.visit.update).not.toHaveBeenCalled();
     const updateCall = mockPrisma.lead.update.mock.calls[0][0];
     expect(updateCall.data.walkthrough_scheduled_at).toBeUndefined();
   });
@@ -4030,8 +4231,8 @@ describe('POST /api/leads/:id/mark-lost (walkthrough auto-cancel)', () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'LOST' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.update.mockResolvedValue({});
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
     const res = await request(app)
@@ -4040,18 +4241,24 @@ describe('POST /api/leads/:id/mark-lost (walkthrough auto-cancel)', () => {
       .send({ lost_reason: 'Customer went elsewhere' });
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
+    expect(mockPrisma.visit.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'wt-scheduled-1' },
         data: expect.objectContaining({ status: 'CANCELLED', cancelled_reason: 'Lead marked as lost' }),
       }),
     );
-    // PR-D2: the dual-write onto the legacy Lead.walkthrough_* columns is gone - the lead update
-    // only carries the lead's OWN lost fields now.
-    const updateCall = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateCall.data.status).toBe('LOST');
-    expect(updateCall.data.lost_at).toBeInstanceOf(Date);
-    expect(updateCall.data.lost_reason).toBe('Customer went elsewhere');
+    // PR-D2: the dual-write onto the legacy Lead.walkthrough_* columns is gone - the write only
+    // carries the lead's OWN lost fields. Spec #1751 D6 moved that write into
+    // transitionLeadStatus (status + lost_at + lost_reason in ONE statement) and gave the ledger
+    // entry the from/to the hand-rolled event it replaces did not carry.
+    const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('LOST');
+    expect(statusWrites[0].data.lost_at).toBeInstanceOf(Date);
+    expect(statusWrites[0].data.lost_reason).toBe('Customer went elsewhere');
+    const ledger = statusChangeEvents();
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'CONTACTED', to: 'LOST' });
   });
 });
 
@@ -4066,7 +4273,7 @@ describe('POST /api/leads (lead_number generation)', () => {
     const createdLead = { ...LEAD_FIXTURE, lead_number: 'L00001' };
     mockPrisma.$transaction.mockImplementation((fn: any) => {
       const tx = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: {
           findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockResolvedValue(createdLead),
@@ -4103,7 +4310,7 @@ describe('POST /api/leads (service-location anchoring)', () => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       txLocCreate = vi.fn().mockResolvedValue({ id: 'accreted-loc-id' });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue(null), create: txLocCreate },
       };
@@ -4143,7 +4350,7 @@ describe('POST /api/leads (service-location anchoring)', () => {
       txLocCreate = vi.fn();
       txLocFindFirst = vi.fn().mockResolvedValue({ id: LOCATION_FIXTURE.id });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         serviceLocation: { findFirst: txLocFindFirst, create: txLocCreate },
       };
@@ -4178,7 +4385,7 @@ describe('POST /api/leads (service-location anchoring)', () => {
       txLocFindFirst = vi.fn().mockResolvedValue({ id: 'primary-loc-id' });
       txLocCreate = vi.fn();
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         serviceLocation: { findFirst: txLocFindFirst, create: txLocCreate },
       };
@@ -4206,7 +4413,7 @@ describe('POST /api/leads (service-location anchoring)', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn() },
       };
@@ -4231,7 +4438,7 @@ describe('POST /api/leads (service-location anchoring)', () => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       txLocCreate = vi.fn().mockResolvedValue({ id: 'legacy-loc-id' });
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: txLeadCreate },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue(null), create: txLocCreate },
       };
@@ -4267,7 +4474,7 @@ describe('POST /api/leads (existing-customer accretion — unified-client-creati
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txCustomerPhoneCreate = vi.fn();
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { findUnique: vi.fn().mockResolvedValue({ phone: CUSTOMER_FIXTURE.phone, email: null, phones: [], extra_emails: [] }) },
         customerPhone: { create: txCustomerPhoneCreate },
         customerEmail: { create: vi.fn() },
@@ -4295,7 +4502,7 @@ describe('POST /api/leads (existing-customer accretion — unified-client-creati
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
       txLeadCreate = vi.fn().mockResolvedValue(LEAD_FIXTURE);
       const txMock = {
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
         customer: { findUnique: vi.fn().mockResolvedValue({ phone: null, email: null, phones: [], extra_emails: [] }) },
         customerPhone: { create: vi.fn() },
         customerEmail: { create: vi.fn() },
@@ -4490,7 +4697,7 @@ describe('DELETE /api/leads/:id (casual delete)', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .delete('/api/leads/00000000-0000-0000-0000-995555550224')
+      .delete('/api/leads/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -4685,7 +4892,7 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     const txLeadFindUnique = vi.fn().mockResolvedValue(updated);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        leadWalkthroughPerformer: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
+        visitAssignee: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
         lead: { findUnique: txLeadFindUnique },
       }),
     );
@@ -4712,10 +4919,10 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     mockAuthAs('admin');
     const scheduledLead = { ...LEAD_FIXTURE, status: 'CONTACTED' };
     mockPrisma.lead.findUnique.mockResolvedValue(scheduledLead);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
-      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), performers: [],
+    mockPrisma.visit.findFirst.mockResolvedValue({
+      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), assignees: [],
     });
-    const updatedLead = { ...scheduledLead, walkthrough_performers: [{ user_id: TEST_USERS.sales.id, user: { id: TEST_USERS.sales.id, first_name: 'Test', last_name: 'Sales', email: 'sales@test.com' } }] };
+    const updatedLead = { ...scheduledLead, visit_assignees: [{ user_id: TEST_USERS.sales.id, user: { id: TEST_USERS.sales.id, first_name: 'Test', last_name: 'Sales', email: 'sales@test.com' } }] };
     wirePerformersTx(updatedLead);
 
     const res = await request(app)
@@ -4730,7 +4937,7 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
   it('returns 400 when the lead has no active (REQUESTED/SCHEDULED) visit', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'WON' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/performers`)
@@ -4745,12 +4952,12 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     // Current performer: technician (will be removed). New performer: sales (will be added).
     const existingLead = { ...LEAD_FIXTURE, status: 'CONTACTED' };
     mockPrisma.lead.findUnique.mockResolvedValue(existingLead);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'),
-      performers: [{ user_id: TEST_USERS.technician.id }],
+      assignees: [{ user_id: TEST_USERS.technician.id }],
     });
     const tx = wirePerformersTx(
-      { ...existingLead, walkthrough_performers: [{ user_id: TEST_USERS.sales.id }] },
+      { ...existingLead, visit_assignees: [{ user_id: TEST_USERS.sales.id }] },
       [{ user_id: TEST_USERS.technician.id }], // current performers passed to replaceWalkthroughPerformers
     );
 
@@ -4770,8 +4977,8 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     mockAuthAs('admin');
     const scheduledLead = { ...LEAD_FIXTURE, status: 'CONTACTED' };
     mockPrisma.lead.findUnique.mockResolvedValue(scheduledLead);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
-      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), performers: [],
+    mockPrisma.visit.findFirst.mockResolvedValue({
+      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), assignees: [],
     });
     const tx = wirePerformersTx(scheduledLead);
 
@@ -4794,15 +5001,15 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     mockAuthAs('admin');
     const existingLead = { ...LEAD_FIXTURE, status: 'CONTACTED' };
     mockPrisma.lead.findUnique.mockResolvedValue(existingLead);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'),
-      performers: [{ user_id: TEST_USERS.technician.id }],
+      assignees: [{ user_id: TEST_USERS.technician.id }],
     });
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: TEST_USERS.technician.id, email: 'tech@test.com', first_name: 'Test', last_name: 'Tech' },
     ]);
     wirePerformersTx(
-      { ...existingLead, walkthrough_performers: [{ user_id: TEST_USERS.sales.id }] },
+      { ...existingLead, visit_assignees: [{ user_id: TEST_USERS.sales.id }] },
       [{ user_id: TEST_USERS.technician.id }],
     );
 
@@ -4830,10 +5037,10 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     mockAuthAs('admin');
     const scheduledLead = { ...LEAD_FIXTURE, status: 'CONTACTED' };
     mockPrisma.lead.findUnique.mockResolvedValue(scheduledLead);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
-      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), performers: [],
+    mockPrisma.visit.findFirst.mockResolvedValue({
+      id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-04-01T09:00:00Z'), assignees: [],
     });
-    const tx = wirePerformersTx({ ...scheduledLead, walkthrough_performers: [{ user_id: TEST_USERS.dispatcher.id }] });
+    const tx = wirePerformersTx({ ...scheduledLead, visit_assignees: [{ user_id: TEST_USERS.dispatcher.id }] });
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/performers`)
@@ -4849,7 +5056,7 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/walkthrough/performers')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/walkthrough/performers')
       .set(authHeader('admin'))
       .send({ performer_ids: [TEST_USERS.sales.id] });
 
@@ -4880,13 +5087,17 @@ describe('POST /api/leads/:id/walkthrough/performers', () => {
 // now share ONE transaction (previously the timeline write sat outside it).
 describe('POST /api/leads/:id/walkthrough/unschedule', () => {
   beforeEach(() => {
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.update.mockResolvedValue({});
   });
 
-  it('200: clears walkthrough_scheduled_at and sets status CONTACTED', async () => {
+  // Multi-visit D22a: with REQUESTED retired there is no "booked but timeless" state to fall
+  // back to, so unscheduling a trip cancels its row. The row is KEPT, never deleted - the
+  // customer may hold an email naming it, and deleting it would make the first-time-fix /
+  // callback data (SRVW-41) unrecoverable.
+  it('200: cancels the visit row and leaves the lead status alone', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({
       ...LEAD_FIXTURE,
       status: 'CONTACTED',
@@ -4900,9 +5111,11 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.lead.status).toBe('CONTACTED');
-    // The Walkthrough row itself returns to REQUESTED, scheduled_at cleared.
-    expect(mockPrisma.walkthrough.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'wt-scheduled-1' }, data: { status: 'REQUESTED', scheduled_at: null } }),
+    expect(mockPrisma.visit.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'wt-scheduled-1' },
+        data: expect.objectContaining({ status: 'CANCELLED' }),
+      }),
     );
   });
 
@@ -4910,8 +5123,13 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
   // lead.update call now only carries the status transition.
   it('lead update sets status: CONTACTED', async () => {
     mockAuthAs('admin');
-    mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    // ESTIMATED, not CONTACTED: spec #1751 D6 made re-asserting the status a lead is already in
+    // a no-op (it is not a transition, and filing a ledger entry for it would be a lie), so a
+    // CONTACTED fixture can no longer show this door doing anything. A lead that has had an
+    // estimate sent and then has its walkthrough unscheduled is the same fall-back the
+    // unconditional `data: { status: 'CONTACTED' }` this replaces performed.
+    mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'ESTIMATED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -4919,14 +5137,20 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/unschedule`)
       .set(authHeader('admin'));
 
-    const updateCall = mockPrisma.lead.update.mock.calls[0][0];
-    expect(updateCall.data).toEqual({ status: 'CONTACTED' });
+    const statusWrites = leadStatusWrites(mockPrisma.lead.updateMany);
+    expect(statusWrites).toHaveLength(1);
+    expect(statusWrites[0].data.status).toBe('CONTACTED');
+    const ledger = statusChangeEvents();
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ from: 'ESTIMATED', to: 'CONTACTED' });
+    // The remaining lead.update is the re-read for the response shape and carries nothing.
+    expect(mockPrisma.lead.update.mock.calls[0][0].data).toEqual({});
   });
 
   it('does NOT delete/replace performers (crew kept — no performer deleteMany call)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -4937,16 +5161,16 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
     // Now wrapped in a transaction (timeline write moved inside — see the handler's own note),
     // but it never touches performers.
     expect(mockPrisma.$transaction).toHaveBeenCalled();
-    expect(mockPrisma.leadWalkthroughPerformer.deleteMany).not.toHaveBeenCalled();
+    expect(mockPrisma.visitAssignee.deleteMany).not.toHaveBeenCalled();
     const updateCall = mockPrisma.lead.update.mock.calls[0][0];
     expect((updateCall.data as any).leadWalkthroughPerformer).toBeUndefined();
-    expect((updateCall.data as any).walkthrough_performers).toBeUndefined();
+    expect((updateCall.data as any).visit_assignees).toBeUndefined();
   });
 
   it('does NOT dispatch any automation event (no walkthrough or customer notification)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -4960,7 +5184,7 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
   it('returns 400 when the lead has no SCHEDULED visit', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
+    mockPrisma.visit.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
       .post(`/api/leads/${LEAD_FIXTURE.id}/walkthrough/unschedule`)
@@ -4975,7 +5199,7 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
     mockPrisma.lead.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/leads/00000000-0000-0000-0000-995555550224/walkthrough/unschedule')
+      .post('/api/leads/00000000-0000-0000-0000-999999999999/walkthrough/unschedule')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -4994,7 +5218,7 @@ describe('POST /api/leads/:id/walkthrough/unschedule', () => {
   it('DISPATCHER can unschedule a walkthrough', async () => {
     mockAuthAs('dispatcher');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     (prisma.timelineEvent.create as any).mockResolvedValue({});
 
@@ -5064,7 +5288,10 @@ describe('GET /api/leads/export', () => {
     expect(args.select.status).toBe(true);
     expect(args.select.customer).toBeDefined();
     expect(args.select.commission_owner).toBeDefined();
-    expect(args.select.walkthrough_performers).toBeDefined();
+    // S8 (D6): the walkthrough crew is selected through the lead's TRIPS now
+    // (`visit_assignees.lead_id` is dropped); the projected wire key is unchanged.
+    expect(args.select.visits.select.assignees).toBeDefined();
+    expect(args.select.visit_assignees).toBeUndefined();
     expect(args.select.estimates).toBeDefined();
   });
 
@@ -5100,5 +5327,71 @@ describe('GET /api/leads/export', () => {
   it('returns 401 without auth header', async () => {
     const res = await request(app).get('/api/leads/export');
     expect(res.status).toBe(401);
+  });
+});
+
+// ─── Multi-visit S8 (behaviour 16) ────────────────────────────────────────────────────────────
+// `visit_assignees.lead_id` is dropped, so a lead's walkthrough crew is reached one array level
+// deeper, through `lead.visits[].assignees`. THE WIRE KEY THE FRONTEND READS DOES NOT CHANGE -
+// that is the whole insulation - and neither does the user set, including the deliberate absence
+// of dedupe: a person on two of the lead's visits still appears twice, exactly as today.
+//
+// That wire key is `walkthrough_performers`, not `visit_assignees`. #1637/#1642 landed after this
+// slice was cut and restored the pre-S1 public name, because S1's relation rename had silently
+// blanked six frontend readers. So the projection is now TWO hops, and this test pins both:
+// projectLeadVisitCrew flattens `visits[].assignees` onto the internal `visit_assignees`, then
+// projectLeadWalkthroughFields renames that to `walkthrough_performers` on the way out. Asserting
+// the outgoing name rather than the intermediate one is the point - the intermediate is private.
+describe('S8 - the lead payload keeps its walkthrough crew key across the relation move', () => {
+  const U1 = '00000000-0000-0000-0000-0000000000c1';
+  const U2 = '00000000-0000-0000-0000-0000000000c2';
+  const LEAD_ID = 'e0000000-0000-0000-0000-0000000000c9';
+
+  function crewUser(id: string) {
+    return { id, first_name: 'F', last_name: 'L', email: `${id}@t.com` };
+  }
+  function snapshot(id: string) {
+    return {
+      id, status: 'SCHEDULED', scheduled_at: new Date('2026-09-01T14:00:00Z'), duration_minutes: 60,
+      completed_at: null, notes: null, cancelled_at: null, cancelled_reason: null, cancelled_by: null,
+      customer_email_sent_at: null, created_at: new Date('2026-08-01T00:00:00Z'), canceller: null,
+    };
+  }
+
+  it('serves the same crew set, flattened, with no dedupe', async () => {
+    mockAuthAs('admin');
+    (prisma.lead.findUnique as any).mockImplementation(async (args: any) => {
+      const select = args?.select ?? {};
+      if (Object.keys(select).length <= 1) return { id: LEAD_ID };
+      return {
+        id: LEAD_ID,
+        lead_number: 'L00001',
+        status: 'NEW',
+        organization_id: ALPHA_ORG_ID,
+        customer: null,
+        commission_owner: null,
+        lead_assignees: [],
+        estimates: [],
+        visits: [
+          { ...snapshot('v1'), assignees: [{ user_id: U1, user: crewUser(U1) }, { user_id: U2, user: crewUser(U2) }] },
+          { ...snapshot('v2'), assignees: [{ user_id: U2, user: crewUser(U2) }] },
+        ],
+      };
+    });
+
+    const res = await request(app).get(`/api/leads/${LEAD_ID}`).set(authHeader('admin'));
+    expect(res.status).toBe(200);
+
+    const crew = res.body.lead.walkthrough_performers as { user_id: string }[];
+    expect(crew.map((c) => c.user_id)).toEqual([U1, U2, U2]);
+
+    // The internal hop must not leak: only the restored public name reaches the client.
+    expect(res.body.lead).not.toHaveProperty('visit_assignees');
+
+    // And the dead back-relation is gone from the query itself.
+    const detailCall = (prisma.lead.findUnique as any).mock.calls
+      .map((c: any[]) => c[0])
+      .find((a: any) => Object.keys(a.select ?? {}).length > 1);
+    expect(detailCall.select).not.toHaveProperty('visit_assignees');
   });
 });

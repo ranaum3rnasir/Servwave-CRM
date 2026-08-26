@@ -3,7 +3,18 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import PaymentsListsPage from '@/pages/settings/PaymentsListsPage';
+/**
+ * This file deliberately imports `@/pages/v2/settings/PaymentsListsPage`, NOT
+ * `@/pages/settings/PaymentsListsPage`.
+ *
+ * `/settings/payments` is mounted from `pages/v2/routes/settings.routes.tsx` via
+ * `import('../settings/PaymentsListsPage')` - and because that import sits in
+ * `pages/v2/routes/`, it resolves to the v2 fork. The v1 file is dead code whose only
+ * importer was this test, which is exactly how #1730's Tags card shipped to a page no
+ * user can reach while these gate assertions stayed green.
+ */
+import PaymentsListsPage from '@/pages/v2/settings/PaymentsListsPage';
+import { buildAbility } from '@/lib/ability';
 
 const mockApi = vi.mocked(api);
 
@@ -88,7 +99,7 @@ describe('PaymentsListsPage — Payments & Lists (in-shell)', () => {
 
     // Scope to the Accepted Payment Methods card - the ServWave Payments STATUS card
     // (a different component, rendered above) has its own unrelated "ServWave Payments" h3.
-    const methodsCard = screen.getByText('Accepted Payment Methods').closest('.p-6') as HTMLElement;
+    const methodsCard = screen.getByText('Accepted Payment Methods').closest('[data-slot="card"]') as HTMLElement;
     expect(within(methodsCard).queryByText('ServWave Payments')).not.toBeInTheDocument();
     expect(screen.queryByText(/locked — Stripe is integrated/i)).not.toBeInTheDocument();
   });
@@ -110,7 +121,7 @@ describe('PaymentsListsPage — Payments & Lists (in-shell)', () => {
     renderWithProviders(<PaymentsListsPage />);
     await screen.findByDisplayValue('40'); // org has loaded, form has reset()
 
-    const methodsCard = screen.getByText('Accepted Payment Methods').closest('.p-6') as HTMLElement;
+    const methodsCard = screen.getByText('Accepted Payment Methods').closest('[data-slot="card"]') as HTMLElement;
     // The row is not an editable checkbox - it's not part of the CASL/RHF form state.
     expect(within(methodsCard).queryByRole('checkbox', { name: /ServWave Payments/i })).not.toBeInTheDocument();
     const row = within(methodsCard).getByText('ServWave Payments');
@@ -159,5 +170,43 @@ describe('PaymentsListsPage — Payments & Lists (in-shell)', () => {
 
     expect(await screen.findByText(/Secured by Stripe/)).toBeInTheDocument();
     expect(await screen.findByTestId('connect-account-onboarding')).toBeInTheDocument();
+  });
+});
+
+describe('PaymentsListsPage — tag management gate', () => {
+  // `update`/`delete Tag` carry no defaultGrants row, so only ADMIN (`manage all`)
+  // holds both. A dispatcher or salesperson can still read and create tags from a
+  // record, but must not see the org-wide rename/delete surface.
+  const ADMIN = buildAbility([
+    { action: 'update', subject: 'Tag' },
+    { action: 'delete', subject: 'Tag' },
+  ]);
+  const NON_ADMIN = buildAbility([
+    { action: 'read', subject: 'Tag' },
+    { action: 'create', subject: 'Tag' },
+  ]);
+
+  beforeEach(() => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/api/organization') return Promise.resolve({ data: ORG });
+      if (url === '/api/tags') {
+        return Promise.resolve({ data: { tags: [{ id: 't1', name: 'Urgent', color: '#EF4444' }] } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+  });
+
+  it('shows the Tags card to an admin', async () => {
+    renderWithProviders(<PaymentsListsPage />, { ability: ADMIN });
+    expect(await screen.findByText('Urgent')).toBeInTheDocument();
+    expect(screen.getByLabelText('Delete tag Urgent')).toBeInTheDocument();
+  });
+
+  it('hides the Tags card from a non-admin who can still create tags', async () => {
+    renderWithProviders(<PaymentsListsPage />, { ability: NON_ADMIN });
+    // The rest of the page still renders — only the tag card is withheld.
+    expect(await screen.findByText('Lead/Customer Sources')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Tags' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Delete tag Urgent')).not.toBeInTheDocument();
   });
 });

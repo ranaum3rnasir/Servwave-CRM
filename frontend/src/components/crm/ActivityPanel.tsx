@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useSettingsGuard } from '@/stores/settingsGuard.store';
 import { getInitials } from '@/lib/utils';
+import { toWallClock, useScheduleTimezone } from '@/lib/schedule-tz';
 import { EmptyState } from '@/components/ui/empty-state';
 
 type TimelineEntityType = 'LEAD' | 'JOB' | 'INVOICE';
@@ -44,11 +45,42 @@ function scheduleMeta(ev: TimelineItem): { from: string | null; to: string } | n
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
   const { from, to } = meta as { from?: unknown; to?: unknown };
   if (typeof to !== 'string') return null;
-  if (typeof from !== 'string' && from !== null) return null;
-  return { from: from ?? null, to };
+  // An ABSENT `from` and an explicit null are the same fact - "no previous time" - and
+  // treating absent as malformed suppressed the schedule line entirely on every
+  // RESCHEDULED row, which is the majority of them: only rows carrying an explicit
+  // `from: null` rendered a line at all (8 of J00234's 11 rendered none). The writers
+  // now always send `from`, but the rows already stored do not.
+  if (from !== undefined && typeof from !== 'string' && from !== null) return null;
+  return { from: typeof from === 'string' ? from : null, to };
 }
 
-const fmtSchedule = (iso: string) => format(new Date(iso), 'MMM d, yyyy h:mm a');
+/**
+ * The shipped stamp shape, unchanged - only the ZONE moves. Kept on date-fns rather than
+ * switched to formatInstant because Intl puts a comma between the date and the time
+ * ("May 10, 2026, 10:00 AM") where this format does not, and this is a timezone fix, not
+ * a copy change.
+ */
+const fmtSchedule = (iso: string, tz: string) =>
+  format(toWallClock(new Date(iso), tz), 'MMM d, yyyy h:mm a');
+
+/**
+ * (b) Timeline descriptions embed a raw UTC instant - "Visit 2 scheduled for
+ * 2026-08-25T17:00:00.000Z" - and are rendered verbatim, so every viewer in every zone
+ * reads a bare Z string on the job page. The writers no longer emit these, but the rows
+ * already on staging and in prod do, and nothing re-writes history; so any ISO-8601 UTC
+ * instant left in a description is rendered on the ORG clock here instead.
+ *
+ * Anchored on the 'T' and the trailing 'Z' rather than on loose digits, so a job number,
+ * a quantity or a plain date in the prose cannot match.
+ */
+const ISO_UTC = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z/g;
+
+export function humanizeInstants(text: string, tz: string): string {
+  return text.replace(ISO_UTC, (iso) => {
+    const at = new Date(iso);
+    return Number.isNaN(at.getTime()) ? iso : fmtSchedule(iso, tz);
+  });
+}
 
 function entityRoute(entityType: string): string {
   return entityType.toLowerCase() + 's';
@@ -61,6 +93,7 @@ function entityRoute(entityType: string): string {
 const TIMELINE_ENTITY_TYPES: TimelineEntityType[] = ['JOB', 'LEAD', 'INVOICE'];
 
 export function ActivityPanel({ entityType, entityId }: ActivityPanelProps) {
+  const tz = useScheduleTimezone();
   const queryClient = useQueryClient();
   const [noteContent, setNoteContent] = useState('');
   const setDirty = useSettingsGuard((s) => s.setDirty);
@@ -231,13 +264,13 @@ export function ActivityPanel({ entityType, entityId }: ActivityPanelProps) {
                         </span>
                       </div>
                       <p className="text-xs text-text-secondary mt-0.5 whitespace-pre-wrap break-words">
-                        {content}
+                        {isNote ? content : humanizeInstants(content, tz)}
                       </p>
                       {sched && (
                         <p className="text-[11px] text-text-secondary mt-0.5">
                           {sched.from
-                            ? `${fmtSchedule(sched.from)} → ${fmtSchedule(sched.to)}`
-                            : `Scheduled for ${fmtSchedule(sched.to)}`}
+                            ? `${fmtSchedule(sched.from, tz)} \u2192 ${fmtSchedule(sched.to, tz)}`
+                            : `Scheduled for ${fmtSchedule(sched.to, tz)}`}
                         </p>
                       )}
                     </div>

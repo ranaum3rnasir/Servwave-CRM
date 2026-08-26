@@ -26,6 +26,7 @@ import type { PrismaClient } from '@prisma/client';
 import { listCalls } from '../src/lib/ctm/client';
 import { ingestCall, ingestSms, unwrapActivity } from '../src/lib/ctm/ingest';
 import { ingestRecording } from '../src/lib/ctm/recordings';
+import { warmReceivingNumbers } from '../src/lib/ctm/receivingNumbers';
 import { prisma } from '../src/lib/prisma';
 import { runWithOrg } from '../src/lib/tenant-context';
 
@@ -105,7 +106,15 @@ async function processItem(
   // recording fields are written (a 'starts' would only create ringing shells).
   // suppressNotifications: a historical import must not ring bells or flood
   // threads with unread counts — only live webhook traffic notifies.
-  const res = await deps.ingestCall(deps.prisma, opts.orgId, item, 'end', { suppressNotifications: true });
+  // A historical call answered on a forwarded phone carries only a
+  // receiving_number_id; ingest resolves it against CTM's roster, which has to
+  // be in the cache first. Warming per item costs one request per TTL window
+  // and, unlike a single warm before the loop, survives a run that outlasts it.
+  await warmReceivingNumbers(accountId);
+  const res = await deps.ingestCall(deps.prisma, opts.orgId, item, 'end', {
+    suppressNotifications: true,
+    ctmAccountId: accountId,
+  });
   if (!res) {
     counters.skipped += 1;
     return;

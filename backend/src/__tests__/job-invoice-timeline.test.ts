@@ -56,7 +56,7 @@ beforeEach(() => {
 function mockJobForInvoicing(overrides: Partial<any> = {}) {
   const defaults = {
     id: 'job-1',
-    status: 'UNASSIGNED',
+    status: 'UNSCHEDULED',
     source_plan_id: null,
     job_number: 'J00001',
     customer: {

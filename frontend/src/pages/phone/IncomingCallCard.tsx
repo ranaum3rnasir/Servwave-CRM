@@ -9,7 +9,7 @@ import type { IncomingCallInfo } from "@/lib/communication/useCtmSoftphone";
  * owns the ONE `useCtmSoftphone` instance for the `/phone` surface — Task
  * A4's regression guard asserts `ensureOfficeSoftphone` is called exactly
  * once when the shell mounts, so the `onIncoming` subscription lives there
- * rather than in a second hook instance in `PhoneShell`); this component
+ * rather than in a second hook instance in `PhoneTabPage`); this component
  * itself just presents the ring/answer/in-call states and never talks to the
  * CTM device directly.
  *

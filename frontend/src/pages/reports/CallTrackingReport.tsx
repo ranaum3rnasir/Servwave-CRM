@@ -17,17 +17,17 @@ import { KpiStrip } from '@/components/data/KpiStrip';
 import { useToast } from '@/components/ui/use-toast';
 import { CallDetailDrawer } from '@/components/communication/phone/CallsView';
 import { CallsTable } from '@/components/communication/phone/CallsTable';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { DateRangeControl } from './DateRangeControl';
-import { buildCalls } from './call-tracking-data';
+import { buildCalls } from '@/lib/reports/call-tracking-data';
 import {
   filterCalls,
   computeStats,
   formatDuration,
   formatTalkTime,
   type DecoratedCall,
-} from './call-tracking-logic';
+} from '@/lib/reports/call-tracking-logic';
 
 type Preset = 'month' | 'lastMonth' | '30d' | '90d' | 'year' | 'all' | 'custom';
 const PRESET_LABEL: Record<Preset, string> = {

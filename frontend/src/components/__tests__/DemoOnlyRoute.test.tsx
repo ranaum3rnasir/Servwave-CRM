@@ -27,7 +27,7 @@ function renderAt(path: string, navKey?: string) {
 }
 
 /**
- * Alpha Doors & Security — allowlisted onto the mock Marketing screen. Written
+ * The allowlisted org - admitted onto the mock Marketing screen. Written
  * out rather than read back off the registry so the test pins the actual id;
  * deriving it would pass against an empty allowlist.
  */
@@ -74,7 +74,7 @@ describe('DemoOnlyRoute', () => {
     expect(screen.getByText('DASHBOARD')).toBeInTheDocument();
   });
 
-  it('keeps Marketing allowlisted for Alpha Doors in the nav registry', () => {
+  it('keeps Marketing allowlisted for the pilot org in the nav registry', () => {
     // Guards the sidebar lock and this route guard together: both read the same
     // registry entry, so an id dropped here silently re-locks the screen.
     expect(getDestination('marketing')?.demoOnly).toBe(true);

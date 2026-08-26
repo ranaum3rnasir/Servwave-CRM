@@ -29,17 +29,21 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import app from '../app';
 import { prisma } from '../lib/prisma';
-import { TEST_USERS, mockAuthAs, authHeader, ALPHA_ORG_ID, JOB_FIXTURE, TAG_FIXTURE, mockScopedFindFirst } from './helpers';
+import { TEST_USERS, mockAuthAs, authHeader, ALPHA_ORG_ID, TAG_FIXTURE, mockScopedFindFirst } from './helpers';
 import { setCachedGrants, clearPermissionCache } from '../lib/permissions/permissionCache';
 import { DEFAULT_GRANTS } from '../lib/permissions/defaultGrants';
 
 const mockPrisma = prisma as unknown as Record<string, any>;
 
-const JOB_ID = JOB_FIXTURE.id;
+// A well-formed uuid, NOT JOB_FIXTURE.id: that shared fixture is `j0000000-…` and `j` is not a
+// hex digit, so it is not a valid uuid at all. The tag routes now reject a malformed `:id`
+// before the controller runs (a real Postgres uuid column would throw P2023 on it), so these
+// cases need an id that could actually exist. The job row is mocked; the value only has to parse.
+const JOB_ID = 'ab000000-0000-0000-0000-000000000001';
 const LINE_ID = 'aa000000-0000-0000-0000-000000000001';
 const SCOPE_ID = 'cc000000-0000-0000-0000-000000000001';
 const TECH_ID = TEST_USERS.technician.id;
-const OTHER_TECH_ID = '99555555-0224-9999-9999-995555550224';
+const OTHER_TECH_ID = '99999999-9999-9999-9999-999999999999';
 /** A tag that exists but is NOT yet on the job - see the tagAssignment fixture below. */
 const UNATTACHED_TAG_ID = 'dd000000-0000-0000-0000-000000000009';
 
@@ -56,7 +60,7 @@ function jobRow(over: Record<string, unknown> = {}) {
     discount_value: null,
     discount_amount: 0,
     customer: { tax_exempt: false, id: 'cust-1', first_name: 'A', last_name: 'B', company_name: null, email: null, phone: null },
-    assignees: [{ user_id: TECH_ID }],
+    visits: [{ assignees: [{ user_id: TECH_ID }] }],
     estimate: null,
     job_line_items: [
       { id: LINE_ID, description: 'Labor', quantity: 1, unit_price: 250, unit_cost: 100, markup_percent: 150, line_total: 250, is_taxable: true, sort_order: 0, stock_status: null },
@@ -74,9 +78,9 @@ function jobRow(over: Record<string, unknown> = {}) {
 /** The technician is on the crew; somebody else made the job. */
 const ASSIGNED_JOB = () => jobRow();
 /** The technician made the job and has since been taken OFF the crew. Permanence. */
-const CREATED_JOB = () => jobRow({ created_by_id: TECH_ID, assignees: [] });
+const CREATED_JOB = () => jobRow({ created_by_id: TECH_ID, visits: [] });
 /** Another technician's job entirely. */
-const FOREIGN_JOB = () => jobRow({ created_by_id: OTHER_TECH_ID, assignees: [{ user_id: OTHER_TECH_ID }] });
+const FOREIGN_JOB = () => jobRow({ created_by_id: OTHER_TECH_ID, visits: [{ assignees: [{ user_id: OTHER_TECH_ID }] }] });
 
 /** Point every job read at one fixture and let the scope checks really run against it. */
 function useJob(job: Record<string, any>) {
@@ -130,7 +134,9 @@ const ASSIGNEE_SURFACE: Route[] = [
   { name: 'POST   /:id/notes',       method: 'post',   path: `/api/jobs/${JOB_ID}/notes`,                  body: { content: 'called the customer' } },
   { name: 'POST   /:id/tags',        method: 'post',   path: `/api/jobs/${JOB_ID}/tags`,                   body: { tag_id: UNATTACHED_TAG_ID } },
   { name: 'DELETE /:id/tags/:tagId', method: 'delete', path: `/api/jobs/${JOB_ID}/tags/${TAG_FIXTURE.id}` },
-  { name: 'POST   /:id/complete',    method: 'post',   path: `/api/jobs/${JOB_ID}/complete` },
+  // POST /:id/complete left this list with multi-visit S4 (D15/D7a): closing the JOB stopped being
+  // a technician role default, so a technician on the default grant set 403s here for a reason that
+  // has nothing to do with creation. What a technician closes is their own VISIT.
   { name: 'POST   /:id/start',       method: 'post',   path: `/api/jobs/${JOB_ID}/start` },
   { name: 'POST   /:id/arrive',      method: 'post',   path: `/api/jobs/${JOB_ID}/arrive` },
 ];
@@ -153,6 +159,21 @@ beforeEach(() => {
   mockPrisma.$transaction.mockImplementation((arg: unknown) =>
     typeof arg === 'function' ? (arg as (tx: unknown) => unknown)(mockPrisma) : Promise.all(arg as Promise<unknown>[]),
   );
+  // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so the job needs one -
+  // otherwise /assign and /assignees answer 400 (unexpressible) and the AUTHORIZATION question
+  // these cases are actually asking never gets reached.
+  mockPrisma.visit.findMany.mockResolvedValue([
+    {
+      id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_ID, lead_id: null, visit_seq: 1,
+      status: 'SCHEDULED', scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+      scheduled_end: new Date('2026-10-01T11:00:00.000Z'), is_all_day: false,
+      created_at: new Date('2026-09-01T00:00:00.000Z'),
+      en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+    },
+  ]);
+  mockPrisma.visitAssignee.findMany.mockResolvedValue([]);
+  mockPrisma.visitAssignee.createMany?.mockResolvedValue?.({ count: 1 });
+  mockPrisma.visitAssignee.deleteMany?.mockResolvedValue?.({ count: 0 });
   mockPrisma.jobLineItem.findMany.mockResolvedValue([]);
   mockPrisma.jobLineItem.create.mockResolvedValue({ id: LINE_ID, job_id: JOB_ID, sequence: 1 });
   mockPrisma.jobLineItem.update.mockResolvedValue({ id: LINE_ID, job_id: JOB_ID });
@@ -234,7 +255,7 @@ describe('a technician assigned to a job somebody else created', () => {
   });
 });
 
-// ══ 2. CREATOR, UNASSIGNED - the permanence property ════════════════════════════════════════
+// ══ 2. CREATOR, UNSCHEDULED - the permanence property ════════════════════════════════════════
 describe('the creator of a job who has since been taken off the crew', () => {
   beforeEach(() => useJob(CREATED_JOB()));
 

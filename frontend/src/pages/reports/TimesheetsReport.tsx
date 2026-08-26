@@ -12,7 +12,7 @@ import { SelectField } from '@/components/form/SelectField';
 import { ChartCard } from '@/components/charts';
 import { token } from '@/design-system';
 import { STATUS_INTENT_CLASSES, STATUS_REGISTRY } from '@/design-system/status-registry';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { GeofenceSettingsDialog } from '@/components/timeclock/GeofenceSettingsDialog';
 import { EmployeePayrollCard } from '@/components/timeclock/EmployeePayrollCard';

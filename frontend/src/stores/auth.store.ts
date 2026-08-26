@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { supabase } from '@/lib/supabase';
 import api from '@/lib/axios';
+import { clearQueryCache } from '@/lib/queryClient';
+import { resetAccountScopedStores } from '@/lib/storeReset';
 import { extractApiError } from '@/lib/utils';
 import {
   buildAbility,
@@ -230,6 +232,11 @@ export const useAuthStore = create<AuthState>((set) => {
     await supabase.auth.signOut();
     setCachedUser(null);
     setCachedAbilityRules(null);
+    // Signing back in is a client-side navigation, so nothing else drops the previous
+    // account's cached data. clearQueryCache() covers TanStack Query; the Zustand stores are
+    // module singletons that outlive the logout on their own and need resetting explicitly.
+    clearQueryCache();
+    resetAccountScopedStores();
     set({ user: null, ability: emptyAbility, isAuthenticated: false, error: null });
   },
 
@@ -242,6 +249,12 @@ export const useAuthStore = create<AuthState>((set) => {
       const { data } = await api.get('/api/auth/me');
       const rules: AbilityRule[] = data.abilityRules ?? [];
       const ability = buildAbility(rules);
+
+      // Belt and braces on top of the sign-out clear: whoever the backend says we are now
+      // is the only identity the cache may hold data for. A session that changes identity
+      // without passing through logout() (OAuth completing over a dead session, a restored
+      // session belonging to someone else) must not inherit the previous user's queries.
+      if (getCachedUser()?.id && getCachedUser()?.id !== data.user.id) clearQueryCache();
 
       setCachedUser(data.user);
       setCachedAbilityRules(rules);

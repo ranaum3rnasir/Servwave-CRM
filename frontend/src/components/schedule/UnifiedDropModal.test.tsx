@@ -17,7 +17,8 @@ const MEMBERS: AssignableUser[] = [
 ];
 
 const bucketJob: SchedulableEvent = {
-  id: 'job-1',
+  boardId: 'job-1',
+  parentId: 'job-1',
   type: 'job',
   number: 'J00043',
   title: 'Rooftop Unit Swap',
@@ -74,17 +75,19 @@ describe('UnifiedDropModal (D5)', () => {
     expect(await screen.findByText('Alice Ng')).toBeInTheDocument();
     // Drop-derived values. Date is a DatePicker now - displays MM/DD/YYYY (typeable
     // text), not the native input's raw 'yyyy-MM-dd'.
-    expect(screen.getByLabelText('Date')).toHaveValue('06/10/2026');
+    expect(screen.getByLabelText('Start date')).toHaveValue('06/10/2026');
     // TimeCombobox renders 12-hour text; the native input showed a 24-hour clock
     // in any non-US browser locale, and this is a US-only product.
     expect(screen.getByLabelText('Start time')).toHaveValue('9:00 AM');
-    // Duration is now a SelectField (Radix trigger button, not a native <select>)
-    // — assert on the rendered label instead of a DOM `.value`.
-    expect(screen.getByLabelText('Duration')).toHaveTextContent('2 hours');
+    // The drop's duration reads as an end, not as a Duration dropdown: the drop modal
+    // stores start + durationMin internally, and converts at its own seam.
+    expect(screen.getByLabelText('End date')).toHaveValue('06/10/2026');
+    expect(screen.getByLabelText('End time')).toHaveValue('11:00 AM');
+    expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
     // Auto-fill highlights (member-day: all three came from the drop). Date's ring
     // now wraps the whole DatePicker control (input + calendar-icon button) via its
     // own wrapper div, not the bare input directly.
-    expect(screen.getByLabelText('Date').parentElement?.className).toContain('ring-ai');
+    expect(screen.getByLabelText('Start date').parentElement?.className).toContain('ring-ai');
     expect(screen.getByLabelText('Start time').parentElement?.className).toContain('ring-ai');
     // Caption explains the highlight language
     expect(screen.getByText(/auto-filled from where you dropped/)).toBeInTheDocument();
@@ -100,7 +103,25 @@ describe('UnifiedDropModal (D5)', () => {
     const { onChange } = renderModal();
     fireEvent.change(screen.getByLabelText('Start time'), { target: { value: '1:30 PM' } });
     fireEvent.blur(screen.getByLabelText('Start time'));
-    expect(onChange).toHaveBeenCalledWith({ start: new Date(2026, 5, 10, 13, 30), autoTime: false });
+    // The duration rides along unchanged: moving the start drags the end with it, so a
+    // 2-hour slot stays a 2-hour slot rather than silently stretching to the old end.
+    expect(onChange).toHaveBeenCalledWith({
+      start: new Date(2026, 5, 10, 13, 30),
+      durationMin: 120,
+      autoTime: false,
+    });
+  });
+
+  it('shows the end time the drop implies, and editing it re-derives the duration', () => {
+    const { onChange } = renderModal();
+    expect(screen.getByLabelText('End time')).toHaveValue('11:00 AM');
+    fireEvent.change(screen.getByLabelText('End time'), { target: { value: '12:30 PM' } });
+    fireEvent.blur(screen.getByLabelText('End time'));
+    // Start is untouched; only the span changed.
+    expect(onChange).toHaveBeenCalledWith({
+      start: new Date(2026, 5, 10, 9, 0),
+      durationMin: 210,
+    });
   });
 
   it('renders the advisory conflict banner — proceed is still allowed', () => {
@@ -111,9 +132,16 @@ describe('UnifiedDropModal (D5)', () => {
     expect(screen.getByRole('button', { name: 'Schedule' })).toBeEnabled();
   });
 
-  it('keeps a nonstandard duration selectable', () => {
+  it('renders a nonstandard duration as the end it implies', () => {
     renderModal({ draft: { ...memberDayDraft(), durationMin: 75 } });
-    expect(screen.getByLabelText('Duration')).toHaveTextContent('1.25 hours');
+    expect(screen.getByLabelText('End time')).toHaveValue('10:15 AM');
+  });
+
+  it('ignores an end dragged back before the start - the draft cannot hold one', () => {
+    const { onChange } = renderModal();
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '06/09/2026' } });
+    fireEvent.blur(screen.getByLabelText('End date'));
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it('Confirm calls onConfirm once — the page owns posting, the modal never POSTs', () => {
@@ -134,7 +162,7 @@ describe('UnifiedDropModal (D5)', () => {
 //
 //   before  <div><Label htmlFor={uid-date}>Date</Label>
 //                <Input id={uid-date} className={cn('mt-1', ...)} /></div>
-//   after   <FormField label="Date" htmlFor={uid-date}>
+//   after   <FormField label="Start date" htmlFor={uid-date}>
 //                <Input className={cn(...)} /></FormField>
 //
 // The label's own class string is unchanged (FormField renders the same
@@ -169,7 +197,7 @@ const INPUT_CLASS =
 describe('UnifiedDropModal - FormField adoption (phase 11b)', () => {
   it('wires one generated id to BOTH the label and the control, for Date and Start time alike', () => {
     renderModal();
-    for (const name of ['Date', 'Start time']) {
+    for (const name of ['Start date', 'Start time']) {
       const control = screen.getByLabelText(name) as HTMLInputElement;
       const label = screen.getByText(name);
       expect(control.id).toBeTruthy();
@@ -179,12 +207,12 @@ describe('UnifiedDropModal - FormField adoption (phase 11b)', () => {
       expect(control).not.toHaveAttribute('aria-invalid');
     }
     // The two fields do not collide on one id.
-    expect(screen.getByLabelText('Date').id).not.toBe(screen.getByLabelText('Start time').id);
+    expect(screen.getByLabelText('Start date').id).not.toBe(screen.getByLabelText('Start time').id);
   });
 
   it('renders the field through Stack at FormField\'s default gap, with mt-1 off the control', () => {
     renderModal();
-    const date = screen.getByLabelText('Date');
+    const date = screen.getByLabelText('Start date');
     // DatePicker's own wrapper (input + calendar-icon button) sits directly under
     // FormField's Stack now, not the bare input - Stack is the grandparent.
     expect(date.parentElement?.parentElement?.getAttribute('class')).toBe('flex flex-col gap-1.5');
@@ -193,7 +221,7 @@ describe('UnifiedDropModal - FormField adoption (phase 11b)', () => {
 
   it('leaves the label class string exactly as the pre-conversion Label rendered it', () => {
     renderModal();
-    expect(screen.getByText('Date').getAttribute('class')).toBe(LABEL_CLASS);
+    expect(screen.getByText('Start date').getAttribute('class')).toBe(LABEL_CLASS);
     expect(screen.getByText('Start time').getAttribute('class')).toBe(LABEL_CLASS);
   });
 
@@ -203,7 +231,7 @@ describe('UnifiedDropModal - FormField adoption (phase 11b)', () => {
     // wraps the WHOLE control via its wrapper div rather than sitting on the
     // input - the native <input type="time"> it replaces rendered a 24-hour
     // clock in any non-US browser locale.
-    for (const name of ['Date', 'Start time']) {
+    for (const name of ['Start date', 'Start time']) {
       expect(screen.getByLabelText(name).parentElement?.getAttribute('class')).toBe(
         'flex items-stretch gap-1 ring-2 ring-ai',
       );
@@ -212,7 +240,7 @@ describe('UnifiedDropModal - FormField adoption (phase 11b)', () => {
 
   it('emits the bare control class when the drop did not seed that field', () => {
     renderModal({ draft: { ...memberDayDraft(), autoDate: false, autoTime: false } });
-    for (const name of ['Date', 'Start time']) {
+    for (const name of ['Start date', 'Start time']) {
       expect(screen.getByLabelText(name).parentElement?.getAttribute('class')).toBe('flex items-stretch gap-1');
     }
   });

@@ -9,6 +9,7 @@ import { parseArrayParam } from '../lib/query/parseArrayParam';
 import { applyFilters } from '../lib/query/filterEngine';
 import { jobFacets } from '../lib/query/registries/job.filters';
 import { tenantWhere } from '../lib/tenant';
+import { isBareOrgDay, orgDayRange, orgDayStart, addOrgDays } from '../lib/orgDayRange';
 import { allocateNumber } from '../lib/numbering';
 import { computeJobBilling } from '../lib/jobBilling';
 import { recomputeInvoiceTotals } from '../lib/invoice-totals';
@@ -50,16 +51,26 @@ import { jobLineToInvoiceLineCreate } from '../lib/invoice-lines-from-job';
 import type { Action, Subject } from '../lib/permissions/catalog';
 import { isAssignable, isDispatcherEligible } from '../lib/permissions/assignableRoles';
 import { canAccessRow, canActOnRow, scopeWhereForReq, canSeePricing } from '../lib/permissions/enforce';
+import { jobCrewIds, isOnJobCrew, projectJobCrewUnion } from '../lib/job-crew';
+import { projectJobScheduleFields, resolveJobScheduleWindow } from '../lib/job-schedule-projection';
 import { validationFailure, zodValidationFailure } from '../middleware/validate';
+import { sendJobScheduledEmail, sendJobRescheduledEmail, sendJobVisitCancelledEmail, type EmailDispatchResult, type OrganizationBrandingSubset } from '../lib/email';
+import { getOrgTimezone, DEFAULT_TIMEZONE, getRequestOrgTimezone } from '../lib/timezone';
 import { emit } from '../services/notifications/notificationService';
 import { dispatchAutomationEvent } from '../services/automations/dispatch';
 import { rearmAnchoredWaits } from '../services/automations/enrollment';
+import { visitMergeFields } from '../services/automations/context';
 import { resolveScheduleJobNotifications } from '../services/notifications/resolveNotifications';
 import { addOrFilter } from '../lib/permissions/whereCompose';
 import { logAudit } from '../lib/audit';
+// Editable record IDs (plan decision #7) - the shared rename engine (record-renumber.ts). Read
+// vs. write split: computeRenumber is safe outside a transaction (preview), applyRenumber must
+// run inside the same locked transaction that holds the parent row lock (rename).
+import { computeRenumber, applyRenumber, type RenumberComputation } from '../lib/record-renumber';
 import { milestoneClears, clearsCompletion } from '../lib/job-milestones';
 import { subStatusClears } from '../lib/job-sub-status';
-import { walkthroughSnapshotSelect, projectLeadWalkthroughFields } from '../services/walkthrough.service';
+import { deriveJobStatusFromVisits } from '../lib/job-status';
+import { walkthroughSnapshotSelect, projectLeadWalkthroughFields, projectLeadVisitCrew, createJobVisit, syncJobFromVisits, stampVisitMilestone, stampCurrentJobVisitMilestone, cancelWalkthroughRow, LIVE_VISIT_STATUSES, type VisitMilestone, nextVisitSeqForJob, withVisitSeqRetry, rescheduleVisitRow, listJobVisits, syncJobWindowOntoVisits, replaceWalkthroughPerformers, applyJobCrewStatementToVisit, resolveCurrentJobVisit } from '../services/walkthrough.service';
 
 // ─── Select Objects ────────────────────────────────────
 
@@ -88,11 +99,45 @@ const jobListSelect = {
   sub_status: { select: { id: true, label: true } },
   job_type: true,
   scope_notes: true,
-  scheduled_start: true,
-  scheduled_end: true,
+  // Multi-visit S6: the board fans one job row out into one card per trip, so the trips have to
+  // travel with the row - the per-job GET /api/jobs/:id/visits cannot serve a 500-job board.
+  // No `orderBy`: the house rule (listJobVisits, syncJobFromVisits) is that ordering is applied
+  // in CODE, because a delegated orderBy is invisible to the mocked-Prisma seam - and the board
+  // sorts by time itself anyway. This also lands on exportAll(), which shares this select; that
+  // is additive and the CSV builder reads named columns.
+  // Multi-visit S8: NO `where` on the status. The visit set is now the SOURCE of the derived
+  // `assignees` wire key, and a technician crewed only on a called-off trip must still appear -
+  // the row scope admits them, so the payload must not hide them. The board is unaffected:
+  // frontend/src/components/schedule/eventAdapters.ts already filters CANCELLED in code.
+  // S8 (A5, RATIFIED): also the SOURCE of the derived `scheduled_start`/`scheduled_end`/
+  // `is_all_day` wire keys - the stored mirror is gone, so `created_at` rides along for
+  // projectJobScheduleFields' tie-break (see lib/job-schedule-projection.ts).
+  visits: {
+    select: {
+      id: true,
+      visit_seq: true,
+      status: true,
+      scheduled_at: true,
+      scheduled_end: true,
+      is_all_day: true,
+      created_at: true,
+      // S7 (user story 40): "what did we tell the customer, and when". This select names its
+      // fields, so unlike the per-job visits route - findMany with `include` and no select, which
+      // ships every column automatically - a new column never reaches the board unless it is
+      // added HERE. That asymmetry is the trap this line exists to close.
+      customer_email_sent_at: true,
+      assignees: {
+        select: {
+          user_id: true,
+          user: { select: { id: true, first_name: true, last_name: true } },
+        },
+      },
+    },
+  },
   created_at: true,
-  customer: { select: { id: true, customer_number: true, first_name: true, last_name: true, company_name: true, phone: true } },
-  assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+  // email joins phone here for SRVW-243: the schedule board's reschedule composer
+  // shows the address it is about to mail, and it builds that from these list rows.
+  customer: { select: { id: true, customer_number: true, first_name: true, last_name: true, company_name: true, phone: true, email: true } },
   service_location: { select: { id: true, address_line1: true, city: true, state: true } },
   estimate: { select: { lead: { select: { commission_owner: { select: { id: true, first_name: true, last_name: true } } } } } },
   // Money-not-status reschedule gate (Spec B1, B-2): the schedule board needs to know whether
@@ -122,12 +167,11 @@ const jobDetailSelect = {
   overhead_value: true,
   estimated_duration: true,
   completion_notes: true,
-  scheduled_start: true,
-  scheduled_end: true,
-  is_all_day: true,
+  // S8 (A5, RATIFIED): scheduled_start/scheduled_end/is_all_day are DROPPED as stored columns.
+  // The wire keys are served on read - projectJobScheduleFields computes them off `visits[]`
+  // below (see lib/job-schedule-projection.ts). en_route_at/on_site_at are dropped outright with
+  // no replacement: every reader of those two names is on the VISIT, never the job.
   started_at: true,
-  en_route_at: true,
-  on_site_at: true,
   completed_at: true,
   cancelled_at: true,
   cancelled_reason: true,
@@ -157,15 +201,33 @@ const jobDetailSelect = {
       department: { select: { id: true, name: true } },
     },
   },
-  // Job crew (M2M). The legacy single-assignee + walkthrough FKs are dropped in
-  // TG7 — Job-level walkthrough fields are dead (walkthroughs live on the lead,
-  // surfaced via estimate.lead.walkthrough_performers below).
-  assignees: {
+  // Job crew (multi-visit S8, D6). The job-assignee join table is GONE - crew lives on the visit,
+  // and "the job's crew" is the derived UNION across every trip. The WIRE KEY `assignees` is
+  // unchanged: projectJobCrewUnion below rebuilds it from these rows, which is what keeps every
+  // client reader (TeamCard, the board's technician lanes, insights, the copilot tools) working
+  // untouched. NO status filter - a called-off trip's crew still reaches the job, matching the
+  // row scope, which has no status filter either. Narrowing here would offer a technician a job
+  // the API then 403s, or the reverse.
+  // S8 (A5, RATIFIED): also the source of `scheduled_start`/`scheduled_end`/`is_all_day` -
+  // `created_at` rides along for projectJobScheduleFields' tie-break.
+  visits: {
     select: {
-      user: {
+      id: true,
+      visit_seq: true,
+      status: true,
+      scheduled_at: true,
+      scheduled_end: true,
+      is_all_day: true,
+      created_at: true,
+      assignees: {
         select: {
-          id: true, first_name: true, last_name: true, role: true, phone: true, email: true, avatar_path: true,
-          department: { select: { id: true, name: true } },
+          user_id: true,
+          user: {
+            select: {
+              id: true, first_name: true, last_name: true, role: true, phone: true, email: true, avatar_path: true,
+              department: { select: { id: true, name: true } },
+            },
+          },
         },
       },
     },
@@ -195,8 +257,8 @@ const jobDetailSelect = {
           // Walkthrough-as-entity redesign, PR-B2: the three walkthrough_* fields below are no
           // longer raw legacy columns - presentJobDetail's projectLeadWalkthroughFields call
           // sources them from this relation instead, resolving D15's "current visit".
-          walkthroughs: { select: walkthroughSnapshotSelect },
-          walkthrough_performers: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+          // S8 (D6): the crew rides on the trips - `visit_assignees.lead_id` is dropped.
+          visits: { select: { ...walkthroughSnapshotSelect, assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } } } },
           commission_owner: { select: { id: true, first_name: true, last_name: true, email: true, avatar_path: true } },
         },
       },
@@ -394,6 +456,25 @@ export const assignJobSchema = z.object({
   scheduled_end: z.string().datetime({ offset: true }).optional(),
   is_all_day: z.boolean().optional(),
   force: z.boolean().optional(),
+  // SRVW-243 - "tell the customer", as an ACTION rather than a prediction. The
+  // confirm dialog used to assert that notification emails were going out while
+  // nothing sent at all; this flag is what makes the assertion true, and its
+  // absence is what makes the silence honest. Default-off deliberately: an org
+  // whose customers are realtors does not want a mail every time a slot shifts.
+  // Declared BEFORE the .refine() below - a ZodEffects has no .shape, so a key
+  // added after it is invisible to anything that introspects this schema.
+  notify_customer: z.boolean().optional(),
+  // SRVW-243 compose fields, mirroring sendEstimateSchema's contract
+  // (recipient_email / cc_emails max 5 / message_body max 5000). Prefixed
+  // `notify_` because this endpoint's subject is scheduling - the compose rides
+  // along with it.
+  //
+  // notify_recipient_email is a ONE-OFF override and is deliberately never
+  // written back to the customer row: sending today's notice to the office
+  // manager is not the same statement as changing where all future mail goes.
+  notify_recipient_email: z.string().email().optional(),
+  notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+  notify_message: z.string().max(5000).optional(),
 }).refine(
   (data) => {
     const hasStart = Boolean(data.scheduled_start);
@@ -447,7 +528,7 @@ export const noteSchema = z.object({
 // `default-job-en-route` is a seeded, enabled, customer-recipient automation in every org
 // (recipients: ['customer']) and enRoute() dispatches it whenever the job has crew, so a bulk
 // en-route would message every selected job's customer "we're on the way" with no technician
-// actually driving. SCHEDULED/UNASSIGNED are absent too - those are schedule writes, not status
+// actually driving. SCHEDULED/UNSCHEDULED are absent too - those are schedule writes, not status
 // changes. The duplicate-ids refine matters because the API (unlike the UI) can be sent one:
 // without it a repeated id would run the verb twice, doubling its TimelineEvent/emit/dispatch.
 export const bulkStatusJobsSchema = z
@@ -469,6 +550,11 @@ export const bulkAssignJobsSchema = z
     notify: z.object({ in_app: z.boolean().optional(), email: z.boolean().optional() }).optional(),
   })
   .refine((d) => new Set(d.ids).size === d.ids.length, { message: 'Duplicate job ids', path: ['ids'] });
+
+// Editable record IDs (plan decision #7) - shared by both the preview and rename doors below.
+// The charset/length/numeric-cap rules live in record-renumber.ts's own validateNumberFormat
+// (called from computeRenumber) - this schema only needs `number` present and a string.
+export const jobNumberSchema = z.object({ number: z.string() }).strict();
 
 // ─── Helpers ───────────────────────────────────────────
 
@@ -576,14 +662,15 @@ function stripJobPricingForRequester<T extends Record<string, unknown>>(job: T, 
  * lets an admin grant a technician an advance verb (or update/create Job) per-user WITHOUT read
  * Invoice, which is exactly that leak. A no-op for invoice readers (the strip early-returns).
  */
-// Walkthrough-as-entity redesign, PR-B2: jobDetailSelect's nested `estimate.lead.walkthroughs`
+// Walkthrough-as-entity redesign, PR-B2: jobDetailSelect's nested `estimate.lead.visits`
 // relation (see the select above) needs projecting onto the legacy walkthrough_* field NAMES the
 // job detail page already reads off `job.estimate.lead`. A no-op for a standalone (lead-less)
 // job, whose `estimate`/`estimate.lead` is null.
 function projectJobEstimateLeadWalkthrough<T extends { estimate?: { lead?: unknown } | null }>(job: T): T {
   const lead = job.estimate?.lead;
   if (!lead) return job;
-  return { ...job, estimate: { ...job.estimate, lead: projectLeadWalkthroughFields(lead as never, { full: true }) } } as T;
+  // S8: the crew flatten runs FIRST - projectLeadWalkthroughFields strips `visits`.
+  return { ...job, estimate: { ...job.estimate, lead: projectLeadWalkthroughFields(projectLeadVisitCrew(lead as never), { full: true }) } } as T;
 }
 
 type PersonWithAvatarPath = { avatar_path?: string | null } & Record<string, unknown>;
@@ -625,7 +712,13 @@ async function presentJobDetail<
 >(req: Request, job: T | null) {
   const tagged = await withTags(req, job);
   if (!tagged) return null;
-  const withAvatars = await withPersonAvatars(tagged);
+  // BEFORE withPersonAvatars: that helper signs every crew member's avatar off `job.assignees`,
+  // so the union has to exist by then. S8 (A5, RATIFIED): schedule projection composes with crew
+  // projection in the SAME order presentJobDetail always ran them in - crew first (it needs the
+  // raw `visits[].assignees` shape), schedule second (a pure read of `visits[]`, order-agnostic
+  // with crew but kept after it for one clear pipeline).
+  const withCrewAndSchedule = projectJobScheduleFields(projectJobCrewUnion(tagged as Record<string, unknown>)) as typeof tagged;
+  const withAvatars = await withPersonAvatars(withCrewAndSchedule);
   return withRemainingUnbilled(stripJobPricingForRequester(projectJobEstimateLeadWalkthrough(withAvatars), req));
 }
 
@@ -639,23 +732,69 @@ async function presentJobDetail<
 type CrewMember = { id: string; email: string | null; first_name: string; last_name: string };
 
 /**
- * REPLACE semantics: the array IS the new crew. Diffs against the current crew inside the
- * transaction and applies the delta. Returns {added, removed} (user-id arrays) for diff-emails.
+ * Q3 (multi-visit S6 follow-up): does the INCOMING crew set actually differ from the CURRENT one?
+ * Order-insensitive, duplicate-insensitive - `assignee_ids` is a restated SET, not an ordered list,
+ * so `[B, A]` restating `[A, B]` is not a change, and neither is `[A, A]` restating `[A]`.
+ *
+ * This is the gate that decides whether naming a crew on a reschedule-shaped door requires `assign
+ * Job`. Two defects lived on the old `assignee_ids.length > 0` test, in opposite directions:
+ * `assignee_ids: []` on a crewed visit skipped the gate and wiped the crew (length is 0), and a
+ * reschedule-only grantee restating the visit's UNCHANGED crew was false-403'd (length is > 0) -
+ * VisitScheduleDialog sends `assignee_ids` whenever the picker is shown, on every save, whether or
+ * not the user touched it. Comparing SETS fixes both: an empty restatement over a crewed visit IS
+ * a change (gated), and an identical restatement is NOT (ungated).
  */
-async function replaceJobCrew(
+function crewSetChanged(currentIds: string[], incomingIds: string[]): boolean {
+  const current = new Set(currentIds);
+  const incoming = new Set(incomingIds);
+  if (current.size !== incoming.size) return true;
+  for (const id of current) if (!incoming.has(id)) return true;
+  return false;
+}
+
+/**
+ * Multi-visit S8 (D6): a JOB-LEVEL crew statement, landed on the job's CURRENT visit.
+ *
+ * `job_assignees` is dropped, so "the job's crew" has no storage of its own - crew lives on the
+ * trip. resolveCurrentJobVisit answers the question the office is actually asking ("the trip the
+ * crew is standing at"), and applyJobCrewStatementToVisit applies the statement as a DELTA on
+ * that one trip rather than as a wholesale restatement, because a job can have several trips with
+ * different crews.
+ *
+ * THE HONEST CONSEQUENCE: a job with NO trip at all cannot hold crew, and this throws rather than
+ * writing nothing. It is a visible product change, not a refactor, and it is the direct
+ * consequence of D6 plus D16 - the only alternative, an untimed live visit created to hold the
+ * crew, would make deriveJobStatusFromVisits answer SCHEDULED for a job with no date.
+ *
+ * REJECTED ALTERNATIVE: create the trip here, untimed, so the statement always succeeds. That is
+ * exactly the D16 violation above, and it would also invent a trip the customer was never told
+ * about - D19 keeps visit rows forever, so an invented one is permanent.
+ */
+export class NoVisitForCrewError extends Error {}
+
+async function setJobCrewOnCurrentVisit(
   tx: Prisma.TransactionClient,
-  jobId: string,
-  orgId: string,
-  userIds: string[],
+  opts: { jobId: string; orgId: string; previousJobCrew: string[]; statedCrew: string[] },
 ): Promise<{ added: string[]; removed: string[] }> {
-  const current = await tx.jobAssignee.findMany({ where: { job_id: jobId }, select: { user_id: true } });
-  const currentIds = new Set(current.map((c) => c.user_id));
-  const next = new Set(userIds);
-  const added = [...next].filter((id) => !currentIds.has(id));
-  const removed = [...currentIds].filter((id) => !next.has(id));
-  if (removed.length) await tx.jobAssignee.deleteMany({ where: { job_id: jobId, user_id: { in: removed } } });
-  if (added.length) await tx.jobAssignee.createMany({ data: added.map((user_id) => ({ job_id: jobId, user_id, organization_id: orgId })) });
-  return { added, removed };
+  // LIVE trips only, exactly as this function's twin stampCurrentJobVisitMilestone does.
+  // resolveCurrentJobVisit's `begun` predicate is "not SCHEDULED, or already started", which a
+  // COMPLETED or CANCELLED row satisfies - and being the later row it then WINS the reduce. Handed
+  // the whole set, a crew statement lands on yesterday's finished trip: it rewrites the record of
+  // who did that work (D19 keeps the row as history), leaves next week's trip on the old crew, and
+  // tells a technician they were dropped from a job they are still booked on.
+  const visits = await tx.visit.findMany({
+    where: { job_id: opts.jobId, organization_id: opts.orgId, status: { in: [...LIVE_VISIT_STATUSES] } },
+    select: { id: true, status: true, scheduled_at: true, scheduled_end: true, created_at: true },
+  });
+  const current = resolveCurrentJobVisit(visits as never[]);
+  if (!current) throw new NoVisitForCrewError('This job has no upcoming visit, so crew cannot be assigned to it. Schedule a visit first.');
+  return applyJobCrewStatementToVisit(tx, {
+    visitId: (current as { id: string }).id,
+    orgId: opts.orgId,
+    isNewVisit: false,
+    previousJobCrew: opts.previousJobCrew,
+    statedCrew: opts.statedCrew,
+  });
 }
 
 /**
@@ -680,15 +819,43 @@ async function validateCrew(
   return { ok: true, users };
 }
 
+/** Q6: who is actually double-booked, and on what job/lead. */
+type ConflictCrewMember = { id: string; name: string };
+
 type ScheduleConflict =
-  | { type: 'job'; id: string; number: string; start: Date | null; end: Date | null }
-  | { type: 'walkthrough'; id: string; number: string; start: Date | null; end: Date };
+  | { type: 'job'; id: string; number: string; start: Date | null; end: Date | null; crew: ConflictCrewMember[]; customer_name: string | null }
+  | { type: 'walkthrough'; id: string; number: string; start: Date | null; end: Date; crew: ConflictCrewMember[]; customer_name: string | null };
+
+// Q6: the SAME "first + last, else company, else nothing" convention notifyCustomerOfSchedule uses
+// for the outgoing email, reused here so the 409 body names the customer the same way the email a
+// moment later will.
+function conflictCustomerName(
+  c: { first_name?: string | null; last_name?: string | null; company_name?: string | null } | null | undefined,
+): string | null {
+  if (!c) return null;
+  return [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company_name || null;
+}
+
+// Q6: the INTERSECTION of the candidate ids and the crew actually on THIS record - the people who
+// are double-booked, not the record's whole crew. `crewOnRecord` may be undefined against an older
+// mock/fixture that has not been widened for this select; treated as empty rather than throwing.
+function conflictingCrew(
+  candidateIds: string[],
+  crewOnRecord: { user_id: string; user: { first_name: string; last_name: string } | null }[] | undefined,
+): ConflictCrewMember[] {
+  const byId = new Map((crewOnRecord ?? []).map((a) => [a.user_id, a.user]));
+  return candidateIds.flatMap((id) => {
+    const user = byId.get(id);
+    return user ? [{ id, name: `${user.first_name} ${user.last_name}`.trim() }] : [];
+  });
+}
 
 /**
  * Per-member conflict detection. For each candidate user, finds overlapping SCHEDULED/IN_PROGRESS
  * jobs (crew M2M) and scheduled walkthroughs (walkthrough-performer M2M) in the same time window.
- * Returns the conflicts in the EXACT existing 409 entry shape (type/id/number/start/end) — the FE
- * retry path + the jobs.test.ts conflict assertion read this shape, so it is kept byte-stable.
+ * Returns the conflicts in the EXISTING 409 entry shape (type/id/number/start/end) PLUS Q6's
+ * additive `crew`/`customer_name` — the FE retry path + the jobs.test.ts conflict assertion read
+ * the original keys verbatim, so those stay byte-stable; only new keys were added.
  */
 async function detectCrewConflicts(
   req: Request,
@@ -697,55 +864,178 @@ async function detectCrewConflicts(
   if (opts.userIds.length === 0) return [];
   const { schedStart, schedEnd } = opts;
 
+  // Multi-visit S6 (B7): the window this query asks about is the job's VISIT set, not the
+  // Job.scheduled_start mirror. The mirror only ever holds the NEXT upcoming trip, so a clash
+  // against another job's SECOND visit - at a window the mirror does not hold - went unwarned.
+  // That residual gap was written down in this function's own comment and assigned to S6.
+  //
+  // Multi-visit S8 (D6): crew is matched through the VISITS relation, because `job_assignees` is
+  // gone and the visit crew is now the only crew there is. S6's note that the job-level rows were
+  // the superset expired with the table. The crew predicate and the window predicate are two
+  // SEPARATE `visits: { some: ... }` clauses composed under AND, deliberately: merging them into
+  // one `some` would ask "is there a trip that BOTH overlaps this window AND carries this person",
+  // which silently stops warning about a person on the job's other trip.
+  const jobVisitOverlap = {
+    status: { not: 'CANCELLED' as const },
+    scheduled_at: { lt: schedEnd },
+    scheduled_end: { gt: schedStart },
+  };
+
   const [jobConflicts, walkthroughConflicts] = await Promise.all([
     prisma.job.findMany({
       where: {
         ...tenantWhere(req),
         id: { not: opts.jobId },
-        assignees: { some: { user_id: { in: opts.userIds } } },
-        // Spec B1 (Task 5): a technician physically on site (or en route) still occupies the
-        // slot -- this previously only checked SCHEDULED/IN_PROGRESS, so a double-booking check
-        // missed a crew member who had already advanced past SCHEDULED for the conflicting job.
-        status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] },
-        scheduled_start: { lt: schedEnd },
-        scheduled_end: { gt: schedStart },
+        AND: [{ visits: { some: { assignees: { some: { user_id: { in: opts.userIds } } } } } }],
+        // Spec B1 (Task 5): a technician physically on site still occupies the slot -- this
+        // previously only checked SCHEDULED/IN_PROGRESS, so a double-booking check missed a crew
+        // member who had already advanced past SCHEDULED for the conflicting job. S4 retires
+        // EN_ROUTE/ON_SITE from JobStatus (they are VisitStatus values now), and a job whose crew
+        // is en route or on site reads SCHEDULED or IN_PROGRESS, so both are still covered here.
+        status: { in: ['SCHEDULED', 'IN_PROGRESS'] },
+        visits: { some: jobVisitOverlap },
       },
-      select: { id: true, job_number: true, scheduled_start: true, scheduled_end: true },
+      // The SAME predicate on the nested read, so each overlapping trip maps to exactly one
+      // 409 entry - and a job whose other trips sit elsewhere contributes only the clashing one.
+      // Q6: widened with the customer's display-name fields and the OVERLAPPING visit's own
+      // assignees, so the entry can name who is actually double-booked and whose job it is,
+      // without a second round-trip.
+      select: {
+        id: true,
+        job_number: true,
+        customer: { select: { first_name: true, last_name: true, company_name: true } },
+        visits: {
+          where: jobVisitOverlap,
+          select: {
+            id: true,
+            scheduled_at: true,
+            scheduled_end: true,
+            assignees: { select: { user_id: true, user: { select: { first_name: true, last_name: true } } } },
+          },
+        },
+      },
     }),
     // Walkthrough-as-entity redesign, PR-B2: repointed from Lead.status/walkthrough_scheduled_at
     // onto the Walkthrough row's own status/scheduled_at.
-    prisma.walkthrough.findMany({
+    //
+    // Multi-visit S3: `lead_id: { not: null }` means this query is about WALKTHROUGH conflicts
+    // specifically. `visits` is now shared by lead walkthroughs and job visits (D5: exactly one
+    // parent), and from S3 a job visit carries crew, so without this predicate a crewed job visit
+    // matches `assignees.some` and then has no lead to name below - a 500 out of the two most-used
+    // scheduling endpoints, which is the one outcome D21's "warn, never block" definitely forbids.
+    // Same guard, same reason, as dashboard.controller.ts:318 and dateAnchorSweep.ts.
+    //
+    // Deliberately NOT widened to report job-visit clashes as well: doing that means reading the
+    // visit set as the job's schedule of record (S6), and the job query above already reports the
+    // same clash through the job's own visit set, so it would emit a duplicate entry into a 409
+    // body the frontend retry path reads byte-for-byte.
+    prisma.visit.findMany({
       where: {
         ...tenantWhere(req),
-        performers: { some: { user_id: { in: opts.userIds } } },
-        status: 'SCHEDULED',
+        lead_id: { not: null },
+        assignees: { some: { user_id: { in: opts.userIds } } },
+        // Q7: the JOB arm above matches `status: { not: 'CANCELLED' }` on the overlapping visit,
+        // so a crew member EN_ROUTE/ON_SITE/IN_PROGRESS on another job still clashes. This arm
+        // matched `'SCHEDULED'` only, so the identical situation on a WALKTHROUGH - a performer
+        // already on site for one appointment - never raised a conflict for a second one booked
+        // on top of it. Aligned to the same live-status set the rest of this file uses.
+        status: { in: [...LIVE_VISIT_STATUSES] },
         scheduled_at: { not: null },
       },
-      select: { id: true, scheduled_at: true, duration_minutes: true, lead: { select: { id: true, lead_number: true } } },
+      // Q6: widened the same way as the job arm - this row's own assignees (the crew match is on
+      // THIS visit, unlike the job arm, so there is no separate "which visit" question here) and
+      // the lead's customer, for the display name.
+      select: {
+        id: true,
+        scheduled_at: true,
+        duration_minutes: true,
+        assignees: { select: { user_id: true, user: { select: { first_name: true, last_name: true } } } },
+        lead: { select: { id: true, lead_number: true, customer: { select: { first_name: true, last_name: true, company_name: true } } } },
+      },
     }),
   ]);
 
-  // Filter walkthrough conflicts by time overlap (same window math as the legacy single-tech path)
-  const wtConflicts = walkthroughConflicts.filter((wt) => {
-    if (!wt.scheduled_at) return false;
-    const wtStart = new Date(wt.scheduled_at);
-    const wtEnd = new Date(wtStart.getTime() + (wt.duration_minutes || 60) * 60_000);
-    return wtStart < schedEnd && wtEnd > schedStart;
-  });
+  // Filter walkthrough conflicts by time overlap (same window math as the legacy single-tech path).
+  // The `wt.lead` narrowing is real, not a `!` assertion: the query above is what guarantees a lead
+  // is present, so a future edit that drops the predicate must fail the TYPECHECK rather than throw
+  // at runtime on whichever unlucky org double-books first.
+  const wtConflicts = walkthroughConflicts.filter(
+    (wt): wt is typeof wt & { scheduled_at: Date; lead: { id: string; lead_number: string } } => {
+      if (!wt.scheduled_at || !wt.lead) return false;
+      const wtStart = new Date(wt.scheduled_at);
+      const wtEnd = new Date(wtStart.getTime() + (wt.duration_minutes || 60) * 60_000);
+      return wtStart < schedEnd && wtEnd > schedStart;
+    },
+  );
 
   return [
-    ...jobConflicts.map((j) => ({ type: 'job' as const, id: j.id, number: j.job_number, start: j.scheduled_start, end: j.scheduled_end })),
+    // The entry keeps the PARENT's id and number and the VISIT's times - the 409 body is read
+    // byte-for-byte by the frontend retry path and by jobs.test.ts, so those keys are unchanged.
+    // Q6 adds `crew` (the intersection of the candidates and THIS visit's own assignees - which
+    // can be empty under Q7's deliberate over-warn, when the overlapping visit is not the one
+    // that carries the matching crew member) and `customer_name`.
+    ...jobConflicts.flatMap((j) =>
+      j.visits.map((v) => ({
+        type: 'job' as const,
+        id: j.id,
+        number: j.job_number,
+        start: v.scheduled_at,
+        end: v.scheduled_end as Date,
+        crew: conflictingCrew(opts.userIds, v.assignees),
+        customer_name: conflictCustomerName(j.customer),
+      })),
+    ),
     // `id`/`number` are the LEAD's (not the Walkthrough row's) — the FE retry path and the
     // /leads/{id} link expect the lead, same as before this redesign.
     ...wtConflicts.map((w) => ({
       type: 'walkthrough' as const, id: w.lead.id, number: w.lead.lead_number,
       start: w.scheduled_at,
-      end: new Date(new Date(w.scheduled_at!).getTime() + (w.duration_minutes || 60) * 60_000),
+      end: new Date(new Date(w.scheduled_at).getTime() + (w.duration_minutes || 60) * 60_000),
+      crew: conflictingCrew(opts.userIds, w.assignees),
+      customer_name: conflictCustomerName(w.lead.customer),
     })),
   ];
 }
 
 // ─── Handlers ──────────────────────────────────────────
+
+/**
+ * The org clock for a `scheduled_after`/`scheduled_before` pair, resolved ONLY when one of
+ * the bounds is a bare org-zone day that actually needs it. The schedule board sends full
+ * ISO instants, which are zone-independent - it must not pay for an `organization` lookup on
+ * every calendar paint. Shared with the filter engine's memo, so the two never make two
+ * lookups inside one request.
+ */
+async function timezoneForBounds(
+  req: Request,
+  after: unknown,
+  before: unknown,
+): Promise<string> {
+  if (!isBareOrgDay(after) && !isBareOrgDay(before)) return DEFAULT_TIMEZONE;
+  return getRequestOrgTimezone(req as { user?: { organization_id?: string } });
+}
+
+/**
+ * The current calendar MONTH on the org's clock, as a half-open instant window
+ * `[first day 00:00 org, first day of next month 00:00 org)`.
+ *
+ * Was `new Date(now.getFullYear(), now.getMonth(), 1)` - the server's own month, which is
+ * UTC in production. That put the tile counts on a different clock from both the Scheduled
+ * column and (now) the "Completed"/"Cancelled" tiles' own click-through filter, which sends
+ * org-zone month-day strings. The tile and the list it opened disagreed by the UTC offset
+ * plus the month's last day. Half-open for the same DST reason as `orgDayRange`.
+ */
+function orgMonthWindow(timeZone: string, at: Date = new Date()): { gte: Date; lt: Date } {
+  const today = at.toLocaleDateString('en-CA', { timeZone }); // en-CA renders ISO 'YYYY-MM-DD'
+  const firstOfMonth = `${today.slice(0, 7)}-01`;
+  // Step a full 31 days off the 1st and snap back to that month's 1st: lands on the next
+  // month for every month length without any month-arithmetic special cases.
+  const firstOfNextMonth = `${addOrgDays(firstOfMonth, 31).slice(0, 7)}-01`;
+  return {
+    gte: orgDayStart(firstOfMonth, timeZone),
+    lt: orgDayStart(firstOfNextMonth, timeZone),
+  };
+}
 
 /**
  * Build the `where` clause (and the underlying grant-driven `rowScope`) for the job
@@ -778,35 +1068,76 @@ export async function buildJobListWhere(req: Request): Promise<{ where: Record<s
   // are NOT part of this registry.
   await applyFilters(where, req, jobFacets);
 
+  // Multi-visit S6: the board's date window. Hand-rolled here rather than as a `dateRange` facet
+  // for the same reason the crew filters below are hand-rolled - it must compose under AND and
+  // must never assign `where.visits`. S8 repoints the stored OWN_JOB row scope at the visits
+  // relation, at which point a bare assignment here would silently overwrite a technician's row
+  // scope: an RBAC bypass. Semantics: "this job has a trip inside the window", measured on the
+  // visit's own `scheduled_at`, NOT on the `Job.scheduled_start` mirror, which by D14 only holds
+  // the NEXT upcoming visit and therefore hid every later trip from the board.
+  //
+  // The two bounds arrive in TWO shapes and mean different things (see lib/orgDayRange.ts).
+  // The schedule board sends full ISO instants and is unchanged byte-for-byte. The list
+  // FILTER chip sends bare org-zone 'YYYY-MM-DD' days, which `new Date(...)` used to read as
+  // midnight UTC - so the inclusive "to" day was cut at its own start ("Today" was a
+  // zero-width window that could never match) and both edges sat on UTC's midnight rather
+  // than the org's, 8:00 PM the previous evening in America/New_York. The Scheduled column
+  // renders on the org clock, so the column and the filter disagreed about the day.
+  const scheduledAfter = req.query.scheduled_after as string | undefined;
+  const scheduledBefore = req.query.scheduled_before as string | undefined;
+  const scheduledWindow = (scheduledAfter || scheduledBefore)
+    ? orgDayRange(scheduledAfter, scheduledBefore, await timezoneForBounds(req, scheduledAfter, scheduledBefore))
+    : null;
+  if (scheduledWindow) {
+    (where.AND ??= [] as unknown[]);
+    // Deliberately NOT `status: { in: LIVE_VISIT_STATUSES }`: that list excludes COMPLETED, and
+    // the board asks for COMPLETED work on purpose (it paints finished cards faded). Only a
+    // called-off trip is hidden - keeping it would occupy a crew lane with work nobody is doing.
+    //
+    // The second arm is not the board's: a job that was CALLED OFF holds nothing but cancelled
+    // trips (D19 keeps the rows), so the first arm alone deletes every cancelled job from every
+    // date-range question - 263 rows on staging - and this same `where` feeds the office Jobs
+    // list, its CSV export and the copilot job tool, not only the calendar. "Show me the jobs we
+    // cancelled in March" answered "none". The arm is keyed on the JOB's own status, so it can
+    // never widen the board: the board's request pins status to SCHEDULED/IN_PROGRESS/COMPLETED
+    // at the top level, and that ANDs with this clause.
+    (where.AND as unknown[]).push({
+      OR: [
+        { visits: { some: { scheduled_at: scheduledWindow, status: { not: 'CANCELLED' } } } },
+        { status: 'CANCELLED' as const, visits: { some: { scheduled_at: scheduledWindow } } },
+      ],
+    });
+  }
+
   // Crew (M2M) filters: assignee user and/or assignee department. SECURITY: kept hand-rolled
-  // here rather than as generic engine facets — see job.filters.ts's file-level comment.
-  // `scopeWhereForReq` may have already set `where.assignees` for a row-scoped role (e.g. a
-  // TECHNICIAN's OWN_JOB grant narrows to `assignees.some.user_id: <self>`). If these params
-  // merged into that SAME `.some` clause (what the generic `relationSome` helper does), an
-  // attacker-supplied `assigned_to`/`department_id` would OVERWRITE `user_id: <self>` —
-  // widening a row-scoped user's visibility to another user's jobs (RBAC bypass). Composed
-  // under AND instead, so a pre-existing role-scoped `where.assignees` clause is preserved
-  // byte-for-byte and this becomes a SEPARATE, additive constraint. When there is no
-  // pre-existing role-scoped `where.assignees` (e.g. ADMIN/DISPATCHER), both params merge
-  // into ONE `where.assignees.some`, exactly as the pre-Task-10 code did.
+  // here rather than as generic engine facets - see job.filters.ts's file-level comment.
+  //
+  // Multi-visit S8 (D6): crew is reached THROUGH THE TRIPS. `Job.assignees` is gone with
+  // `job_assignees`, so the pre-S8 `{ assignees: { some } }` shape is not a narrower filter here,
+  // it is a `PrismaClientValidationError` - and `where` is a `Record<string, unknown>`, so tsc
+  // cannot see it and the mocked-Prisma suite never validates it. Both live callers (the Jobs
+  // list "Assigned to" chip and the schedule board's department filter) 500'd wholesale.
+  //
+  // ALWAYS composed under AND, never assigned onto `where.visits`. Two reasons, and the first is
+  // the security one: `scopeWhereForReq` may already have narrowed this requester to their own
+  // trips (TECHNICIAN's OWN_JOB is `visits.some.assignees.some.user_id: <self>`, and since the
+  // technician-ownership spec widened `read Job` it arrives wrapped in `{ OR: [...] }`). Merging
+  // attacker-supplied `assigned_to` into that SAME `.some` would OVERWRITE `user_id: <self>` and
+  // widen a row-scoped user onto somebody else's jobs. The second is plain collision: the board's
+  // date window above is also a `visits: { some: ... }` clause, and a bare assignment would drop
+  // it. Under AND both survive as separate, additive constraints.
+  //
+  // The two params still merge into ONE `assignees.some`, so `assigned_to=X&department_id=D`
+  // asks "a trip crewed by X, who is in D" rather than "a trip with X on it and a trip with
+  // anyone from D on it" - the pre-S8 meaning, kept.
   const assignedTo = parseArrayParam(req.query.assigned_to);
   const departmentId = parseArrayParam(req.query.department_id);
   if (assignedTo.length || departmentId.length) {
     const assigneeSome: Record<string, unknown> = {};
     if (assignedTo.length) assigneeSome.user_id = assignedTo.length === 1 ? assignedTo[0] : { in: assignedTo };
     if (departmentId.length) assigneeSome.user = { department_id: departmentId.length === 1 ? departmentId[0] : { in: departmentId } };
-    // `rowScope`, not `where.assignees`: a row-scoped role's fragment is not always a bare
-    // `assignees` key. Since the technician-ownership spec widened `read Job` to assigned-OR-created
-    // it arrives as `{ OR: [...] }`, and keying off `where.assignees` alone would take the else
-    // branch. That still ANDs at the top level rather than leaking, but only by luck - the explicit
-    // AND is what the security property is meant to rest on, so ask the question that matters: does
-    // this requester have ANY row scope at all.
-    if (where.assignees || Object.keys(rowScope).length > 0) {
-      (where.AND ??= [] as unknown[]);
-      (where.AND as unknown[]).push({ assignees: { some: assigneeSome } });
-    } else {
-      where.assignees = { some: assigneeSome };
-    }
+    (where.AND ??= [] as unknown[]);
+    (where.AND as unknown[]).push({ visits: { some: { assignees: { some: assigneeSome } } } });
   }
 
   const needsInvoice = req.query.needs_invoice as string | undefined;
@@ -850,15 +1181,45 @@ export async function list(req: Request, res: Response) {
       scopeWhere.source_plan_id = null;
     }
 
-    // Monthly window for completed/cancelled status tiles (scheduled_start ∈ current month)
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    // Monthly window for completed/cancelled status tiles (a visit scheduled ∈ current month),
+    // measured on the ORG's calendar month - see `orgMonthWindow`.
+    const monthWindow = orgMonthWindow(
+      await getRequestOrgTimezone(req as { user?: { organization_id?: string } }),
+    );
     const needInvoiceWhere: Prisma.JobWhereInput = {
       ...scopeWhere,
       status: 'COMPLETED',
       NOT: { invoices: { some: { status: { not: 'VOIDED' } } } },
     };
+
+    // S8 (RATIFIED): these two tiles filtered `Job.scheduled_start` directly, which is DROPPED.
+    // Repointed to the VISIT SET using the identical pattern `buildJobListWhere` already proves
+    // (the board's date-range filter, above) - BACKWARD-LOOKING (a visit that WAS scheduled this
+    // month), never `resolveNextJobVisit`/`first_visit_start` (those answer "what's next", not
+    // "what happened/was due this month"). The headline case this must not regress: a COMPLETED
+    // job whose only visit already left the live set still counts (7,495 staging jobs carry a
+    // non-null legacy mirror with no live visit - the dominant population, not an edge case).
+    //
+    // Composed under `AND`, never assigned onto `completedThisMonthWhere.OR` /
+    // `where.visits` directly - `scopeWhere` may already carry a technician's row-scope OR (or,
+    // for a future grant shape, a `visits.some` clause of its own), and overwriting either is an
+    // RBAC bypass. Mirrors buildJobListWhere's own `where.AND ??= []` idiom exactly.
+    const completedThisMonthWhere: Record<string, unknown> = { ...scopeWhere, status: 'COMPLETED' };
+    (completedThisMonthWhere.AND ??= [] as unknown[]);
+    (completedThisMonthWhere.AND as unknown[]).push({
+      OR: [
+        { visits: { some: { scheduled_at: monthWindow, status: { not: 'CANCELLED' } } } },
+        { status: 'CANCELLED' as const, visits: { some: { scheduled_at: monthWindow } } },
+      ],
+    });
+    const cancelledThisMonthWhere: Record<string, unknown> = { ...scopeWhere, status: 'CANCELLED' };
+    (cancelledThisMonthWhere.AND ??= [] as unknown[]);
+    (cancelledThisMonthWhere.AND as unknown[]).push({
+      OR: [
+        { visits: { some: { scheduled_at: monthWindow, status: { not: 'CANCELLED' } } } },
+        { status: 'CANCELLED' as const, visits: { some: { scheduled_at: monthWindow } } },
+      ],
+    });
 
     const [
       jobs, total,
@@ -878,23 +1239,24 @@ export async function list(req: Request, res: Response) {
         where: scopeWhere,
         _count: true,
       }),
-      prisma.job.count({ where: { ...scopeWhere, status: 'COMPLETED', scheduled_start: { gte: monthStart, lte: monthEnd } } }),
-      prisma.job.count({ where: { ...scopeWhere, status: 'CANCELLED', scheduled_start: { gte: monthStart, lte: monthEnd } } }),
+      prisma.job.count({ where: completedThisMonthWhere }),
+      prisma.job.count({ where: cancelledThisMonthWhere }),
       prisma.job.count({ where: needInvoiceWhere }),
     ]);
 
     const byStatus = Object.fromEntries(statusGroups.map((g) => [g.status, g._count]));
 
     res.json({
-      jobs: await withTagsMany(req, jobs),
+      // S8: same projectors as the detail pipeline, so the list's `assignees`/`scheduled_start`
+      // and the detail's cannot disagree about who is on a job or when it is next due.
+      jobs: (await withTagsMany(req, jobs)).map((j) => projectJobScheduleFields(projectJobCrewUnion(j as Record<string, unknown>))),
       pagination: buildPaginationMeta(total, { page, limit, skip }),
       stats: {
-        unassigned:    byStatus['UNASSIGNED']  ?? 0,
+        unassigned:    byStatus['UNSCHEDULED']  ?? 0,
         scheduled:     byStatus['SCHEDULED']   ?? 0,
-        // Spec B1 (Task 5): EN_ROUTE and ON_SITE are "in progress" to a dispatcher reading a
-        // tile. Folding them in keeps the tiles summing to the total; listing them separately
-        // would need a 7th tile.
-        in_progress:   (byStatus['IN_PROGRESS'] ?? 0) + (byStatus['EN_ROUTE'] ?? 0) + (byStatus['ON_SITE'] ?? 0),
+        // S4 (D17): EN_ROUTE and ON_SITE no longer exist on JobStatus, so there is nothing left
+        // to fold - a job whose crew is on the way or on site derives SCHEDULED or IN_PROGRESS.
+        in_progress:   byStatus['IN_PROGRESS'] ?? 0,
         completed:     completedThisMonth,
         cancelled:     cancelledThisMonth,
         need_invoices: needInvoicesCount,
@@ -926,7 +1288,9 @@ export async function exportAll(req: Request, res: Response) {
       logger.warn(`Job export hit row cap (${EXPORT_ROW_CAP}) for org ${req.user?.organization_id}`);
     }
     void logAudit({ req, action: 'job.exported', resourceType: 'Job', resourceId: null, metadata: { count: jobs.length } });
-    res.json({ jobs });
+    // S8: the CSV builder reads the `assignees` and `scheduled_start` columns by name, so the
+    // export needs the SAME derived projections the list serves - no forks (A5 condition (iii)).
+    res.json({ jobs: jobs.map((j) => projectJobScheduleFields(projectJobCrewUnion(j as Record<string, unknown>))) });
   } catch (err) {
     logger.error('Export jobs error:', err);
     res.status(500).json({ error: 'Failed to export jobs' });
@@ -939,6 +1303,52 @@ export async function exportAll(req: Request, res: Response) {
  * Rolls the transaction back and surfaces as a 409 (see create()'s catch), not a 500.
  */
 class EstimateAttachRaceError extends Error {}
+
+/**
+ * Book the trip a create said it booked (MV-BOARD-15, section 4.3 of the multi-visit QA run).
+ *
+ * POST /api/jobs writes scheduled_start straight onto the job row and flips it to SCHEDULED.
+ * Before this, it made no visit - so the job read "Scheduled, Aug 22, 9:00 AM" on its own page,
+ * showed "No visits booked yet" on its Visits tab, painted no board card, returned 0 rows from
+ * the board's date-range query, and was absent from the Unscheduled bucket because its status
+ * was SCHEDULED. A missed-appointment class defect: scheduled to whoever opens it, non-existent
+ * to anyone working the board.
+ *
+ * Conditional on a time being given, and that is the whole of D16's rule: a create WITHOUT a
+ * scheduled_start still makes no visit and the job is correctly UNSCHEDULED, because inventing
+ * an untimed trip is the thing D16 forbids. `syncJobWindowOntoVisits` is the same writer /assign
+ * already uses for exactly this - one job-level window landing on one visit - so the two doors
+ * cannot disagree about what a single-window booking means.
+ *
+ * The end falls back to the org's own default_job_duration_min when the caller gave only a
+ * start - the same setting the board's adapters fall back to when a visit carries no end - and
+ * to two hours when the org has not set one. The org row is read only when a time was actually
+ * given, so an unscheduled create costs no extra query.
+ */
+async function bookInitialVisitIfScheduled(
+  tx: Prisma.TransactionClient,
+  opts: { jobId: string; orgId: string; scheduledStart?: string | null; scheduledEnd?: string | null; isAllDay?: boolean },
+): Promise<void> {
+  if (!opts.scheduledStart) return;
+  const scheduledAt = new Date(opts.scheduledStart);
+  let scheduledEnd: Date;
+  if (opts.scheduledEnd) {
+    scheduledEnd = new Date(opts.scheduledEnd);
+  } else {
+    const org = await tx.organization.findUnique({
+      where: { id: opts.orgId },
+      select: { default_job_duration_min: true },
+    });
+    scheduledEnd = new Date(scheduledAt.getTime() + (org?.default_job_duration_min ?? 120) * 60_000);
+  }
+  await syncJobWindowOntoVisits(tx, {
+    jobId: opts.jobId,
+    orgId: opts.orgId,
+    scheduledAt,
+    scheduledEnd,
+    isAllDay: opts.isAllDay ?? false,
+  });
+}
 
 export async function create(req: Request, res: Response) {
   try {
@@ -976,15 +1386,15 @@ export async function create(req: Request, res: Response) {
     const jobScope = await scopeWhereForReq(req, 'Job');
     const isRowScopedCreator = Object.keys(jobScope).length > 0;
     const orgId = req.user!.organization_id;
-    const selfAssigneeRow = { user_id: req.user!.id, organization_id: orgId };
 
     if (estimateIds.length === 0) {
       // Fields written onto every standalone job (the estimate branch builds its own).
+      // S8 (RATIFIED, A5): scheduled_start/scheduled_end are DROPPED as job columns - the real
+      // write is bookInitialVisitIfScheduled below, which books the matching VISIT in the same
+      // transaction. Writing them here too would be a Prisma error (the field no longer exists).
       const jobExtra = {
         scope_notes: scope_notes || null,
         job_type: job_type || null,
-        scheduled_start: scheduled_start ? new Date(scheduled_start) : null,
-        scheduled_end: scheduled_end ? new Date(scheduled_end) : null,
         estimated_duration: estimated_duration || null,
         ...(scheduled_start ? { status: 'SCHEDULED' as const } : {}),
         // Audit: both standalone branches (new customer / existing customer) spread this.
@@ -1060,11 +1470,10 @@ export async function create(req: Request, res: Response) {
             select: jobDetailSelect,
           });
 
-          // Phase B (#232) — a row-scoped creator owns the standalone (urgent) job they make, so
-          // they can read/invoice it. Unconditional creators (dispatcher/admin) are not auto-assigned.
-          if (isRowScopedCreator) {
-            await tx.jobAssignee.createMany({ data: [{ job_id: j.id, ...selfAssigneeRow }] });
-          }
+          // Phase B (#232) / S8 (D6): the self-assign row is GONE with the table. A create path
+          // that made no visit has no trip for the creator to be on, and D16 forbids inventing an
+          // untimed one. Nothing is lost: TECHNICIAN's `read Job` is OWN_OR_CREATED_JOB, so the
+          // creator reaches their own job through the created_by_id arm either way.
 
           await tx.timelineEvent.create({
             data: {
@@ -1075,6 +1484,14 @@ export async function create(req: Request, res: Response) {
               description: `Job ${j.job_number} created`,
               created_by: req.user!.id,
             },
+          });
+
+          // The trip this create just said it booked - see bookInitialVisitIfScheduled.
+          await bookInitialVisitIfScheduled(tx, {
+            jobId: j.id,
+            orgId,
+            scheduledStart: scheduled_start,
+            scheduledEnd: scheduled_end,
           });
 
           return j;
@@ -1164,11 +1581,10 @@ export async function create(req: Request, res: Response) {
             select: jobDetailSelect,
           });
 
-          // Phase B (#232) — a row-scoped creator owns the standalone (urgent) job they make, so
-          // they can read/invoice it. Unconditional creators (dispatcher/admin) are not auto-assigned.
-          if (isRowScopedCreator) {
-            await tx.jobAssignee.createMany({ data: [{ job_id: j.id, ...selfAssigneeRow }] });
-          }
+          // Phase B (#232) / S8 (D6): the self-assign row is GONE with the table. A create path
+          // that made no visit has no trip for the creator to be on, and D16 forbids inventing an
+          // untimed one. Nothing is lost: TECHNICIAN's `read Job` is OWN_OR_CREATED_JOB, so the
+          // creator reaches their own job through the created_by_id arm either way.
 
           await tx.timelineEvent.create({
             data: {
@@ -1179,6 +1595,14 @@ export async function create(req: Request, res: Response) {
               description: `Job ${j.job_number} created`,
               created_by: req.user!.id,
             },
+          });
+
+          // The trip this create just said it booked - see bookInitialVisitIfScheduled.
+          await bookInitialVisitIfScheduled(tx, {
+            jobId: j.id,
+            orgId,
+            scheduledStart: scheduled_start,
+            scheduledEnd: scheduled_end,
           });
 
           return j;
@@ -1389,8 +1813,8 @@ export async function create(req: Request, res: Response) {
               customer_id: customerId,
               service_location_id: locationId,
               scope_notes: scope_notes || null,
-              scheduled_start: scheduled_start ? new Date(scheduled_start) : null,
-              scheduled_end: scheduled_end ? new Date(scheduled_end) : null,
+              // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the
+              // real write is bookInitialVisitIfScheduled below, in the same transaction.
               estimated_duration: estimated_duration || null,
               job_type: estimate.job_type ?? estimate.lead?.job_type ?? null,
               // E1/E2 (job-owns-tax-discount) - inherit the estimate's tax rate and discount
@@ -1400,7 +1824,7 @@ export async function create(req: Request, res: Response) {
               discount_value: estimate.discount_value,
               discount_amount: estimate.discount_amount,
               // SRVW-87 - mirrors the standalone branch's jobExtra: a conversion that lands the
-              // job straight on the calendar must not create it as UNASSIGNED.
+              // job straight on the calendar must not create it as UNSCHEDULED.
               ...(scheduled_start ? { status: 'SCHEDULED' as const } : {}),
               // R3b (2026-07-21) — copy the estimate's cost basis onto the new job (D18); a job
               // created from scratch (no estimate_id, see the standalone branch above) leaves
@@ -1455,11 +1879,8 @@ export async function create(req: Request, res: Response) {
             });
           }
 
-          // Phase B (#232) — a row-scoped creator owns the job they create from their own lead's
-          // estimate, so they can read/invoice it. Unconditional creators are not auto-assigned.
-          if (isRowScopedCreator) {
-            await tx.jobAssignee.createMany({ data: [{ job_id: j.id, ...selfAssigneeRow }] });
-          }
+          // Phase B (#232) / S8 (D6): no self-assign row - the creator's access comes from
+          // OWN_OR_CREATED_JOB's created_by_id arm, not from a crew row.
 
           await tx.timelineEvent.create({
             data: {
@@ -1470,6 +1891,14 @@ export async function create(req: Request, res: Response) {
               description: `Job ${j.job_number} created from estimate ${estimate.estimate_number}`,
               created_by: req.user!.id,
             },
+          });
+
+          // The trip this create just said it booked - see bookInitialVisitIfScheduled.
+          await bookInitialVisitIfScheduled(tx, {
+            jobId: j.id,
+            orgId: req.user!.organization_id,
+            scheduledStart: scheduled_start,
+            scheduledEnd: scheduled_end,
           });
 
           return j;
@@ -1698,12 +2127,12 @@ export async function create(req: Request, res: Response) {
             customer_id: customerId,
             service_location_id: locationId,
             scope_notes: scope_notes || null,
-            scheduled_start: scheduled_start ? new Date(scheduled_start) : null,
-            scheduled_end: scheduled_end ? new Date(scheduled_end) : null,
+            // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the
+            // real write is bookInitialVisitIfScheduled below, in the same transaction.
             estimated_duration: estimated_duration || null,
             job_type: estimates[0].job_type ?? estimates[0].lead?.job_type ?? null,
             // SRVW-87 - mirrors the standalone branch's jobExtra: a conversion that lands the
-            // job straight on the calendar must not create it as UNASSIGNED.
+            // job straight on the calendar must not create it as UNSCHEDULED.
             ...(scheduled_start ? { status: 'SCHEDULED' as const } : {}),
             // Cost basis (D18) - a multi-estimate job has no single labor/overhead source of truth
             // (estimates may disagree), so leave all three NULL: resolveOverhead falls back to the
@@ -1768,10 +2197,8 @@ export async function create(req: Request, res: Response) {
           });
         }
 
-        // Phase B (#232) - a row-scoped creator owns the job they create so they can read/invoice it.
-        if (isRowScopedCreator) {
-          await tx.jobAssignee.createMany({ data: [{ job_id: j.id, ...selfAssigneeRow }] });
-        }
+        // Phase B (#232) / S8 (D6): no self-assign row - the creator's access comes from
+        // OWN_OR_CREATED_JOB's created_by_id arm, not from a crew row.
 
         await tx.timelineEvent.create({
           data: {
@@ -1782,6 +2209,14 @@ export async function create(req: Request, res: Response) {
             description: `Job ${j.job_number} created from estimate(s) ${estimates.map((e) => e.estimate_number).join(', ')}`,
             created_by: req.user!.id,
           },
+        });
+
+        // The trip this create just said it booked - see bookInitialVisitIfScheduled.
+        await bookInitialVisitIfScheduled(tx, {
+          jobId: j.id,
+          orgId: req.user!.organization_id,
+          scheduledStart: scheduled_start,
+          scheduledEnd: scheduled_end,
         });
 
         return j;
@@ -2061,11 +2496,17 @@ export async function getFinancials(req: Request, res: Response) {
  * VALUES rather than key presence: a client that round-trips the whole job object sends
  * scheduled_start unchanged, and that is not a reschedule.
  *
+ * `existing` is now the CURRENT WINDOW as `resolveJobScheduleWindow` projects it (S8, A5,
+ * RATIFIED) - `scheduled_start`/`scheduled_end`/`is_all_day` are no longer stored columns, so the
+ * caller passes the computed projection here rather than a raw DB row. `is_all_day: boolean |
+ * null` (widened from a plain `boolean`) is the zero-visit case; the `!==` comparison below is
+ * correct unchanged for it (`true !== null` and `false !== null` both correctly read as "changed").
+ *
  * Exported for unit test only.
  */
 export function changesSchedule(
   body: Record<string, unknown>,
-  existing: { scheduled_start: Date | null; scheduled_end: Date | null; is_all_day: boolean },
+  existing: { scheduled_start: Date | null; scheduled_end: Date | null; is_all_day: boolean | null },
 ): boolean {
   const sameInstant = (a: unknown, b: Date | null) => {
     if (a === undefined) return true;              // absent → not a change
@@ -2093,7 +2534,7 @@ export function changesSchedule(
  * defined purely by whether a time exists, and never touches EN_ROUTE / ON_SITE / IN_PROGRESS /
  * COMPLETED / CANCELLED. A caller who genuinely wants the milestone rewind uses POST /:id/assign.
  *
- * The demote branch fires regardless of crew, mirroring unassign(), which drops to UNASSIGNED and
+ * The demote branch fires regardless of crew, mirroring unassign(), which drops to UNSCHEDULED and
  * KEEPS the crew: the codebase's stated invariant is that status derives from TIME, not crew, and
  * leaving a timeless job SCHEDULED would reproduce the badge-vs-lifecycle-bar disagreement in the
  * opposite direction.
@@ -2106,8 +2547,8 @@ export function deriveStatusOnReschedule(
   nextStart: Date | null,
 ): JobStatus | undefined {
   if (!startTouched) return undefined;
-  if (nextStart && current === 'UNASSIGNED') return 'SCHEDULED';
-  if (!nextStart && current === 'SCHEDULED') return 'UNASSIGNED';
+  if (nextStart && current === 'UNSCHEDULED') return 'SCHEDULED';
+  if (!nextStart && current === 'SCHEDULED') return 'UNSCHEDULED';
   return undefined;
 }
 
@@ -2120,10 +2561,17 @@ export async function update(req: Request, res: Response) {
         service_location: { select: { state: true } },
         // #106 ownership relations the role's grant condition references (OWN_JOB /
         // OWN_JOB_VIA_ESTIMATE) — required for the per-instance can() to bind.
-        assignees: { select: { user_id: true } },
+        // S8 (A5, RATIFIED): also the source of the CURRENT schedule changesSchedule/timeMoved
+        // compare the PATCH body against - scheduled_start/scheduled_end/is_all_day are no longer
+        // stored columns, so resolveJobScheduleWindow(existing.visits) replaces the flat select
+        // below.
+        visits: {
+          select: {
+            status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+            assignees: { select: { user_id: true } },
+          },
+        },
         estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } },
-        // D14 — changesSchedule needs the CURRENT schedule to compare the PATCH body against.
-        scheduled_start: true, scheduled_end: true, is_all_day: true,
         // E1/E2 (job-owns-tax-discount) - customer.tax_exempt clamps an incoming tax_rate;
         // job_line_items/scopes give the CURRENT subtotal a discount edit resolves against;
         // discount_type is read as the pre-edit fallback when only discount_value is sent.
@@ -2142,6 +2590,11 @@ export async function update(req: Request, res: Response) {
       return;
     }
 
+    // S8 (A5, RATIFIED): the CURRENT window, computed off the visit set - the flat
+    // scheduled_start/scheduled_end/is_all_day columns this used to read are dropped. Every
+    // `existing.scheduled_start`-shaped reference below now reads off this instead.
+    const currentWindow = resolveJobScheduleWindow(existing.visits);
+
     // #106 — base update must do a PER-INSTANCE owner check, not rely on the subject-level
     // route guard (a conditional `update Job` grant passes the guard for ANY job). 403 a job
     // the requester does not own under their grant condition. Uses the SQL-based canAccessRow
@@ -2157,7 +2610,7 @@ export async function update(req: Request, res: Response) {
     // `update Job` by role default (D3) but `reschedule Job` only if an admin granted the
     // per-user toggle. ADMIN/DISPATCHER pass on their unconditional grant.
     if (
-      changesSchedule(req.body as Record<string, unknown>, existing) &&
+      changesSchedule(req.body as Record<string, unknown>, currentWindow) &&
       !req.ability?.can('reschedule', 'Job')
     ) {
       res.status(403).json({ error: 'You do not have permission to reschedule this job' });
@@ -2279,11 +2732,11 @@ export async function update(req: Request, res: Response) {
     //  (iii) a start with a null end skips detection. That is reachable, because updateJobSchema
     //        deliberately has no start/end pairing refine (see the schema comment).
     const startTouched = scheduled_start !== undefined;
-    const nextStart = startTouched ? (scheduled_start ? new Date(scheduled_start) : null) : existing.scheduled_start;
-    const nextEnd = scheduled_end !== undefined ? (scheduled_end ? new Date(scheduled_end) : null) : existing.scheduled_end;
+    const nextStart = startTouched ? (scheduled_start ? new Date(scheduled_start) : null) : currentWindow.scheduled_start;
+    const nextEnd = scheduled_end !== undefined ? (scheduled_end ? new Date(scheduled_end) : null) : currentWindow.scheduled_end;
     const timeMoved =
-      (nextStart?.getTime() ?? null) !== (existing.scheduled_start?.getTime() ?? null)
-      || (nextEnd?.getTime() ?? null) !== (existing.scheduled_end?.getTime() ?? null);
+      (nextStart?.getTime() ?? null) !== (currentWindow.scheduled_start?.getTime() ?? null)
+      || (nextEnd?.getTime() ?? null) !== (currentWindow.scheduled_end?.getTime() ?? null);
     // SRVW-112 - hoisted out of the data object below so the status write and the sub-status
     // clear read ONE value. Still `undefined` on a non-schedule PATCH, which Prisma no-ops.
     const derivedStatus = deriveStatusOnReschedule(existing.status, startTouched, nextStart);
@@ -2291,7 +2744,7 @@ export async function update(req: Request, res: Response) {
     if (timeMoved && !force && nextStart && nextEnd) {
       const conflicts = await detectCrewConflicts(req, {
         jobId: existing.id,
-        userIds: (existing.assignees ?? []).map((a) => a.user_id),
+        userIds: jobCrewIds(existing),
         schedStart: nextStart,
         schedEnd: nextEnd,
       });
@@ -2322,6 +2775,26 @@ export async function update(req: Request, res: Response) {
           taxWarning = buildLocationTaxWarning(existing.service_location?.state ?? null, resolved.state);
         }
 
+        // Multi-visit S6 (D14, the mirror's other direction): a PATCH-reschedule is a real move,
+        // so the TRIP moves with it. Before this slice only assign() had this branch, so a PATCH
+        // wrote the three schedule columns and left the visit set holding the old time - the next
+        // visit write then recomputed the mirror from the visits alone and silently deleted the
+        // PATCH's booking. Now that the board reads visits, the same divergence would also show
+        // the card at the time nobody moved it to.
+        //
+        // Deliberately NOT followed by syncJobFromVisits: like assign(), this handler writes the
+        // job row itself in the same transaction, which is exactly why syncJobWindowOntoVisits is
+        // documented as not re-deriving.
+        if (startTouched && nextStart) {
+          await syncJobWindowOntoVisits(tx, {
+            jobId: existing.id,
+            orgId: req.user!.organization_id,
+            scheduledAt: nextStart,
+            scheduledEnd: nextEnd ?? new Date(nextStart.getTime() + 60 * 60 * 1000),
+            isAllDay: currentWindow.is_all_day ?? false,
+          });
+        }
+
         const j = await tx.job.update({
           where: { id: existing.id },
           data: {
@@ -2329,7 +2802,7 @@ export async function update(req: Request, res: Response) {
             job_type: job_type !== undefined ? job_type : undefined,
             service_location_id: resolvedLocationId,
             estimated_duration: estimated_duration !== undefined ? estimated_duration : undefined,
-            // SRVW-87 - UNASSIGNED <-> SCHEDULED only, and NO milestoneClears / no
+            // SRVW-87 - UNSCHEDULED <-> SCHEDULED only, and NO milestoneClears / no
             // revertPlanVisitOnUncomplete: see deriveStatusOnReschedule for why PATCH must not
             // adopt assign()'s pairing.
             status: derivedStatus,
@@ -2337,8 +2810,10 @@ export async function update(req: Request, res: Response) {
             // means "leave the status alone", which is also exactly when a set sub-status stays
             // valid, so the ?? existing.status collapses that case to {}.
             ...subStatusClears(existing.status, derivedStatus ?? existing.status),
-            scheduled_start: startTouched ? nextStart : undefined,
-            scheduled_end: scheduled_end !== undefined ? nextEnd : undefined,
+            // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns. The real
+            // write is syncJobWindowOntoVisits above (in the SAME transaction, before this
+            // statement), so `j.visits` below already reflects the new window when this select
+            // runs - the response's computed projection cannot read stale.
             labor_hours: labor_hours !== undefined ? (labor_hours ?? null) : undefined,
             overhead_mode: overhead_mode !== undefined ? (overhead_mode || null) : undefined,
             overhead_value: overhead_value !== undefined ? (overhead_value ?? null) : undefined,
@@ -2407,7 +2882,7 @@ export async function remove(req: Request, res: Response) {
       select: {
         id: true, status: true, job_number: true, invoices: { select: { id: true, status: true } },
         // #106 ownership relations (OWN_JOB / OWN_JOB_VIA_ESTIMATE) for the per-instance check.
-        assignees: { select: { user_id: true } },
+        visits: { select: { assignees: { select: { user_id: true } } } },
         estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } },
       },
     });
@@ -2484,6 +2959,116 @@ export async function remove(req: Request, res: Response) {
 // ─── Status Actions ─────────────────────────────────────
 
 /**
+ * SRVW-243 - the customer-facing half of `notify_customer: true` on assign().
+ *
+ * One job: turn "the user asked us to tell the customer" into a single
+ * EmailDispatchResult the caller can be shown. It never throws and never
+ * decides anything about the schedule write, which has already committed by the
+ * time this runs.
+ *
+ * `no_recipient` is reported rather than sent-and-swallowed. A customer with no
+ * address on file is the commonest reason a "notify" silently does nothing, and
+ * a caller who ticked the box is owed that answer instead of a success it did
+ * not get.
+ */
+async function notifyCustomerOfSchedule(
+  req: Request,
+  args: {
+    jobId: string;
+    jobNumber: string;
+    customer: { id: string; first_name: string | null; last_name: string | null; company_name: string | null; email: string | null } | null;
+    serviceLocation: { address_line1: string; city: string; state: string } | null;
+    crew: { first_name: string; last_name: string }[];
+    newStart: Date | null;
+    /** The far end of the window, so a cancellation names the slot the customer was holding. */
+    newEnd?: Date | null;
+    /**
+     * WHICH template. A discriminant rather than a boolean, because S7 adds a third case
+     * (a cancelled trip) and because #1550 was a template chosen off a STATUS: job status is
+     * derived and unordered and VisitStatus looks reassuring, so neither is evidence. Every
+     * caller derives this from what actually happened to the row and hoists it into ONE const
+     * that feeds the send, the timeline row and the automation gate together.
+     */
+    kind: 'scheduled' | 'rescheduled' | 'cancelled';
+    /** Multi-visit D13 - the trip's own number, taken off the row the transaction wrote. */
+    visitSeq?: number | null;
+    /** The trip's cancellation reason, for kind: 'cancelled'. */
+    cancelledReason?: string;
+    /** Compose-dialog overrides. A one-off recipient, extra addressees, and the
+     *  admin's own wording - none of it written back to the customer record. */
+    recipientEmail?: string;
+    cc?: string[];
+    message?: string;
+  },
+): Promise<EmailDispatchResult> {
+  // The typed override wins; the customer's saved address is the fallback, not
+  // the other way round. Trimmed because an all-whitespace field is not an
+  // address and must fall through to no_recipient rather than reach Resend.
+  const to = args.recipientEmail?.trim() || args.customer?.email;
+  if (!to) return { status: 'skipped', reason: 'no_recipient' };
+
+  const organizationId = req.user!.organization_id;
+  const customerName =
+    [args.customer?.first_name, args.customer?.last_name].filter(Boolean).join(' ')
+    || args.customer?.company_name
+    || 'there';
+  // The crew is what the customer is being told to expect at their door, so an
+  // empty crew says "our team" rather than naming nobody.
+  const technicianName =
+    args.crew.map((u) => `${u.first_name} ${u.last_name}`.trim()).filter(Boolean).join(', ')
+    || 'Our team';
+  const serviceAddress = args.serviceLocation
+    ? [args.serviceLocation.address_line1, args.serviceLocation.city, args.serviceLocation.state].filter(Boolean).join(', ')
+    : '';
+  // One row for the zone the time renders in AND the header brand the customer sees -
+  // SRVW-243 header-brand fix. Two lookups could not disagree, but one is cheaper and
+  // this runs on the response path (mirrors notifyCustomerOfWalkthrough's own query).
+  const orgRow = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true, logo_url: true, brand_color: true, timezone: true },
+  });
+  const timezone = orgRow?.timezone || DEFAULT_TIMEZONE;
+  // Undefined, never a guessed name, when the org row itself is missing - wrapHtml's own
+  // 'ServWave' fallback exists for exactly that case (see email.ts:55, 639-640).
+  const org: OrganizationBrandingSubset | undefined = orgRow
+    ? { id: organizationId, name: orgRow.name, logo_url: orgRow.logo_url, brand_color: orgRow.brand_color }
+    : undefined;
+  const record = {
+    organizationId,
+    customerId: args.customer?.id ?? null,
+    jobId: args.jobId,
+    jobLabel: args.jobNumber,
+    // The reply anchor: the scheduled notice, every reschedule after it and the
+    // customer's reply all resolve to one address - see lib/reply-token.ts.
+    entityType: 'job',
+    entityId: args.jobId,
+  };
+
+  const compose = { cc: args.cc, message: args.message };
+
+  if (args.kind === 'cancelled') {
+    return sendJobVisitCancelledEmail({
+      organizationId, org, to, customerName, jobNumber: args.jobNumber, visitSeq: args.visitSeq,
+      // technicianName was computed above and never handed over, so the notice rendered no
+      // Technician row at all - not even the "Our team" the crewless case resolves to
+      // (MV-NOTIF-10).
+      cancelledStart: args.newStart, cancelledEnd: args.newEnd ?? null, technicianName,
+      reason: args.cancelledReason ?? '', timezone, record, ...compose,
+    });
+  }
+  if (args.kind === 'rescheduled' && args.newStart) {
+    return sendJobRescheduledEmail({
+      organizationId, org, to, customerName, jobNumber: args.jobNumber, visitSeq: args.visitSeq,
+      newScheduledStart: args.newStart, technicianName, serviceAddress, timezone, record, ...compose,
+    });
+  }
+  return sendJobScheduledEmail({
+    organizationId, org, to, customerName, jobNumber: args.jobNumber, visitSeq: args.visitSeq,
+    technicianName, scheduledStart: args.newStart, serviceAddress, timezone, record, ...compose,
+  });
+}
+
+/**
  * Dispatch TECH_UNASSIGNED for each removed crew member, carrying their
  * identity as eventPayload.recipient — by the time an automation fires
  * they're already off the crew, so nothing downstream can re-derive who they
@@ -2524,13 +3109,28 @@ export async function assign(req: Request, res: Response) {
   try {
     const id = param(req, 'id');
     // assignee_ids is the FULL new crew (REPLACE semantics; [] is a valid state-4 schedule).
-    const { assignee_ids, scheduled_start, scheduled_end, is_all_day, force } = req.body as {
+    const {
+      assignee_ids, scheduled_start, scheduled_end, is_all_day, force,
+      notify_customer, notify_recipient_email, notify_cc_emails, notify_message,
+    } = req.body as {
       assignee_ids: string[];
       scheduled_start?: string;
       scheduled_end?: string;
       is_all_day?: boolean;
       force?: boolean;
+      notify_customer?: boolean;
+      notify_recipient_email?: string;
+      notify_cc_emails?: string[];
+      notify_message?: string;
     };
+    // Q1: this door's `notify_customer` is a flat, three-state-capable boolean (undefined/true/
+    // false), not the nested `notify` object the visit doors use, but the same three states apply.
+    // `undefined` -> unchanged, back-compat: the automation fires. `true` -> unchanged: the direct
+    // send below fires and the automation is suppressed for this occurrence. `false` -> NEITHER
+    // fires: the caller explicitly declined telling the customer, and the automation gates below
+    // used to test bare `!notify_customer`, which is also true when the caller declined -
+    // silently mailing the customer through the workflow anyway.
+    const notifyDeclined = notify_customer === false;
 
     let computedEnd = scheduled_end ? new Date(scheduled_end) : null;
     if (is_all_day && scheduled_start && !scheduled_end) {
@@ -2542,12 +3142,19 @@ export async function assign(req: Request, res: Response) {
       where: { id, ...tenantWhere(req) },
       select: {
         id: true, status: true, job_number: true, source_plan_id: true,
-        scheduled_start: true,
         customer_scheduled_email_sent_at: true,
         customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
         service_location: { select: { address_line1: true, city: true, state: true } },
         scope_notes: true,
-        assignees: { select: { user_id: true } },
+        // S8 (D6): the job's crew is the union across its trips - `job_assignees` is gone.
+        // S8 (A5, RATIFIED): also the source of the CURRENT window (isReschedule/timeChanged
+        // below) - scheduled_start is no longer a stored column.
+        visits: {
+          select: {
+            status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+            assignees: { select: { user_id: true } },
+          },
+        },
       },
     });
 
@@ -2555,6 +3162,9 @@ export async function assign(req: Request, res: Response) {
       res.status(404).json({ error: 'Job not found' });
       return;
     }
+
+    // S8 (A5, RATIFIED): the CURRENT window, computed off the visit set.
+    const currentWindow = resolveJobScheduleWindow(existing.visits);
 
     // Per-instance crew-authority check (technician-ownership spec, Part C). The route guard
     // `canDo('assign','Job')` is SUBJECT-level, and until this PR only DISPATCHER/ADMIN held the
@@ -2574,16 +3184,16 @@ export async function assign(req: Request, res: Response) {
     }
 
     // Crew diff vs the CURRENT crew (drives conflict scope + diff-emails).
-    const currentIds = new Set(existing.assignees.map((a) => a.user_id));
-    const nextIds = new Set(assignee_ids);
+    const currentIds = new Set(existing.visits.flatMap((v) => v.assignees.map((a) => a.user_id)));
     const addedIds = assignee_ids.filter((uid) => !currentIds.has(uid));
     const keptIds = assignee_ids.filter((uid) => currentIds.has(uid));
-    const removedIds = [...currentIds].filter((uid) => !nextIds.has(uid));
+    // No `removedIds` here on purpose: removal is a fact about what the WRITE did, and under the
+    // union the request's omissions are not it. See crewDelta below.
 
     // Did the schedule time change? (a state-4→state-2 add, or a true reschedule)
     const newStart = scheduled_start ? new Date(scheduled_start) : null;
     const timeChanged =
-      (existing.scheduled_start?.getTime() ?? null) !== (newStart?.getTime() ?? null);
+      (currentWindow.scheduled_start?.getTime() ?? null) !== (newStart?.getTime() ?? null);
 
     // Conflict detection: PER added member; plus KEPT members only when the time also changed
     // (a kept member at a brand-new slot can newly collide elsewhere).
@@ -2606,21 +3216,97 @@ export async function assign(req: Request, res: Response) {
     // apart: a crew-only assign (no scheduled_start) keeps existing.status and must therefore
     // leave a still-valid sub-status alone.
     const nextStatus: JobStatus = scheduled_start ? 'SCHEDULED' : existing.status;
+    // A job already sitting on the calendar is MOVING; anything else is being booked.
+    // Deliberately NOT coupled to status. Job status is UNORDERED (Spec B1), so a job
+    // can hold a scheduled time while sitting at EN_ROUTE / ON_SITE / IN_PROGRESS /
+    // COMPLETED, and the board still lets you drag it. The older `status === 'SCHEDULED'
+    // && scheduled_start != null` test mailed those a "Your Service Has Been Scheduled"
+    // notice with no mention that anything had moved - seen in prod on Servwave Demo
+    // (J00005, Aug 18 -> Aug 19, dialog headed "Reschedule Job?"). One const so the
+    // customer-facing send and the automation dispatch below cannot drift apart on it.
+    const isReschedule = currentWindow.scheduled_start != null;
     // First-schedule with crew≥1 → send the customer "scheduled" email + stamp the flag now.
-    const isFirstScheduleWithCrew = existing.status === 'UNASSIGNED' && assignee_ids.length > 0 && Boolean(scheduled_start);
+    const isFirstScheduleWithCrew = existing.status === 'UNSCHEDULED' && assignee_ids.length > 0 && Boolean(scheduled_start);
     const stampScheduledFlag = isFirstScheduleWithCrew && existing.customer_scheduled_email_sent_at == null;
 
+    // Multi-visit S3: TWO diffs, and they now genuinely differ, so which one feeds what is
+    // written down rather than left to be rediscovered.
+    //
+    //  - addedIds / keptIds above are the PRE-read diff (request body vs the job as it was). They
+    //    scope conflict detection, which has to run BEFORE the write, so they cannot come from the
+    //    writer's return value.
+    //  - crewDelta below is what the write ACTUALLY did. Under the union a member the request
+    //    omitted can still be kept, because they are crewed on another of the job's visits, so the
+    //    pre-read diff would tell them they were removed from a job whose row they still hold.
+    //    Timeline events and the diff-emails therefore read the real delta, never the intent.
+    let crewDelta: { added: string[]; removed: string[] } = { added: [], removed: [] };
+    // S7 (D18): the ONE visit this call booked or moved - syncJobWindowOntoVisits' documented
+    // return value, which the call site used to discard. Both doors onto a trip (this one and
+    // POST /:id/visits) must key their automation events on the same visit, or one trip enrols
+    // twice under two different keys.
+    let touchedVisitId: string | null = null;
+
     const job = await prisma.$transaction(async (tx) => {
-      await replaceJobCrew(tx, id, req.user!.organization_id, assignee_ids);
+      // S8 (RATIFIED, A5): this handler used to ALSO write the job's three schedule columns
+      // directly as a CACHE of the visit it books/moves below - that mirror is DROPPED. The
+      // visit write below is now the only write; the response's `scheduled_start`/`scheduled_end`/
+      // `is_all_day` are computed on read from `job.visits[]` by presentJobDetail. 60 minutes when
+      // no end was given is the same default the migration's backfill and
+      // detectPerformerConflicts apply to an open-ended job.
+      //
+      // S8 (D6): there is no second, job-level crew write to order against any more - the crew
+      // statement lands on the trip this branch books or moves, and that IS the write. The job
+      // read below still runs last, because its derived `assignees` projection is the payload the
+      // Team card renders and it must show what the visit write did.
+      if (scheduled_start) {
+        const visitStart = new Date(scheduled_start);
+        const touched = await syncJobWindowOntoVisits(tx, {
+          jobId: id,
+          orgId: req.user!.organization_id,
+          scheduledAt: visitStart,
+          scheduledEnd: computedEnd ?? new Date(visitStart.getTime() + 60 * 60 * 1000),
+          isAllDay: is_all_day ?? false,
+        });
+        // Multi-visit S3 (D6): the crew has to land on the visit, or the Assign Technician dialog
+        // books a crewless trip beside a populated Team card and "crew lives on the visit" is true
+        // for the rows the migration folded and false for everything written afterwards.
+        //
+        // Scoped to the ONE visit syncJobWindowOntoVisits touched, and applied as the CHANGE
+        // against the crew the dialog was showing rather than as a wholesale restatement - this is
+        // a job-level statement, and a job can have several trips with different crews. See
+        // applyJobCrewStatementToVisit for why the two are not the same fact.
+        //
+        // A crew-only assign (no scheduled_start) falls outside this branch on purpose: no visit
+        // was booked or moved, so there is no trip for the crew to be on.
+        touchedVisitId = touched.id;
+        crewDelta = await applyJobCrewStatementToVisit(tx, {
+          visitId: touched.id,
+          orgId: req.user!.organization_id,
+          isNewVisit: touched.created,
+          previousJobCrew: [...currentIds],
+          statedCrew: assignee_ids,
+        });
+      } else {
+        // S8 (D6): a crew-only assign, with no window. There is no trip being booked, so the
+        // statement lands on the job's CURRENT visit - the trip the crew is standing at. When
+        // the job has no trip at all the statement is unexpressible and setJobCrewOnCurrentVisit
+        // throws NoVisitForCrewError, which the catch below turns into a 400.
+        crewDelta = await setJobCrewOnCurrentVisit(tx, {
+          jobId: id,
+          orgId: req.user!.organization_id,
+          previousJobCrew: [...currentIds],
+          statedCrew: assignee_ids,
+        });
+      }
 
       const updated = await tx.job.update({
         where: { id },
         data: {
           status: nextStatus,
           ...subStatusClears(existing.status, nextStatus),
-          scheduled_start: scheduled_start ? new Date(scheduled_start) : undefined,
-          scheduled_end: computedEnd ?? undefined,
-          is_all_day: is_all_day ?? false,
+          // S8 (RATIFIED, A5): scheduled_start/scheduled_end/is_all_day DROPPED as job columns -
+          // syncJobWindowOntoVisits above already wrote the real visit; this select's `visits[]`
+          // reflects that write, and the projection computes the wire keys off it.
           ...(stampScheduledFlag ? { customer_scheduled_email_sent_at: new Date() } : {}),
           // Only a real reschedule rewinds the milestones (Spec B1, Step 6b). A crew-only
           // assign (no scheduled_start in the body) must not null completed_at while leaving
@@ -2640,8 +3326,9 @@ export async function assign(req: Request, res: Response) {
         });
       }
 
-      // Diff TimelineEvents: one per crew change (replaces the single ASSIGNED event).
-      for (const uid of addedIds) {
+      // Diff TimelineEvents: one per crew change (replaces the single ASSIGNED event). Read off
+      // the real delta, so nobody the union kept is announced as removed.
+      for (const uid of crewDelta.added) {
         const u = crew.users.find((x) => x.id === uid);
         await tx.timelineEvent.create({
           data: {
@@ -2654,7 +3341,7 @@ export async function assign(req: Request, res: Response) {
           },
         });
       }
-      for (const uid of removedIds) {
+      for (const _uid of crewDelta.removed) {
         await tx.timelineEvent.create({
           data: {
             organization_id: req.user!.organization_id,
@@ -2673,11 +3360,11 @@ export async function assign(req: Request, res: Response) {
             organization_id: req.user!.organization_id,
             entity_type: 'JOB',
             entity_id: id,
-            event_type: existing.scheduled_start ? 'RESCHEDULED' : 'SCHEDULED',
-            description: existing.scheduled_start
+            event_type: currentWindow.scheduled_start ? 'RESCHEDULED' : 'SCHEDULED',
+            description: currentWindow.scheduled_start
               ? `Job ${existing.job_number} rescheduled`
               : `Job ${existing.job_number} scheduled`,
-            metadata: { from: existing.scheduled_start?.toISOString() ?? null, to: newStart.toISOString() },
+            metadata: { from: currentWindow.scheduled_start?.toISOString() ?? null, to: newStart.toISOString() },
             created_by: req.user!.id,
           },
         });
@@ -2692,33 +3379,33 @@ export async function assign(req: Request, res: Response) {
 
     // ─── In-app notification hooks — POST-COMMIT (must NOT run inside the txn; #271) ──
     // Best-effort: emit() never throws.
-    if (addedIds.length > 0) {
+    if (crewDelta.added.length > 0) {
       await emit({
         verb: 'dispatch.job_assigned',
         organizationId: req.user!.organization_id,
         actorId: req.user?.id ?? null,
         object: { type: 'JOB', id, label: existing.job_number },
-        entity: { assignee_ids: addedIds },
+        entity: { assignee_ids: crewDelta.added },
         data: {
           object_label: existing.job_number,
-          scheduled_start: (newStart ?? existing.scheduled_start)?.toISOString() ?? null,
+          scheduled_start: (newStart ?? currentWindow.scheduled_start)?.toISOString() ?? null,
         },
       });
     }
-    if (removedIds.length > 0) {
+    if (crewDelta.removed.length > 0) {
       await emit({
         verb: 'dispatch.job_unassigned',
         organizationId: req.user!.organization_id,
         actorId: req.user?.id ?? null,
         object: { type: 'JOB', id, label: existing.job_number },
-        entity: { assignee_ids: removedIds },
+        entity: { assignee_ids: crewDelta.removed },
         data: {
           object_label: existing.job_number,
-          scheduled_start: (newStart ?? existing.scheduled_start)?.toISOString() ?? null,
+          scheduled_start: (newStart ?? currentWindow.scheduled_start)?.toISOString() ?? null,
         },
       });
     }
-    if (timeChanged && addedIds.length === 0) {
+    if (timeChanged && crewDelta.added.length === 0) {
       // Reschedule with no crew change: notify all kept/current assignees.
       await emit({
         verb: 'dispatch.job_rescheduled',
@@ -2728,13 +3415,13 @@ export async function assign(req: Request, res: Response) {
         entity: { assignee_ids: keptIds },
         data: {
           object_label: existing.job_number,
-          scheduled_start: (newStart ?? existing.scheduled_start)?.toISOString() ?? null,
+          scheduled_start: (newStart ?? currentWindow.scheduled_start)?.toISOString() ?? null,
         },
       });
     }
 
     // ─── Automation Center events — post-commit, fire-and-forget (#271) ──────
-    for (const uid of addedIds) {
+    for (const uid of crewDelta.added) {
       const addedUser = crew.users.find((x) => x.id === uid);
       dispatchAutomationEvent({
         type: 'TECH_ASSIGNED',
@@ -2745,7 +3432,7 @@ export async function assign(req: Request, res: Response) {
         ...(addedUser ? { eventPayload: { recipient: addedUser } } : {}),
       });
     }
-    await dispatchTechUnassigned(req, removedIds, { id, label: existing.job_number });
+    await dispatchTechUnassigned(req, crewDelta.removed, { id, label: existing.job_number });
     // Narrowed to match the customer-facing email gates exactly (stampScheduledFlag /
     // the reschedule flag check below) — parity with the hard-coded senders these
     // dispatches replace. Do not simplify back to `newStart && timeChanged` alone,
@@ -2754,16 +3441,31 @@ export async function assign(req: Request, res: Response) {
     // (see phase 3 cutover plan). stampScheduledFlag = isFirstScheduleWithCrew AND the
     // send-guard flag still unset, so a job that was backward-cleared and re-assigned
     // does not announce "scheduled" to the customer a second time.
-    if (stampScheduledFlag) {
+    //
+    // SRVW-243 - an explicit tick REPLACES the automation for this occurrence
+    // rather than joining it. Two reasons the direct send has to win outright:
+    // a workflow can carry a send_window that defers delivery by hours, which is
+    // not what someone who just pressed "notify the customer" is asking for; and
+    // an org holding the default job-scheduled workflow would otherwise mail the
+    // customer twice for one action. Only THIS occurrence is suppressed - the
+    // workflow stays enabled for every untick.
+    //
+    // Q1: `&& !notifyDeclined` is the fix. Bare `!notify_customer` is true for BOTH "not
+    // mentioned" (fire the automation, back-compat) and "explicitly false" (the caller declined -
+    // firing the automation anyway mails the customer through the workflow, defeating the decline).
+    if (stampScheduledFlag && !notify_customer && !notifyDeclined) {
       dispatchAutomationEvent({
         type: 'JOB_SCHEDULED',
         organizationId: req.user!.organization_id,
         entity: { type: 'job', id, label: existing.job_number },
+        ...(touchedVisitId ? { visitId: touchedVisitId } : {}),
         actorId: req.user?.id ?? null,
       });
     }
     if (
-      existing.status === 'SCHEDULED' &&
+      !notify_customer &&
+      !notifyDeclined &&
+      isReschedule &&
       assignee_ids.length > 0 &&
       existing.customer_scheduled_email_sent_at != null &&
       newStart &&
@@ -2774,15 +3476,44 @@ export async function assign(req: Request, res: Response) {
         organizationId: req.user!.organization_id,
         entity: { type: 'job', id, label: existing.job_number },
         occurrenceKey: newStart.toISOString(),
+        ...(touchedVisitId ? { visitId: touchedVisitId } : {}),
         actorId: req.user?.id ?? null,
       });
     }
-    if (newStart && timeChanged && existing.scheduled_start) {
+    if (newStart && timeChanged && currentWindow.scheduled_start) {
       void rearmAnchoredWaits('job', id);
     }
 
-    res.json({ job: await presentJobDetail(req, job) });
+    // The send is AWAITED and post-commit. Awaited because the caller is told the
+    // outcome and cannot be told what has not happened yet; post-commit because a
+    // job that genuinely moved must not be rolled back by a mail provider. So a
+    // failure here is reported, never thrown - the response stays 200 and carries
+    // `notify`, and the UI says "rescheduled, but the customer email did not go
+    // out" instead of the older choice between a silent success and a false 502.
+    const notify = notify_customer
+      ? await notifyCustomerOfSchedule(req, {
+          jobId: id,
+          jobNumber: existing.job_number,
+          customer: existing.customer,
+          serviceLocation: existing.service_location,
+          crew: crew.users,
+          newStart,
+          kind: isReschedule ? 'rescheduled' : 'scheduled',
+          recipientEmail: notify_recipient_email,
+          cc: notify_cc_emails,
+          message: notify_message,
+        })
+      : undefined;
+
+    res.json({ job: await presentJobDetail(req, job), ...(notify ? { notify } : {}) });
   } catch (err) {
+    // S8 (D6): a crew statement on a job with no trip is not a server fault - it is a
+    // request the model cannot express. Surfaced as a 400 carrying the reason so the
+    // client can say it, rather than a silent no-op or an opaque 500.
+    if (err instanceof NoVisitForCrewError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     logger.error('Assign job error:', err);
     res.status(500).json({ error: 'Failed to assign job' });
   }
@@ -2806,8 +3537,15 @@ export async function setAssignees(req: Request, res: Response) {
         customer: { select: { first_name: true, last_name: true, company_name: true } },
         service_location: { select: { address_line1: true, city: true, state: true } },
         scope_notes: true,
-        scheduled_start: true,
-        assignees: { select: { user_id: true } },
+        // S8 (D6): crew through the trips.
+        // S8 (A5, RATIFIED): also the source of the CURRENT window (the two emit() payloads
+        // below) - scheduled_start is no longer a stored column.
+        visits: {
+          select: {
+            status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+            assignees: { select: { user_id: true } },
+          },
+        },
       },
     });
 
@@ -2815,6 +3553,9 @@ export async function setAssignees(req: Request, res: Response) {
       res.status(404).json({ error: 'Job not found' });
       return;
     }
+
+    // S8 (A5, RATIFIED): the CURRENT window, computed off the visit set.
+    const currentWindow = resolveJobScheduleWindow(existing.visits);
 
     // Per-instance crew-authority check (technician-ownership spec, Part C). The route guard
     // `canDo('assign','Job')` is SUBJECT-level, and until this PR only DISPATCHER/ADMIN held the
@@ -2832,15 +3573,24 @@ export async function setAssignees(req: Request, res: Response) {
       return;
     }
 
-    const currentIds = new Set(existing.assignees.map((a) => a.user_id));
-    const nextIds = new Set(assignee_ids);
-    const addedIds = assignee_ids.filter((uid) => !currentIds.has(uid));
-    const removedIds = [...currentIds].filter((uid) => !nextIds.has(uid));
+    // Same two-diff rule as assign(): the intent diff is not the delta. Under the union a member
+    // the request omitted can still be kept because they are crewed on one of the job's visits, so
+    // the timeline events and the dispatches below read what the write actually did.
+    let crewDelta: { added: string[]; removed: string[] } = { added: [], removed: [] };
+
+    const previousCrew = [...new Set(existing.visits.flatMap((v) => v.assignees.map((a) => a.user_id)))];
 
     const job = await prisma.$transaction(async (tx) => {
-      await replaceJobCrew(tx, id, req.user!.organization_id, assignee_ids);
+      // S8 (D6): `job_assignees` is gone, so the office's crew statement lands on the job's
+      // CURRENT visit. A job with no trip at all cannot hold crew - see setJobCrewOnCurrentVisit.
+      crewDelta = await setJobCrewOnCurrentVisit(tx, {
+        jobId: id,
+        orgId: req.user!.organization_id,
+        previousJobCrew: previousCrew,
+        statedCrew: assignee_ids,
+      });
 
-      for (const uid of addedIds) {
+      for (const uid of crewDelta.added) {
         const u = crew.users.find((x) => x.id === uid);
         await tx.timelineEvent.create({
           data: {
@@ -2853,7 +3603,7 @@ export async function setAssignees(req: Request, res: Response) {
           },
         });
       }
-      for (const _uid of removedIds) {
+      for (const _uid of crewDelta.removed) {
         await tx.timelineEvent.create({
           data: {
             organization_id: req.user!.organization_id,
@@ -2872,29 +3622,29 @@ export async function setAssignees(req: Request, res: Response) {
 
     // ─── In-app notification hooks — POST-COMMIT (must NOT run inside the txn; #271) ──
     // #361: notify.in_app:false suppresses ONLY the added-crew emit; removal stays unconditional.
-    if (addedIds.length > 0 && notify?.in_app !== false) {
+    if (crewDelta.added.length > 0 && notify?.in_app !== false) {
       await emit({
         verb: 'dispatch.job_assigned',
         organizationId: req.user!.organization_id,
         actorId: req.user?.id ?? null,
         object: { type: 'JOB', id, label: existing.job_number },
-        entity: { assignee_ids: addedIds },
+        entity: { assignee_ids: crewDelta.added },
         data: {
           object_label: existing.job_number,
-          scheduled_start: existing.scheduled_start?.toISOString() ?? null,
+          scheduled_start: currentWindow.scheduled_start?.toISOString() ?? null,
         },
       });
     }
-    if (removedIds.length > 0) {
+    if (crewDelta.removed.length > 0) {
       await emit({
         verb: 'dispatch.job_unassigned',
         organizationId: req.user!.organization_id,
         actorId: req.user?.id ?? null,
         object: { type: 'JOB', id, label: existing.job_number },
-        entity: { assignee_ids: removedIds },
+        entity: { assignee_ids: crewDelta.removed },
         data: {
           object_label: existing.job_number,
-          scheduled_start: existing.scheduled_start?.toISOString() ?? null,
+          scheduled_start: currentWindow.scheduled_start?.toISOString() ?? null,
         },
       });
     }
@@ -2904,7 +3654,7 @@ export async function setAssignees(req: Request, res: Response) {
     // parity with the (now-deleted) sendJobAssignmentEmail gate at the bottom of this
     // function. Removal (TECH_UNASSIGNED) stays unconditional, same as today.
     if (notify?.email !== false) {
-      for (const uid of addedIds) {
+      for (const uid of crewDelta.added) {
         const addedUser = crew.users.find((x) => x.id === uid);
         dispatchAutomationEvent({
           type: 'TECH_ASSIGNED',
@@ -2916,10 +3666,17 @@ export async function setAssignees(req: Request, res: Response) {
         });
       }
     }
-    await dispatchTechUnassigned(req, removedIds, { id, label: existing.job_number });
+    await dispatchTechUnassigned(req, crewDelta.removed, { id, label: existing.job_number });
 
     res.json({ job: await presentJobDetail(req, job) });
   } catch (err) {
+    // S8 (D6): a crew statement on a job with no trip is not a server fault - it is a
+    // request the model cannot express. Surfaced as a 400 carrying the reason so the
+    // client can say it, rather than a silent no-op or an opaque 500.
+    if (err instanceof NoVisitForCrewError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     logger.error('Set assignees error:', err);
     res.status(500).json({ error: 'Failed to set job assignees' });
   }
@@ -3122,13 +3879,50 @@ export async function setSubStatus(req: Request, res: Response) {
   }
 }
 
+/**
+ * S7 (D19, D23, user story 39): the opt-out this gesture can now carry.
+ *
+ * The nested `notify` object, byte-identical to the three visit schemas - this route calls trips
+ * off exactly as `/visits/:visitId/cancel` does, so it takes the same shape rather than /assign's
+ * flat keys. Optional throughout: omitting the object preserves this endpoint's original silence,
+ * which is what every non-dialog caller (the status dispatcher included) relies on.
+ */
+export const unassignJobSchema = z.object({
+  notify: z
+    .object({
+      notify_customer: z.boolean().optional(),
+      notify_recipient_email: z.string().email().optional(),
+      notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+      notify_message: z.string().max(5000).optional(),
+    })
+    .optional(),
+});
+
 export async function unassign(req: Request, res: Response) {
   try {
     const id = param(req, 'id');
+    const { notify } = (req.body ?? {}) as {
+      notify?: {
+        notify_customer?: boolean;
+        notify_recipient_email?: string;
+        notify_cc_emails?: string[];
+        notify_message?: string;
+      };
+    };
+    const notifyCustomer = notify?.notify_customer === true;
 
     const existing = await prisma.job.findUnique({
       where: { id, ...tenantWhere(req) },
-      select: { id: true, status: true, job_number: true, source_plan_id: true },
+      // S7 widens this with the customer email's own fields, the same set the three visit
+      // writers read. Nothing else about the select changes.
+      select: {
+        id: true,
+        status: true,
+        job_number: true,
+        source_plan_id: true,
+        customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
+        service_location: { select: { address_line1: true, city: true, state: true } },
+      },
     });
 
     if (!existing) {
@@ -3146,15 +3940,46 @@ export async function unassign(req: Request, res: Response) {
       return;
     }
 
-    // UNSCHEDULE (crew ⟂ schedule): clear the TIME only and drop to UNASSIGNED. The crew is KEPT
+    // Multi-visit S6 (D16, D19): "unscheduled" means the job has no LIVE visit left. Before this
+    // slice the handler cleared the Job.scheduled_start mirror and touched no visit row at all,
+    // which was invisible only because the board read the mirror - now that the board reads the
+    // visit set, a surviving live trip would keep painting a card for a job the dispatcher just
+    // removed, and the next syncJobFromVisits would restore the mirror from it. The row is kept
+    // as CANCELLED (D19: rows are never deleted). Plain prisma, no transaction, matching the
+    // PlanVisit hook below in this same handler.
+    //
+    // Deliberately NOT routed through syncJobFromVisits: this handler writes the job row itself,
+    // by hand, and the re-derivation would fight the status it is deliberately setting.
+    // Read BEFORE the write, because the write is what makes them not-live: the trip the customer
+    // is about to be told about is the trip this request calls off, and after the updateMany
+    // there is nothing left to name (#1522's rule - the emailed row is the persisted row).
+    const cancelledTrips = await prisma.visit.findMany({
+      where: { job_id: id, ...tenantWhere(req), status: { in: [...LIVE_VISIT_STATUSES] } },
+      select: { id: true, visit_seq: true, scheduled_at: true, scheduled_end: true },
+      orderBy: { scheduled_at: 'asc' },
+    });
+
+    await prisma.visit.updateMany({
+      where: { job_id: id, ...tenantWhere(req), status: { in: [...LIVE_VISIT_STATUSES] } },
+      data: {
+        status: 'CANCELLED',
+        cancelled_at: new Date(),
+        cancelled_by: req.user!.id,
+        cancelled_reason: 'Removed from schedule',
+      },
+    });
+
+    // UNSCHEDULE (crew ⟂ schedule): clear the TIME only and drop to UNSCHEDULED. The crew is KEPT
     // (state 3: crewed-unscheduled). No customer email.
+    // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - nothing to null
+    // here any more. The live visits were already cancelled above (BEFORE this statement), so
+    // this select's `visits[]` already shows no qualifying live visit and the response's computed
+    // projection reads null on its own.
     const job = await prisma.job.update({
       where: { id, ...tenantWhere(req) },
       data: {
-        status: 'UNASSIGNED',
-        ...subStatusClears(existing.status, 'UNASSIGNED'),
-        scheduled_start: null,
-        scheduled_end: null,
+        status: 'UNSCHEDULED',
+        ...subStatusClears(existing.status, 'UNSCHEDULED'),
       },
       select: jobDetailSelect,
     });
@@ -3164,7 +3989,7 @@ export async function unassign(req: Request, res: Response) {
         organization_id: req.user!.organization_id,
         entity_type: 'JOB',
         entity_id: id,
-        event_type: 'UNASSIGNED',
+        event_type: 'UNSCHEDULED',
         description: `Job ${existing.job_number} moved to Unassigned (crew kept)`,
         created_by: req.user!.id,
       },
@@ -3187,7 +4012,33 @@ export async function unassign(req: Request, res: Response) {
       });
     }
 
-    res.json({ job: await presentJobDetail(req, job) });
+    // AWAITED and post-commit, never fatal - the same contract every other notify site has.
+    // Only when there was a trip to call off: on a job whose visits were already cancelled there
+    // is nothing the customer could be waiting in for, and "your visit is cancelled" naming no
+    // visit at all would be a notice about nothing.
+    //
+    // ONE trip means the copy can name it. Several means this one gesture called off the whole
+    // set, and picking one of them to name would be a lie about the other two - so the trip
+    // number and its slot are left out and the notice reads as the job-wide message it is.
+    const notifyResult = notifyCustomer && cancelledTrips.length > 0
+      ? await notifyCustomerOfSchedule(req, {
+          jobId: id,
+          jobNumber: existing.job_number,
+          customer: existing.customer,
+          serviceLocation: existing.service_location,
+          crew: [],
+          newStart: cancelledTrips.length === 1 ? cancelledTrips[0]!.scheduled_at : null,
+          newEnd: cancelledTrips.length === 1 ? cancelledTrips[0]!.scheduled_end : null,
+          kind: 'cancelled',
+          visitSeq: cancelledTrips.length === 1 ? cancelledTrips[0]!.visit_seq : null,
+          cancelledReason: 'Removed from schedule',
+          recipientEmail: notify?.notify_recipient_email,
+          cc: notify?.notify_cc_emails,
+          message: notify?.notify_message,
+        })
+      : undefined;
+
+    res.json({ job: await presentJobDetail(req, job), ...(notifyResult ? { notify: notifyResult } : {}) });
   } catch (err) {
     logger.error('Unassign job error:', err);
     res.status(500).json({ error: 'Failed to unassign job' });
@@ -3200,7 +4051,7 @@ export async function start(req: Request, res: Response) {
 
     const existing = await prisma.job.findUnique({
       where: { id, ...tenantWhere(req) },
-      select: { id: true, status: true, assignees: { select: { user_id: true } }, job_number: true, source_plan_id: true },
+      select: { id: true, status: true, visits: { select: { assignees: { select: { user_id: true } } } }, job_number: true, source_plan_id: true },
     });
 
     if (!existing) {
@@ -3211,10 +4062,23 @@ export async function start(req: Request, res: Response) {
     // Admins/dispatchers may start any job in their org; a technician may only start a job
     // they are assigned to (the route guard already verified the `start Job` capability).
     const isOrgManager = req.ability!.can('manage', 'all' as Subject) || req.user!.role === 'DISPATCHER';
-    if (!isOrgManager && !existing.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (!isOrgManager && !isOnJobCrew(existing, req.user!.id)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
+
+    // S4 (B9): the milestone is a fact about the TRIP, so the job's current visit is stamped
+    // through the same writer the per-visit route uses. The job row keeps its own copy below,
+    // and keeps it past S8: the bar no longer reads job.started_at, but deriveJobStatusFromVisits
+    // opens with `if (jobStartedAt != null) return 'IN_PROGRESS'` for the urgent workflow - a job
+    // started on the spot with no visit at all.
+    const startedAt = new Date();
+    await stampCurrentJobVisitMilestone(prisma, {
+      jobId: id,
+      orgId: req.user!.organization_id,
+      milestone: 'started',
+      at: startedAt,
+    });
 
     // B-9 (Spec B1): timeline event written BEFORE the update -- see arrive() for why.
     const clears = milestoneClears('started');
@@ -3235,7 +4099,7 @@ export async function start(req: Request, res: Response) {
       data: {
         status: 'IN_PROGRESS',
         ...subStatusClears(existing.status, 'IN_PROGRESS'),
-        started_at: new Date(),
+        started_at: startedAt,
         ...clears,
       },
       select: jobDetailSelect,
@@ -3252,7 +4116,7 @@ export async function start(req: Request, res: Response) {
       actorId: req.user?.id ?? null,
       object: { type: 'JOB', id, label: existing.job_number },
       entity: {
-        assignee_ids: existing.assignees.map((a) => a.user_id),
+        assignee_ids: jobCrewIds(existing),
         sold_by_id: (job as any).estimate?.lead?.commission_owner?.id as string | undefined,
       },
       data: { object_label: existing.job_number },
@@ -3276,7 +4140,7 @@ export async function complete(req: Request, res: Response) {
         id: true,
         status: true,
         started_at: true,
-        assignees: { select: { user_id: true } },
+        visits: { select: { assignees: { select: { user_id: true } } } },
         job_number: true,
         source_plan_id: true,
       },
@@ -3289,7 +4153,7 @@ export async function complete(req: Request, res: Response) {
 
     // Admins/dispatchers may complete any job in their org; a technician may only complete a
     // job they are assigned to (the route guard already verified the `complete Job` capability).
-    const isAssignedToJob = existing.assignees.some((a) => a.user_id === req.user!.id);
+    const isAssignedToJob = isOnJobCrew(existing, req.user!.id);
     const isOrgManager = req.ability!.can('manage', 'all' as Subject) || req.user!.role === 'DISPATCHER';
     if (!isOrgManager && !isAssignedToJob) {
       res.status(403).json({ error: 'Insufficient permissions' });
@@ -3350,7 +4214,7 @@ export async function complete(req: Request, res: Response) {
       actorId: req.user?.id ?? null,
       object: { type: 'JOB', id, label: existing.job_number },
       entity: {
-        assignee_ids: existing.assignees.map((a) => a.user_id),
+        assignee_ids: jobCrewIds(existing),
         sold_by_id: (job as any).estimate?.lead?.commission_owner?.id as string | undefined,
       },
       data: { object_label: existing.job_number },
@@ -3525,17 +4389,6 @@ export async function cancel(req: Request, res: Response) {
       // is the ONLY unwind path, and its CAS is what makes a multi-anchor LO return exactly once.
       await applyAnchoredLoUnwind(tx, loUnwind, { cancelOpen: true });
 
-      const updated = await tx.job.update({
-        where: { id, ...tenantWhere(req) },
-        data: {
-          status: 'CANCELLED',
-          ...subStatusClears(existing.status, 'CANCELLED'),
-          cancelled_at: new Date(),
-          cancelled_reason,
-        },
-        select: jobDetailSelect,
-      });
-
       await tx.timelineEvent.create({
         data: {
           organization_id: req.user!.organization_id,
@@ -3548,6 +4401,34 @@ export async function cancel(req: Request, res: Response) {
         },
       });
 
+      // D19: cancelling the JOB calls off its not-yet-completed trips and leaves the completed
+      // ones as history. Scoped by tenant AND job AND the live statuses - the predicate IS the
+      // rule, so a completed visit's completed_at is never overwritten by a later cancellation.
+      // Un-cancelling the job deliberately does NOT revive them.
+      //
+      // S8 (RATIFIED, A5): this now has to run BEFORE the tx.job.update below (it did not,
+      // before this PR - order did not matter while the job carried its own scheduled_start/
+      // scheduled_end mirror, cleared in that same write). Now that the wire keys are a
+      // COMPUTED PROJECTION of `job.visits[]` read off the row `tx.job.update`'s own `select`
+      // returns, that select has to run AFTER the visits it reads are already cancelled, or the
+      // response served for THIS request - the one the job page hero renders - would compute the
+      // projection off the pre-cancellation visit set and show a real appointment on a job that
+      // was just cancelled (section 4.2 of the multi-visit QA run named this exact hazard against
+      // the old mirror; the projection carries the identical risk if read at the wrong point).
+      await tx.visit.updateMany({
+        where: {
+          ...tenantWhere(req),
+          job_id: id,
+          status: { in: [...LIVE_VISIT_STATUSES] },
+        },
+        data: {
+          status: 'CANCELLED',
+          cancelled_at: new Date(),
+          cancelled_reason,
+          cancelled_by: req.user!.id,
+        },
+      });
+
       // Service-plan visit hook: cancelling the visit-job frees its PlanVisit slot back to the
       // plan (CANCELLED visits are excluded from the term-scoped remaining count).
       if (existing.source_plan_id) {
@@ -3556,6 +4437,20 @@ export async function cancel(req: Request, res: Response) {
           data: { status: 'CANCELLED' },
         });
       }
+
+      // MUST run last: its `select: jobDetailSelect` re-reads `visits[]`, and the response's
+      // computed schedule projection has to see the just-cancelled state above, not a stale
+      // snapshot from before this transaction's own writes.
+      const updated = await tx.job.update({
+        where: { id, ...tenantWhere(req) },
+        data: {
+          status: 'CANCELLED',
+          ...subStatusClears(existing.status, 'CANCELLED'),
+          cancelled_at: new Date(),
+          cancelled_reason,
+        },
+        select: jobDetailSelect,
+      });
 
       return updated;
     });
@@ -3567,7 +4462,9 @@ export async function cancel(req: Request, res: Response) {
       actorId: req.user?.id ?? null,
       object: { type: 'JOB', id, label: existing.job_number },
       entity: {
-        assignee_ids: ((job as any)?.assignees ?? []).map((a: { user: { id: string } }) => a.user.id),
+        // S8 (D6): `job` is the RAW jobDetailSelect row, not the presented payload - the derived
+        // `assignees` wire key is added later, by presentJobDetail. Crew comes off the trips.
+        assignee_ids: jobCrewIds(job),
         sold_by_id: (job as any)?.estimate?.lead?.commission_owner?.id as string | undefined,
       },
       data: { object_label: existing.job_number, cancelled_reason },
@@ -3603,7 +4500,8 @@ export async function reopen(req: Request, res: Response) {
 
     const existing = await prisma.job.findUnique({
       where: { id, ...tenantWhere(req) },
-      select: { id: true, status: true, job_number: true, invoices: { select: { status: true } } },
+      // S4: source_plan_id joins the select so the PlanVisit revert below can run.
+      select: { id: true, status: true, job_number: true, source_plan_id: true, invoices: { select: { status: true } } },
     });
 
     if (!existing) {
@@ -3621,9 +4519,32 @@ export async function reopen(req: Request, res: Response) {
         status: 'IN_PROGRESS',
         ...subStatusClears(existing.status, 'IN_PROGRESS'),
         completed_at: null,
+        // The evidence of the terminal state goes with it. Leaving these set produced a job
+        // reading In Progress while still carrying a full cancellation record, which every
+        // report keyed on cancelled_at still counted as cancelled (section 4.2).
+        cancelled_at: null,
+        cancelled_reason: null,
       },
       select: jobDetailSelect,
     });
+
+    // The window has to be re-derived off the visit set, or the mirror keeps pointing at a
+    // trip that is still CANCELLED - J00260 read IN_PROGRESS with scheduled_start still on
+    // 2026-09-21T13:00Z and its only visit called off. `deriveStatus: false` because THIS
+    // handler is the human deciding the status: re-deriving would answer UNSCHEDULED off an
+    // all-cancelled visit set and immediately undo the reopen.
+    await syncJobFromVisits(prisma, {
+      jobId: id,
+      orgId: req.user!.organization_id,
+      deriveStatus: false,
+    });
+
+    // Reopening CLEARS completion, so the linked service-plan visit has to come back with it -
+    // exactly what start() and arrive() already do through clearsCompletion. reopen() never did,
+    // so a reopened plan job left its PlanVisit COMPLETED and the plan's visits_remaining
+    // permanently decremented. lib/job-milestones.ts documented this as a live bug; it is fixed
+    // here because per-visit completion runs the path far more often.
+    await revertPlanVisitOnUncomplete(req, id, existing.source_plan_id);
 
     await prisma.timelineEvent.create({
       data: {
@@ -3643,7 +4564,9 @@ export async function reopen(req: Request, res: Response) {
       actorId: req.user?.id ?? null,
       object: { type: 'JOB', id, label: existing.job_number },
       entity: {
-        assignee_ids: ((job as any)?.assignees ?? []).map((a: { user: { id: string } }) => a.user.id),
+        // S8 (D6): `job` is the RAW jobDetailSelect row, not the presented payload - the derived
+        // `assignees` wire key is added later, by presentJobDetail. Crew comes off the trips.
+        assignee_ids: jobCrewIds(job),
       },
       data: { object_label: existing.job_number },
     });
@@ -3691,9 +4614,7 @@ type StatusVerb = {
  */
 const STATUS_VERBS: Record<JobStatus, StatusVerb> = {
   SCHEDULED: { action: 'assign', handler: assign, schema: assignJobSchema },
-  UNASSIGNED: { action: 'unassign', handler: unassign },
-  EN_ROUTE: { action: 'en_route', handler: enRoute },
-  ON_SITE: { action: 'arrive', handler: arrive },
+  UNSCHEDULED: { action: 'unassign', handler: unassign },
   IN_PROGRESS: { action: 'start', handler: start },
   COMPLETED: { action: 'complete', handler: complete, schema: completeJobSchema },
   CANCELLED: { action: 'cancel', handler: cancel, schema: cancelJobSchema },
@@ -3727,7 +4648,7 @@ const STATUS_VERBS: Record<JobStatus, StatusVerb> = {
  *    assignJobSchema requires the array and it is REPLACE semantics - omitting it must not empty
  *    the crew.
  *
- *  - UNASSIGNED routes into unassign(), which nulls scheduled_start/scheduled_end. Callers get
+ *  - UNSCHEDULED routes into unassign(), which nulls scheduled_start/scheduled_end. Callers get
  *    UNSCHEDULE semantics (crew kept), not a bare relabel.
  */
 export async function setStatus(req: Request, res: Response) {
@@ -3760,13 +4681,13 @@ export async function setStatus(req: Request, res: Response) {
       if (crew === undefined) {
         const existing = await prisma.job.findUnique({
           where: { id: param(req, 'id'), ...tenantWhere(req) },
-          select: { id: true, assignees: { select: { user_id: true } } },
+          select: { id: true, visits: { select: { assignees: { select: { user_id: true } } } } },
         });
         if (!existing) {
           res.status(404).json({ error: 'Job not found' });
           return;
         }
-        crew = existing.assignees.map((a) => a.user_id);
+        crew = jobCrewIds(existing);
       }
 
       verbBody = {
@@ -3812,9 +4733,9 @@ export async function enRoute(req: Request, res: Response) {
         id: true,
         status: true,
         // Crew (M2M): user_id for the access check + first member's name for the email.
-        assignees: { select: { user_id: true, user: { select: { first_name: true } } } },
+        // S8 (D6): crew through the trips.
+        visits: { select: { assignees: { select: { user_id: true, user: { select: { first_name: true } } } } } },
         job_number: true,
-        scheduled_start: true,
         customer: { select: { id: true, email: true, first_name: true, company_name: true } },
         service_location: { select: { address_line1: true, city: true, state: true } },
       },
@@ -3828,21 +4749,40 @@ export async function enRoute(req: Request, res: Response) {
     // Admins/dispatchers may advance any job in their org; a technician may only advance a job
     // they are assigned to (the route guard already verified the `en_route Job` capability).
     const isOrgManager = req.ability!.can('manage', 'all' as Subject) || req.user!.role === 'DISPATCHER';
-    if (!isOrgManager && !existing.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (!isOrgManager && !isOnJobCrew(existing, req.user!.id)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
 
     const enRouteAt = new Date();
-    const job = await prisma.job.update({
+    // S4 (B9): stamp the job's current visit, same writer as the per-visit /en-route route. The
+    // automation's occurrenceKey below is this same instant, so the emitted key IS the persisted
+    // stamp on both rows.
+    await stampCurrentJobVisitMilestone(prisma, {
+      jobId: id,
+      orgId: req.user!.organization_id,
+      milestone: 'en_route',
+      at: enRouteAt,
+    });
+
+    // S4 (D12/D17): being on the way is a fact about the TRIP, stamped on the visit above. The
+    // job's OWN status does not move - EN_ROUTE has retired from JobStatus, and D12 makes
+    // IN_PROGRESS mean "any visit STARTED", which this is not. S8 (RATIFIED): the job row's OWN
+    // en_route_at mirror is DROPPED outright (S5 already repointed the lifecycle bar onto the
+    // visit set, leaving it with no reader anywhere) - there is nothing left to write at the job
+    // level, so this is a plain re-read for the response, not an update.
+    const job = await prisma.job.findUnique({
       where: { id, ...tenantWhere(req) },
-      data: {
-        status: 'EN_ROUTE',
-        ...subStatusClears(existing.status, 'EN_ROUTE'),
-        en_route_at: enRouteAt,
-      },
       select: jobDetailSelect,
     });
+    // Defensive: the row existed a moment ago (`existing`, above) and nothing here can delete it,
+    // but a bare re-read (unlike the .update() this replaced) fails silently on a vanished row
+    // rather than throwing - keep the same 404 shape every other handler in this file gives a
+    // gone-between-reads job, rather than trusting presentJobDetail's null path to a 200.
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
 
     await prisma.timelineEvent.create({
       data: {
@@ -3860,7 +4800,7 @@ export async function enRoute(req: Request, res: Response) {
     // named technician to send at all. The default automation tells the customer
     // who is on the way, so dispatching with an empty crew would email them a
     // notification naming nobody.
-    if (existing.assignees.length > 0) {
+    if (jobCrewIds(existing).length > 0) {
       dispatchAutomationEvent({
         type: 'JOB_EN_ROUTE',
         organizationId: req.user!.organization_id,
@@ -3883,7 +4823,7 @@ export async function arrive(req: Request, res: Response) {
 
     const existing = await prisma.job.findUnique({
       where: { id, ...tenantWhere(req) },
-      select: { id: true, status: true, assignees: { select: { user_id: true } }, job_number: true, source_plan_id: true },
+      select: { id: true, status: true, visits: { select: { assignees: { select: { user_id: true } } } }, job_number: true, source_plan_id: true },
     });
 
     if (!existing) {
@@ -3894,7 +4834,7 @@ export async function arrive(req: Request, res: Response) {
     // Admins/dispatchers may advance any job in their org; a technician may only advance a job
     // they are assigned to (the route guard already verified the `arrive Job` capability).
     const isOrgManager = req.ability!.can('manage', 'all' as Subject) || req.user!.role === 'DISPATCHER';
-    if (!isOrgManager && !existing.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (!isOrgManager && !isOnJobCrew(existing, req.user!.id)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
@@ -3902,6 +4842,15 @@ export async function arrive(req: Request, res: Response) {
     // B-9 (Spec B1): the timeline event is written BEFORE the update, not after -- so a crash
     // between the two never leaves a status change with no audit trail. Its metadata records
     // what a backward move actually cleared (the spec's own ask), empty for a forward move.
+    // S4 (B9): stamp the job's current visit, same writer as the per-visit /arrive route.
+    const onSiteAt = new Date();
+    await stampCurrentJobVisitMilestone(prisma, {
+      jobId: id,
+      orgId: req.user!.organization_id,
+      milestone: 'on_site',
+      at: onSiteAt,
+    });
+
     const clears = milestoneClears('on_site');
     await prisma.timelineEvent.create({
       data: {
@@ -3915,13 +4864,39 @@ export async function arrive(req: Request, res: Response) {
       },
     });
 
+    // S4 (D12): `clears` is erasing the job's own started_at / completed_at / cancelled_at, so the
+    // status those columns justified has to be re-derived from what is left - the visit set, with
+    // the job's start stamp gone. Without this a backward move off a terminal state clears
+    // cancelled_reason and leaves `status` at CANCELLED (a job reading Cancelled with no record of
+    // why, which nothing re-derives), and a backward move off IN_PROGRESS leaves the board
+    // colouring the job in flight after the dispatcher corrected it.
+    //
+    // Read AFTER the visit stamp above, so the rewind that stamp performs is already in the set.
+    // A job holding no visits at all keeps its status untouched unless it is leaving a terminal
+    // one: there is nothing to derive from, and demoting a legacy row to UNSCHEDULED on an
+    // arrival press would drop it off the board.
+    const visitsAfterStamp = await prisma.visit.findMany({
+      where: { organization_id: req.user!.organization_id, job_id: id },
+      select: { status: true, started_at: true },
+    });
+    const leavingTerminal = existing.status === 'COMPLETED' || existing.status === 'CANCELLED';
+    const derivedStatus =
+      visitsAfterStamp.length > 0 || leavingTerminal
+        ? deriveJobStatusFromVisits(visitsAfterStamp, null)
+        : undefined;
+
     const job = await prisma.job.update({
       where: { id, ...tenantWhere(req) },
       data: {
-        status: 'ON_SITE',
-        ...subStatusClears(existing.status, 'ON_SITE'),
-        on_site_at: new Date(),
+        // S4 (D12/D17): arriving is a fact about the TRIP, stamped on the visit above. ON_SITE has
+        // retired from JobStatus and arriving is not starting, so the job never reads ON_SITE -
+        // whatever it reads now comes from the derivation above. `clears` rewinds HISTORY on top
+        // of that: the later stamps go, and the job is un-cancelled. S8 (RATIFIED): the job row's
+        // OWN on_site_at mirror is DROPPED outright - nothing writes it here any more.
         ...clears,
+        ...(derivedStatus !== undefined
+          ? { status: derivedStatus, ...subStatusClears(existing.status, derivedStatus) }
+          : {}),
       },
       select: jobDetailSelect,
     });
@@ -4258,12 +5233,10 @@ export async function getStats(req: Request, res: Response) {
     // owner/team/location condition for a conditional read grant, or MATCH_NOTHING (fail-closed).
     const rowScope = await scopeWhereForReq(req, 'Job');
     const orgWhere = { ...tenantWhere(req), ...rowScope };
-    const [unassignedCount, scheduledCount, inProgressCount, enRouteCount, onSiteCount, completedCount, cancelledCount] = await Promise.all([
-      prisma.job.count({ where: { ...orgWhere, status: 'UNASSIGNED' } }),
+    const [unassignedCount, scheduledCount, inProgressCount, completedCount, cancelledCount] = await Promise.all([
+      prisma.job.count({ where: { ...orgWhere, status: 'UNSCHEDULED' } }),
       prisma.job.count({ where: { ...orgWhere, status: 'SCHEDULED' } }),
       prisma.job.count({ where: { ...orgWhere, status: 'IN_PROGRESS' } }),
-      prisma.job.count({ where: { ...orgWhere, status: 'EN_ROUTE' } }),
-      prisma.job.count({ where: { ...orgWhere, status: 'ON_SITE' } }),
       prisma.job.count({ where: { ...orgWhere, status: 'COMPLETED' } }),
       prisma.job.count({ where: { ...orgWhere, status: 'CANCELLED' } }),
     ]);
@@ -4271,8 +5244,9 @@ export async function getStats(req: Request, res: Response) {
     res.json({
       unassigned: unassignedCount,
       scheduled: scheduledCount,
-      // Spec B1 (Task 5): fold EN_ROUTE/ON_SITE into in_progress, same as list()'s stats block.
-      in_progress: inProgressCount + enRouteCount + onSiteCount,
+      // S4 (D17): EN_ROUTE/ON_SITE are gone from JobStatus, so there is nothing left to fold -
+      // a job whose crew is on the way or on site derives SCHEDULED or IN_PROGRESS on its own.
+      in_progress: inProgressCount,
       completed: completedCount,
       cancelled: cancelledCount,
     });
@@ -4324,7 +5298,7 @@ export async function duplicate(req: Request, res: Response) {
           scope_notes: source.scope_notes,
           job_type: source.job_type,
           estimated_duration: source.estimated_duration,
-          status: 'UNASSIGNED',
+          status: 'UNSCHEDULED',
           tax_rate: taxRate,
           // NOT copied: estimate_id (standalone), discount, schedule, assignees, invoices.
           // Audit: whoever pressed Duplicate owns the new row's provenance, not the source's creator.
@@ -4659,5 +5633,1103 @@ export async function createInvoiceFromJob(req: Request, res: Response) {
   } catch (err) {
     logger.error('Error creating invoice from job:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── Visits collection (multi-visit S2) ────────────────────────────────────
+//
+// The job twin of the lead visits collection shipped in S1. Per the spec's API contract, visits
+// are a NESTED COLLECTION on their parent. POST books an ADDITIONAL trip on the job; it never
+// collapses onto an existing row, which is the whole invariant this slice lifts for jobs.
+//
+// Deliberately NOT part of updateJobSchema: MANAGE_LINES_FIELDS is derived BY EXCLUSION from that
+// schema's shape, so any key added there without being classified silently becomes a
+// `manage_lines Job` money field and reddens permissions-job-manage-lines.test.ts.
+//
+// Multi-visit S3 (D6): `assignee_ids` lands here, on the VISIT, now that visit_assignees.lead_id
+// is nullable. Crew is per-visit from this slice on; `job_assignees` stays as the derived UNION
+// its many readers (CASL's OWN_JOB row-scope, TeamCard, the schedule board, copilot) still read.
+/**
+ * A visit's window has to be a real one. Neither dialog can be trusted to hold this on its own -
+ * the client is a client - and the consequences are silent rather than cosmetic: the mirror copies
+ * the window onto the job, and detectCrewConflicts tests overlap with
+ * `scheduled_start < end AND scheduled_end > start`, which no zero-width or inverted block can
+ * satisfy, so double-booking checks on that job quietly stop finding anything.
+ */
+function endAfterStart(v: { scheduled_start: string; scheduled_end: string }): boolean {
+  return new Date(v.scheduled_end).getTime() > new Date(v.scheduled_start).getTime();
+}
+const END_AFTER_START = {
+  message: 'scheduled_end must be after scheduled_start',
+  path: ['scheduled_end'],
+};
+
+export const createJobVisitSchema = z.object({
+  scheduled_start: z.string().datetime({ offset: true }),
+  scheduled_end: z.string().datetime({ offset: true }),
+  is_all_day: z.boolean().optional().default(false),
+  // The crew going on THIS trip. A default of [] is correct on the POST (a booking that names
+  // nobody genuinely has no crew) and is emphatically NOT correct on the PATCH twin below - see
+  // the comment there.
+  assignee_ids: z.array(z.string().uuid()).default([]),
+  notes: z.string().max(5000).optional(),
+  // Accepted and ignored: the API contract says omitting the notify object "preserves today's
+  // behaviour", and per-visit customer email is S7 (which lands on top of SRVW-243, not racing it).
+  notify: z
+    .object({
+      notify_customer: z.boolean().optional(),
+      // `.email()` and the capped cc array match assignJobSchema (:432) exactly. Before S7 this
+      // was a bare z.string() with no cc at all, so a malformed address reached the provider
+      // through the visit door and Zod SILENTLY STRIPPED the composer's CC list - a success
+      // toast and no mail to the person who was copied.
+      notify_recipient_email: z.string().email().optional(),
+      notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+      notify_message: z.string().max(5000).optional(),
+    })
+    .optional(),
+}).refine(endAfterStart, END_AFTER_START);
+
+/** Every visit on the job, earliest scheduled first. */
+export async function listVisits(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const job = await prisma.job.findUnique({ where: { id, ...tenantWhere(req) }, select: { id: true } });
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    // tenantWhere above is a TENANCY check, not a row-scope one. `read Job` is CONDITIONAL for a
+    // technician (OWN_OR_CREATED_JOB), and the route gate is subject-level, so without this a
+    // technician reads every crew's itinerary and per-visit notes in the org - while GET
+    // /api/jobs/:id on the same row 403s. Same check getById and the other nested job
+    // collections apply; the two write paths below already had it.
+    if (!(await canActOnRow(req, 'Job', prisma.job, job.id, 'read'))) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    res.json({ visits: await listJobVisits(req, id) });
+  } catch (err) {
+    logger.error('List job visits error:', err);
+    res.status(500).json({ error: 'Failed to list visits' });
+  }
+}
+
+/** Book a NEW visit on the job, leaving any existing ones untouched. */
+export async function createVisit(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const { scheduled_start, scheduled_end, is_all_day, notes, assignee_ids, notify } = req.body as {
+      scheduled_start: string;
+      scheduled_end: string;
+      is_all_day: boolean;
+      notes?: string;
+      assignee_ids: string[];
+      notify?: {
+        notify_customer?: boolean;
+        notify_recipient_email?: string;
+        notify_cc_emails?: string[];
+        notify_message?: string;
+      };
+    };
+    const notifyCustomer = notify?.notify_customer === true;
+    // Q1: the third state. `notify` absent -> unchanged (fire the automation, the back-compat path
+    // every non-dialog caller relies on). `notify.notify_customer === true` -> unchanged (send
+    // directly below, suppress the automation). `notify.notify_customer === false` -> NEITHER: the
+    // caller explicitly declined telling the customer, and the automation must not do it instead.
+    const notifyDeclined = notify !== undefined && notify.notify_customer === false;
+
+    const existing = await prisma.job.findUnique({
+      where: { id, ...tenantWhere(req) },
+      // S7: job_number labels the automation event and the customer email. Widened here rather
+      // than re-read after the commit, so the label and the row this handler authorised are the
+      // same read.
+      select: {
+        id: true,
+        status: true,
+        job_number: true,
+        // S7: the customer email's own fields. The address the composer offers and the address
+        // this handler mails are therefore the same read.
+        customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
+        service_location: { select: { address_line1: true, city: true, state: true } },
+      },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // The route gate only asks whether this principal may EVER reschedule. canActOnRow asks the
+    // row, the same per-instance check assign() applies - without it a technician granted
+    // `reschedule Job` could add visits to every job in the org.
+    if (!(await canActOnRow(req, 'Job', prisma.job, existing.id, 'reschedule'))) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    // Multi-visit S3: booking TIME is a `reschedule Job` fact; naming CREW is an `assign Job` one,
+    // wherever it is written. The visit routes are gated `reschedule Job` (see job.routes.ts's S2
+    // comment on that deliberate asymmetry with POST /:id/assign, which first-books under `assign
+    // Job`), and canDo is subject-level, so without this second per-instance check hanging crew
+    // off these routes hands every reschedule-only grantee the ability to re-crew jobs - a route
+    // around the very gate that comment says must not be routed around. Moving the ROUTE gate to
+    // `assign` instead is the wrong fix: it would break plain drag-to-reschedule for exactly those
+    // people.
+    //
+    // Q3: gated on whether the crew SET changed, the identical rule rescheduleVisit applies below.
+    // On a create the "current" set is always empty, so this reduces to "any non-empty incoming
+    // set gates" - same behaviour as before, just expressed through the one comparison both doors
+    // share instead of two independently-maintained tests that can drift.
+    if (crewSetChanged([], assignee_ids) && !(await canActOnRow(req, 'Job', prisma.job, existing.id, 'assign'))) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    // Eligibility: every crew member must be an active, assignable in-org user. Byte-identical to
+    // the check assign() runs, so the two crew doors cannot drift on their error strings. It sits
+    // OUTSIDE the transaction deliberately: an ineligible member must leave nothing written, and
+    // validateCrew issues its own top-level tenant-scoped user reads rather than tx ones.
+    const crew = await validateCrew(req, assignee_ids);
+    if (!crew.ok) {
+      res.status(crew.status).json({ error: crew.error });
+      return;
+    }
+
+    const orgId = req.user!.organization_id;
+    const scheduledAt = new Date(scheduled_start);
+    const scheduledEnd = new Date(scheduled_end);
+
+    // Retried as a WHOLE unit: visit_seq is allocated from MAX + 1 with no lock, so a
+    // concurrent create can take the number this transaction is about to write. The unique
+    // index turns that into a failed write rather than two trips sharing one number in two
+    // customer emails; this re-reads the MAX in a fresh transaction (section 4.4).
+    const visit = await withVisitSeqRetry(() => prisma.$transaction(async (tx) => {
+      const created = await createJobVisit(tx, {
+        jobId: id,
+        orgId,
+        visitSeq: await nextVisitSeqForJob(tx, orgId, id),
+        scheduledAt,
+        scheduledEnd,
+        isAllDay: is_all_day,
+        notes: notes ?? null,
+        // NOT stamped here. The flag records that the customer WAS told, and at this point in the
+        // request nothing has been sent - the send is post-commit and can come back skipped
+        // (no address on file, which the composer explicitly invites) or failed. Stamped on the
+        // intent, the visits card prints "Customer notified" for mail that never left and the
+        // next ticked move sends the RESCHEDULED template as the customer's first word on the
+        // trip. The stamp lands below, on the outcome.
+        stampCustomerEmailSentAt: false,
+      });
+      // Multi-visit S3: the SAME writer the lead side uses, passed a null lead - not a job-side
+      // fork. A job visit has no lead, so the row carries no lead_id at all.
+      await replaceWalkthroughPerformers(tx, created.id, null, orgId, assignee_ids);
+      // D14: the mirror is a cache, written in the SAME transaction as the visit itself.
+      await syncJobFromVisits(tx, { jobId: id, orgId });
+      // The sibling audit row the lead-side create has always written. 'SCHEDULED' is the same
+      // event_type assign() uses, so ActivityPanel's from/to renderer works rather than falling
+      // through to bare description text.
+      await tx.timelineEvent.create({
+        data: {
+          organization_id: orgId,
+          entity_type: 'JOB',
+          entity_id: id,
+          event_type: 'SCHEDULED',
+          // No instant in the prose. This string renders verbatim on the job page's
+          // Activity panel, so an ISO here is a bare UTC timestamp shown to every viewer
+          // in every zone (MV-TZ-07). The time belongs in `metadata`, which the renderer
+          // localises to the org clock.
+          description: `Visit ${created.visit_seq} scheduled`,
+          metadata: { visit_id: created.id, visit_seq: created.visit_seq, from: null, to: scheduledAt.toISOString() },
+          created_by: req.user!.id,
+        },
+      });
+      return created;
+    }));
+
+    // ─── Automation Center - post-commit, fire-and-forget (#271) ─────────────
+    // S7 (D18, user story 45): booking visit 3 on an in-flight job is its own "scheduled"
+    // occurrence. visitId comes off the row the transaction RETURNED, never a re-read, so the
+    // enrolled occurrence and the persisted trip cannot be two different rows.
+    //
+    // assign()'s SRVW-243 rule, reproduced per visit: an explicit tick REPLACES the workflow for
+    // this occurrence rather than joining it, because a send_window can defer a workflow by hours
+    // and because an org holding the seeded default would otherwise mail the customer twice for
+    // one gesture. Only THIS occurrence is suppressed - the workflow stays enabled for every untick.
+    //
+    // Q1: `&& !notifyDeclined` is the fix - bare `!notifyCustomer` is true both when `notify` was
+    // never mentioned (correct: fire) and when it explicitly declined (wrong: firing anyway mails
+    // the customer through the workflow the decline was supposed to stop).
+    if (!notifyCustomer && !notifyDeclined) {
+      dispatchAutomationEvent({
+        type: 'JOB_SCHEDULED',
+        organizationId: orgId,
+        entity: { type: 'job', id, label: existing.job_number },
+        visitId: visit.id,
+        actorId: req.user?.id ?? null,
+        // D18's other half: the enrollment is scoped to this trip, so what it RENDERS has to be
+        // this trip. Without the override {{job.scheduled_date}} resolves through the D14 mirror -
+        // the job's NEXT upcoming visit - and a workflow enrolled by visit 3 tells the customer
+        // visit 2's date. See visitMergeFields for what is and is not covered.
+        eventPayload: { mergeFields: visitMergeFields(visit, crew.users, await getOrgTimezone(orgId)) },
+      });
+    }
+
+    // AWAITED and post-commit, exactly as /assign's is: the caller is told the outcome and
+    // cannot be told what has not happened yet, and a trip that genuinely got booked must not be
+    // rolled back by a mail provider. visitSeq and scheduledStart come off the row the
+    // transaction RETURNED, so the emailed trip and the persisted trip are one row (#1522).
+    const notifyResult = notifyCustomer
+      ? await notifyCustomerOfSchedule(req, {
+          jobId: id,
+          jobNumber: existing.job_number,
+          customer: existing.customer,
+          serviceLocation: existing.service_location,
+          crew: crew.users,
+          newStart: visit.scheduled_at,
+          kind: 'scheduled',
+          visitSeq: visit.visit_seq,
+          recipientEmail: notify?.notify_recipient_email,
+          cc: notify?.notify_cc_emails,
+          message: notify?.notify_message,
+        })
+      : undefined;
+
+    // The stamp is the OUTCOME of the send, never the intent behind it - see the create above.
+    // updateMany rather than update so the tenant predicate rides along on the write.
+    const announcedAt = notifyResult?.status === 'sent' ? new Date() : null;
+    if (announcedAt) {
+      await prisma.visit.updateMany({
+        where: { id: visit.id, ...tenantWhere(req) },
+        data: { customer_email_sent_at: announcedAt },
+      });
+    }
+
+    res.status(201).json({
+      visit: announcedAt ? { ...visit, customer_email_sent_at: announcedAt } : visit,
+      ...(notifyResult ? { notify: notifyResult } : {}),
+    });
+  } catch (err) {
+    logger.error('Create job visit error:', err);
+    res.status(500).json({ error: 'Failed to create visit' });
+  }
+}
+
+// Reschedule ONE visit. Separate from the collection POST because they are different actions
+// (D19): this moves an existing row, and never mints a second one.
+export const rescheduleJobVisitSchema = z.object({
+  // S8 §2b (RATIFIED, section-9 item #6, PREVIOUSLY ORPHANED): both now `.optional()`. Before
+  // this they had no `.optional()` at all, unlike `is_all_day`/`assignee_ids` on this same
+  // schema - so there was no way to change only a visit's crew: a crew-only PATCH 400'd and the
+  // caller had to re-send the unchanged window just to move crew. Omitted means "keep the
+  // visit's CURRENT value", the identical "omitted = unchanged" meaning `assignee_ids` and
+  // `is_all_day` already carry on this schema - see rescheduleVisit(), which resolves the
+  // EFFECTIVE window (current values where omitted) before writing, checking conflicts, or
+  // building the customer email/timeline metadata. Both interactions #1706 shipped keep working
+  // unmodified: the crew gate still keys on whether the crew SET changes, and the conflict check
+  // still runs against the EFFECTIVE window - "window omitted" is never "skip the conflict check".
+  scheduled_start: z.string().datetime({ offset: true }).optional(),
+  scheduled_end: z.string().datetime({ offset: true }).optional(),
+  // NO `.default(false)` here, unlike the create schema. validate() replaces req.body with the
+  // parse result, so a default turns "the request did not mention the flag" into an explicit
+  // false on a PATCH - and no dialog sends it (ScheduleTimeFields has no all-day control). An
+  // all-day job whose visit was simply moved a day would come back a timed 24h block, off the
+  // board's all-day strip. Omitted means unchanged; only an explicit false clears it.
+  is_all_day: z.boolean().optional(),
+  // `.optional()` with NO `.default([])`, and this is the forward reference createJobVisitSchema
+  // points at. The mechanism is the one the is_all_day comment eight lines above already
+  // documents: validate() replaces req.body with the parse result, so a default converts "the
+  // request did not mention crew" into "the crew is now empty" - and a plain drag-to-reschedule,
+  // which is the exact body both VisitScheduleDialog trees send, would silently strip the visit's
+  // crew. Omitted means unchanged; only an explicit array restates the crew.
+  assignee_ids: z.array(z.string().uuid()).optional(),
+  notes: z.string().max(5000).optional(),
+  // D21 - warn, never block. Same wire name and same meaning as `/assign`'s: the FIRST request
+  // 409s with the clashing trips, and the "Schedule Anyway" retry restates the move with this
+  // set. `.default(false)` is safe here in a way it is not for the two fields above, because
+  // "the request did not mention force" and "force is off" ARE the same fact.
+  force: z.boolean().optional().default(false),
+  notify: z
+    .object({
+      notify_customer: z.boolean().optional(),
+      // `.email()` and the capped cc array match assignJobSchema (:432) exactly. Before S7 this
+      // was a bare z.string() with no cc at all, so a malformed address reached the provider
+      // through the visit door and Zod SILENTLY STRIPPED the composer's CC list - a success
+      // toast and no mail to the person who was copied.
+      notify_recipient_email: z.string().email().optional(),
+      notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+      notify_message: z.string().max(5000).optional(),
+    })
+    .optional(),
+}).refine(
+  // S8 §2b: the invariant is only expressible when BOTH sides of THIS request state a window.
+  // An omitted field is not a stated bound - it is "unchanged" - and the visit's CURRENT value is
+  // trusted to already satisfy end-after-start (nothing here can have written an inverted one).
+  (data) => {
+    if (data.scheduled_start === undefined || data.scheduled_end === undefined) return true;
+    return endAfterStart({ scheduled_start: data.scheduled_start, scheduled_end: data.scheduled_end });
+  },
+  END_AFTER_START,
+);
+
+export async function rescheduleVisit(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const visitId = param(req, 'visitId');
+    const { scheduled_start, scheduled_end, is_all_day, notes, assignee_ids, force, notify } = req.body as {
+      // S8 §2b (RATIFIED): both optional now - omitted means "keep the visit's current value",
+      // resolved into effectiveStart/effectiveEnd below.
+      scheduled_start?: string;
+      scheduled_end?: string;
+      is_all_day?: boolean;
+      notes?: string;
+      assignee_ids?: string[];
+      force?: boolean;
+      notify?: {
+        notify_customer?: boolean;
+        notify_recipient_email?: string;
+        notify_cc_emails?: string[];
+        notify_message?: string;
+      };
+    };
+    const notifyCustomer = notify?.notify_customer === true;
+    // Q1: the third state - see createVisit's identical comment. `notify` absent -> unchanged
+    // (automation fires); `notify_customer: true` -> unchanged (direct send, automation
+    // suppressed); `notify_customer: false` -> NEITHER sends.
+    const notifyDeclined = notify !== undefined && notify.notify_customer === false;
+
+    const existing = await prisma.job.findUnique({
+      where: { id, ...tenantWhere(req) },
+      // `assignees` is read for the conflict scope below, not for the write - see the fallback
+      // note there for why the job-level union is the right answer when the trip carries no crew.
+      select: {
+        id: true,
+        status: true,
+        job_number: true,
+        visits: { select: { assignees: { select: { user_id: true } } } },
+        // S7: the customer email's own fields, same widening as the collection POST.
+        customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
+        service_location: { select: { address_line1: true, city: true, state: true } },
+      },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    if (!(await canActOnRow(req, 'Job', prisma.job, existing.id, 'reschedule'))) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    // Scoped to BOTH this job and this tenant: a visitId belonging to another job, or to another
+    // organization, must not be reachable through this job's URL.
+    const visitRow = await prisma.visit.findFirst({
+      where: { id: visitId, job_id: id, ...tenantWhere(req) },
+      // S7 widens this select and keeps all three predicates above. customer_email_sent_at is the
+      // discriminator for WHICH template a move sends; visit_seq is the number the customer reads.
+      // Q4: `status` was missing entirely, so a CANCELLED visit could be silently moved.
+      select: {
+        id: true,
+        visit_seq: true,
+        status: true,
+        customer_email_sent_at: true,
+        // The window this move is coming FROM, for the timeline row's `from` (MV-TZ-07) - and,
+        // since S8 §2b, also the EFFECTIVE window when this request omits one or both fields.
+        scheduled_at: true,
+        scheduled_end: true,
+        is_all_day: true,
+        assignees: { select: { user_id: true, user: { select: { first_name: true, last_name: true } } } },
+      },
+    });
+    if (!visitRow) {
+      res.status(404).json({ error: 'Visit not found' });
+      return;
+    }
+
+    // Q4: a called-off trip is immutable at the API. Refused EARLY, before any read or write below
+    // has a chance to act on it - neither a bare move (this door) nor its sibling milestone routes
+    // have ever checked this, so a CANCELLED visit could be rescheduled right back onto the board.
+    if (visitRow.status === 'CANCELLED') {
+      res.status(409).json({ error: 'Visit is cancelled' });
+      return;
+    }
+
+    // S8 §2b (RATIFIED): the EFFECTIVE window this request lands on - the body's value where
+    // given, the visit's CURRENT value where omitted. A crew-only PATCH (both omitted) therefore
+    // resolves to the visit's unchanged window, which is what makes the two guarantees below hold
+    // without a special case: the conflict check just below still runs against a real window (a
+    // crew-only PATCH that books a double-booked person at the visit's EXISTING time still 409s -
+    // "window omitted" must never mean "skip the conflict check"), and rescheduleVisitRow's own
+    // write is a no-op on time when nothing about the window changed.
+    if (visitRow.scheduled_at === null || visitRow.scheduled_end === null) {
+      // Defensive, not reachable in practice: every visit created through createJobVisit/
+      // createVisit always carries a time. A visit with neither its own window NOR one supplied
+      // by this request has nothing to reschedule onto.
+      res.status(400).json(validationFailure([{
+        field: 'scheduled_start',
+        message: 'scheduled_start and scheduled_end are required - this visit has no existing window to keep',
+      }]));
+      return;
+    }
+    const effectiveStart = scheduled_start !== undefined ? new Date(scheduled_start) : visitRow.scheduled_at;
+    const effectiveEnd = scheduled_end !== undefined ? new Date(scheduled_end) : visitRow.scheduled_end;
+
+    // ONE hoisted const, feeding the send below and nothing else in this handler decides it
+    // separately - the same discipline assign() applies to isReschedule, and the reason #1550
+    // could be PROVED from prod data rather than inferred.
+    //
+    // "Have we ever told the customer about THIS trip" is the row fact that answers the question
+    // the template asks. Emphatically NOT a status test: job status is derived and unordered, and
+    // a visit sitting at IN_PROGRESS on a COMPLETED job is still a trip that moved. scheduled_at
+    // is useless here too - create requires one, so every row has one.
+    const kind: 'scheduled' | 'rescheduled' = visitRow.customer_email_sent_at == null ? 'scheduled' : 'rescheduled';
+
+    // `visitRow.assignees` is already selected above - the CURRENT crew set, read once and reused
+    // both by the gate below and by the conflict scope further down.
+    const visitCrewIds = visitRow.assignees.map((a) => a.user_id);
+
+    // The collection POST's guard, generalised. Booking TIME is a `reschedule Job` fact and naming
+    // CREW is an `assign Job` one wherever it is written, so the two visit routes must apply the
+    // same per-instance check - otherwise crew reaches the DB through the weaker of the two doors.
+    // The `!== undefined` half is load-bearing: an omitted field is not an empty crew and must not
+    // trip the gate, or plain drag-to-reschedule 403s for exactly the reschedule-only grantees the
+    // route gate at job.routes.ts:67-69 was written to keep working.
+    //
+    // Q3: gated on the crew SET changing, not on `assignee_ids.length > 0`. That test had two
+    // defects in opposite directions: `assignee_ids: []` on a crewed visit skipped the gate and
+    // wiped the crew, and a reschedule-only grantee RESTATING the visit's unchanged crew was
+    // false-403'd - VisitScheduleDialog sends `assignee_ids` on every save the picker is shown for,
+    // whether or not the user touched it. crewSetChanged makes both cases behave: an empty
+    // restatement over a crewed visit IS a change (gated, refuses before anything is written), and
+    // an identical restatement is NOT (never even reaches the `assign` check).
+    if (
+      assignee_ids !== undefined &&
+      crewSetChanged(visitCrewIds, assignee_ids) &&
+      !(await canActOnRow(req, 'Job', prisma.job, existing.id, 'assign'))
+    ) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    // Same eligibility rule, same placement, same error strings as the collection POST: outside
+    // the transaction, so an ineligible member leaves nothing written. The resolved users are
+    // KEPT rather than discarded: when this request also re-crews the trip, they are the people
+    // going on it, and the customer email below must name them and not the crew being replaced.
+    let incomingCrew: CrewMember[] | null = null;
+    if (assignee_ids !== undefined) {
+      const crew = await validateCrew(req, assignee_ids);
+      if (!crew.ok) {
+        res.status(crew.status).json({ error: crew.error });
+        return;
+      }
+      incomingCrew = crew.users;
+    }
+
+    // Multi-visit S6 (D21, user stories 12-14): the SAME double-booking warning `/assign` and
+    // PATCH /api/jobs/:id raise. This route is the board's main gesture now - dragging a card
+    // moves the trip through here, not through `/assign` - so leaving it out would have deleted
+    // the crew warning from the one surface dispatchers actually schedule on.
+    //
+    // WHOSE calendar is being asked about: the TRIP's own crew, because that is who is going.
+    // The job-level union is the fallback, not the rule - a three-trip job where Alice takes
+    // trip 1 and Bob takes trip 2 must not warn about Alice when trip 2 moves. It IS the right
+    // answer when the visit carries no crew row of its own (a job crewed only at job level, e.g.
+    // the row-scoped creator's self-assign): those people are the ones who will turn up.
+    // An explicit `assignee_ids` restates the crew, so it wins over both. `visitCrewIds` is the
+    // SAME hoisted read the gate above uses - not a second one.
+    const conflictUserIds =
+      assignee_ids ?? (visitCrewIds.length > 0 ? visitCrewIds : jobCrewIds(existing));
+
+    // S8 §2b: EFFECTIVE window, always - a crew-only PATCH (both fields omitted) still checks the
+    // visit's CURRENT window, never skipped. This is the interaction #1706 shipped that must not
+    // regress: a crew-only PATCH that books a double-booked person at the visit's existing time
+    // still has to raise its 409.
+    if (!force) {
+      const conflicts = await detectCrewConflicts(req, {
+        jobId: id,
+        userIds: conflictUserIds,
+        schedStart: effectiveStart,
+        schedEnd: effectiveEnd,
+      });
+      if (conflicts.length > 0) {
+        res.status(409).json({ error: 'Schedule conflict detected', conflicts });
+        return;
+      }
+    }
+
+    const orgId = req.user!.organization_id;
+
+    const visit = await prisma.$transaction(async (tx) => {
+      // EFFECTIVE window: a no-op time-wise when both fields were omitted (rescheduleVisitRow
+      // still writes the SAME scheduled_at/scheduled_end it already held), which is what makes a
+      // crew-only PATCH "succeed and leave crew alone" / "move nothing but crew" - see the schema
+      // comment for the full S8 §2b rationale.
+      const moved = await rescheduleVisitRow(tx, visitRow.id, {
+        scheduledAt: effectiveStart,
+        scheduledEnd: effectiveEnd,
+        isAllDay: is_all_day,
+        notes: notes ?? null,
+        // Only ever set, never cleared, and only on the first announce: it records that this trip
+        // was told to the customer, which stays true afterwards. NOT written here though - the
+        // send has not happened yet and may come back skipped or failed. See the stamp below.
+        stampCustomerEmailSentAt: false,
+      });
+      // Only when the request actually named crew. The SAME writers the POST and the lead side
+      // use - a visit is a visit (D3), so there is no job-side fork here.
+      if (assignee_ids !== undefined) {
+        await replaceWalkthroughPerformers(tx, visitRow.id, null, orgId, assignee_ids);
+      }
+      // AFTER the write, so the mirror re-resolves over the POST-update state: pushing the current
+      // visit later must hand the mirror to the next one, not follow the row that moved.
+      await syncJobFromVisits(tx, { jobId: id, orgId });
+      // The SAME const the send below reads. Not a second decision - that is the whole point:
+      // #1550 was a customer email and its sibling timeline row disagreeing.
+      await tx.timelineEvent.create({
+        data: {
+          organization_id: orgId,
+          entity_type: 'JOB',
+          entity_id: id,
+          event_type: kind === 'rescheduled' ? 'RESCHEDULED' : 'SCHEDULED',
+          description: `Visit ${moved.visit_seq} ${kind}`,
+          // `from` was omitted entirely here while the create writer sends `from: null`, so a
+          // renderer told to read the structured from/to had only half of it - and the
+          // Activity panel's guard read the absence as malformed and suppressed the schedule
+          // line altogether. visitRow is the pre-transaction read, so this is the window the
+          // move is coming FROM.
+          metadata: {
+            visit_id: moved.id,
+            visit_seq: moved.visit_seq,
+            from: visitRow.scheduled_at ? visitRow.scheduled_at.toISOString() : null,
+            to: effectiveStart.toISOString(),
+          },
+          created_by: req.user!.id,
+        },
+      });
+      return moved;
+    });
+
+    // Same alternative-not-both rule as the collection POST above. The occurrence key stays the
+    // BARE new-start ISO: stopIf.ts and terminalStale.ts compare it against
+    // someDate.toISOString() and return a stale-reason (killing the run silently) on a mismatch,
+    // so the visit id goes into the dedupe key only. rearmAnchoredWaits writes occurrence_key and
+    // never dedupe_key, so it cannot clobber the visit scoping either.
+    //
+    // Q1: `&& !notifyDeclined` - see createVisit's identical fix above.
+    if (!notifyCustomer && !notifyDeclined) {
+      dispatchAutomationEvent({
+        type: 'JOB_RESCHEDULED',
+        organizationId: req.user!.organization_id,
+        entity: { type: 'job', id, label: existing.job_number },
+        occurrenceKey: effectiveStart.toISOString(),
+        visitId: visitRow.id,
+        actorId: req.user?.id ?? null,
+        // The moved trip's own slot and crew - see the collection POST for why the job's mirror
+        // is the wrong answer for a per-visit occurrence.
+        eventPayload: {
+          mergeFields: visitMergeFields(
+            visit,
+            incomingCrew
+              ?? visitRow.assignees.map((a) => a.user).filter((u): u is { first_name: string; last_name: string } => u != null),
+            await getOrgTimezone(req.user!.organization_id),
+          ),
+        },
+      });
+    }
+
+    // AWAITED and post-commit, never fatal - the same contract /assign's send has.
+    const notifyResult = notifyCustomer
+      ? await notifyCustomerOfSchedule(req, {
+          jobId: id,
+          jobNumber: existing.job_number,
+          customer: existing.customer,
+          serviceLocation: existing.service_location,
+          // The people going on THIS trip, not the job-level union - and AFTER this request's own
+          // crew write, not before it. `visitRow` was read before the transaction, so on a PATCH
+          // that moves the trip and swaps its crew in one go (the body VisitScheduleDialog sends
+          // whenever the picker is shown) it holds the OUTGOING people. An omitted assignee_ids
+          // means "crew unchanged", and there the pre-read row is still the right answer.
+          crew: incomingCrew
+            ?? visitRow.assignees.map((a) => a.user).filter((u): u is { first_name: string; last_name: string } => u != null),
+          newStart: visit.scheduled_at,
+          kind,
+          visitSeq: visit.visit_seq,
+          recipientEmail: notify?.notify_recipient_email,
+          cc: notify?.notify_cc_emails,
+          message: notify?.notify_message,
+        })
+      : undefined;
+
+    // First announce, and only once it actually went: a move whose send failed leaves the trip
+    // unannounced, so the next ticked move is still a 'scheduled' rather than telling a customer
+    // who has heard nothing that their visit "has been rescheduled".
+    const announcedAt = kind === 'scheduled' && notifyResult?.status === 'sent' ? new Date() : null;
+    if (announcedAt) {
+      await prisma.visit.updateMany({
+        where: { id: visit.id, ...tenantWhere(req) },
+        data: { customer_email_sent_at: announcedAt },
+      });
+    }
+
+    res.json({
+      visit: announcedAt ? { ...visit, customer_email_sent_at: announcedAt } : visit,
+      ...(notifyResult ? { notify: notifyResult } : {}),
+    });
+  } catch (err) {
+    logger.error('Reschedule job visit error:', err);
+    res.status(500).json({ error: 'Failed to reschedule visit' });
+  }
+}
+
+// ─── Visit lifecycle (multi-visit S4, D7/D7a/D12) ────────────────────────────
+//
+// The four milestone timestamps are facts about a TRIP, so these routes address a named visit and
+// the job's own status is DERIVED from the resulting visit set (lib/job-status.ts) rather than
+// written here. The job-level /:id/start, /:id/arrive and /:id/en-route routes survive unchanged
+// as the old door and now act on the job's current visit through the same writers.
+
+/**
+ * One handler shape for every per-visit milestone, built once rather than copied per verb.
+ *
+ * Four near-identical handlers is how the job-level and visit-level halves drift apart, which is
+ * the drift #1551 spent a PR undoing. The only thing that varies between the verbs is which
+ * milestone is stamped and what runs after the transaction, so those are the parameters.
+ */
+function visitMilestoneHandler(
+  milestone: VisitMilestone,
+  label: string,
+  after?: (
+    req: Request,
+    ctx: { jobId: string; visitId: string; at: Date; jobNumber: string; crew: { user_id: string }[] },
+  ) => void,
+) {
+  return async function handler(req: Request, res: Response) {
+    try {
+      const id = param(req, 'id');
+      const visitId = param(req, 'visitId');
+
+      const existing = await prisma.job.findUnique({
+        where: { id, ...tenantWhere(req) },
+        select: { id: true, status: true, job_number: true },
+      });
+      if (!existing) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+
+      // Scoped to BOTH this job and this tenant, the same way rescheduleVisit is: a visitId
+      // belonging to another job, or to another organization, must not be reachable through this
+      // job's URL.
+      const visitRow = await prisma.visit.findFirst({
+        where: { id: visitId, job_id: id, ...tenantWhere(req) },
+        // D7a: the crew read comes off THIS VISIT, not off the job. The job-level question -
+        // "are you on any of its trips", which is what OWN_JOB asks since S8 - would let a
+        // technician crewed on visit 3 start visit 1.
+        // Q4: `status` was missing entirely - worse than a bare immutability gap, because
+        // stampVisitMilestone below writes the visit's STATUS as well as its timestamp
+        // (VISIT_MILESTONE_COLUMNS), so POSTing e.g. /start on a CANCELLED visit RESURRECTS it:
+        // a called-off trip comes back IN_PROGRESS and reappears on the dispatcher's board.
+        select: { id: true, status: true, assignees: { select: { user_id: true } } },
+      });
+      if (!visitRow) {
+        res.status(404).json({ error: 'Visit not found' });
+        return;
+      }
+
+      // D7a: any crew member ON THIS VISIT may drive it, with admins and dispatchers as the
+      // fallback for when the tech on site cannot press the button - the org-manager clause is
+      // preserved verbatim from the four job verbs.
+      //
+      // Deliberately NOT routed through canActOnRow, and S8's repoint does not change that:
+      // OWN_JOB is now `{visits:{some:{assignees:{some:{user_id}}}}}`, which asks the JOB-level
+      // question ("are you on ANY of this job's trips"). These four doors need the per-visit one,
+      // so a technician crewed on visit 3 cannot drive visit 1.
+      const isOrgManager = req.ability!.can('manage', 'all' as Subject) || req.user!.role === 'DISPATCHER';
+      if (!isOrgManager && !visitRow.assignees.some((a) => a.user_id === req.user!.id)) {
+        res.status(403).json({ error: 'Insufficient permissions' });
+        return;
+      }
+
+      // Q4: refused EARLY, before the transaction, and after the per-instance authorization check
+      // above (a caller with no business on this visit gets 403, not a status leak). None of
+      // start/en-route/arrive/complete ever read `status` before this - see the resurrection note
+      // on the select above.
+      if (visitRow.status === 'CANCELLED') {
+        res.status(409).json({ error: 'Visit is cancelled' });
+        return;
+      }
+
+      const orgId = req.user!.organization_id;
+      // ONE Date for both the column and anything keyed off it downstream. Two separate new Date()
+      // calls are how a dedupe key stops matching the row it claims to describe (#1522's class).
+      const at = new Date();
+      const visit = await prisma.$transaction(async (tx) => {
+        const moved = await stampVisitMilestone(tx, visitRow.id, milestone, at);
+        // D12: the job's status and its mirror columns are a CACHE of the visit set, recomputed in
+        // the SAME transaction as the visit write.
+        await syncJobFromVisits(tx, { jobId: id, orgId });
+        return moved;
+      });
+
+      after?.(req, { jobId: id, visitId: visitRow.id, at, jobNumber: existing.job_number, crew: visitRow.assignees });
+
+      res.json({ visit });
+    } catch (err) {
+      logger.error(`${label} visit error:`, err);
+      res.status(500).json({ error: `Failed to ${label.toLowerCase()} visit` });
+    }
+  };
+}
+
+/** Move one visit to IN_PROGRESS and re-derive the job from its visits. */
+export const startVisit = visitMilestoneHandler('started', 'Start');
+
+/**
+ * Move one visit to COMPLETED and re-derive the job from its visits.
+ *
+ * D7: this is NOT the job completing. Job.completed_at stays an explicitly-set job-level fact and
+ * is never written from here - a job can be closed with a trip still on the books, and a job whose
+ * last trip just finished is still IN_PROGRESS until somebody closes it.
+ */
+export const completeVisit = visitMilestoneHandler('completed', 'Complete');
+
+/**
+ * Move one visit to ON_SITE and re-derive the job from its visits.
+ *
+ * A technician being on site no longer moves the job's OWN status: EN_ROUTE and ON_SITE retire
+ * from JobStatus and live on VisitStatus (D12/D17), and D12 defines IN_PROGRESS as "any visit
+ * STARTED". So the job reads SCHEDULED with a crew on site, and the in-flight state is visible on
+ * the visit chip. That is a deliberate, spec-mandated change to what the board colours in flight,
+ * not an oversight. Job.on_site_at is still mirrored, but S5 repointed the lifecycle bar onto the
+ * visit set, so that column now has NO reader anywhere in the tree - dropping it is S8's.
+ */
+export const arriveVisit = visitMilestoneHandler('on_site', 'Arrive');
+
+/**
+ * Move one visit to EN_ROUTE and re-derive the job from its visits.
+ *
+ * The JOB_EN_ROUTE automation keeps firing job-keyed with the visit's en_route_at as its
+ * occurrence - the same contract dedupe.ts's OCCURRENCE_SCOPED map already records. Re-keying the
+ * dedupe per visit is D18 and belongs to S7. `at` is the ONE Date the column was written with, so
+ * the emitted key IS the persisted stamp rather than a second reading of the clock.
+ */
+export const enRouteVisit = visitMilestoneHandler('en_route', 'En-route', (req, ctx) => {
+  // Crew-gated exactly as the job-level enRoute() is: the default automation tells the customer
+  // who is on the way, so dispatching with an empty crew emails a notification naming nobody.
+  if (ctx.crew.length === 0) return;
+  dispatchAutomationEvent({
+    type: 'JOB_EN_ROUTE',
+    organizationId: req.user!.organization_id,
+    entity: { type: 'job', id: ctx.jobId, label: ctx.jobNumber },
+    occurrenceKey: ctx.at.toISOString(),
+    // S7 (D18): two crews leaving for two trips on one job are two occurrences. This closes the
+    // deferral this handler's own docstring recorded. `ctx.at` is still the ONE Date the column
+    // was written with, so the emitted key IS the persisted stamp - and the visit id rides the
+    // DEDUPE key only, leaving occurrence_key the bare ISO the stale-checks read it as.
+    visitId: ctx.visitId,
+    actorId: req.user?.id ?? null,
+  });
+});
+
+/**
+ * Cancel ONE visit (D19). The row is KEPT as CANCELLED - never deleted - and it keeps its
+ * visit_seq, because the number has already been in a customer's inbox (D13).
+ *
+ * D16: cancelling a visit unschedules that visit. It does NOT cancel the job; only a dispatcher
+ * cancelling the job itself does that. If this was the job's last live trip the derivation
+ * answers UNSCHEDULED and the schedule mirror collapses to null.
+ */
+export const cancelVisitSchema = z.object({
+  // Q4: trimmed BEFORE the length check, and the TRIMMED value is what validate() replaces
+  // req.body with - so a whitespace-only reason 400s instead of passing min(1) and landing,
+  // verbatim, in the customer-facing cancellation history and the timeline description below.
+  cancelled_reason: z.string().trim().min(1).max(5000),
+  // Accepted and ignored, exactly as createJobVisitSchema and rescheduleJobVisitSchema already do:
+  // per-visit customer email is S7, which lands on top of SRVW-243 rather than racing it. No
+  // `.default()` on anything here - validate() replaces req.body with the parse result, so a
+  // default would turn "not mentioned" into an explicit value.
+  notify: z
+    .object({
+      notify_customer: z.boolean().optional(),
+      // `.email()` and the capped cc array match assignJobSchema (:432) exactly. Before S7 this
+      // was a bare z.string() with no cc at all, so a malformed address reached the provider
+      // through the visit door and Zod SILENTLY STRIPPED the composer's CC list - a success
+      // toast and no mail to the person who was copied.
+      notify_recipient_email: z.string().email().optional(),
+      notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+      notify_message: z.string().max(5000).optional(),
+    })
+    .optional(),
+});
+
+export async function cancelVisit(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const visitId = param(req, 'visitId');
+    const { cancelled_reason, notify } = req.body as {
+      cancelled_reason: string;
+      notify?: {
+        notify_customer?: boolean;
+        notify_recipient_email?: string;
+        notify_cc_emails?: string[];
+        notify_message?: string;
+      };
+    };
+    const notifyCustomer = notify?.notify_customer === true;
+
+    const existing = await prisma.job.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: {
+        id: true,
+        status: true,
+        job_number: true,
+        // S7: the customer email's own fields, same widening as the two schedule-changing writers.
+        customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
+        service_location: { select: { address_line1: true, city: true, state: true } },
+      },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // The route gate only asks whether this principal may EVER reschedule, and `reschedule Job` is
+    // an OWN_JOB-scoped per-user capability - so without the per-instance check its holder could
+    // call off a trip on ANY job in the org, and if that was the job's last live visit the
+    // derivation unschedules it off the dispatcher's board. Its three sibling visit routes all
+    // apply this; cancel is not the weaker door.
+    if (!(await canActOnRow(req, 'Job', prisma.job, existing.id, 'reschedule'))) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const visitRow = await prisma.visit.findFirst({
+      where: { id: visitId, job_id: id, ...tenantWhere(req) },
+      // S7 widens this select and keeps all three predicates. The trip's own number and the slot
+      // it WAS in are what the cancellation notice is about. Q4: `status` was missing entirely, so
+      // an already-cancelled visit could be re-cancelled with its reason silently overwritten.
+      select: {
+        id: true, visit_seq: true, status: true, scheduled_at: true,
+        // The window the customer was holding, and who they were expecting (MV-NOTIF-10).
+        scheduled_end: true,
+        assignees: { select: { user: { select: { first_name: true, last_name: true } } } },
+      },
+    });
+    if (!visitRow) {
+      res.status(404).json({ error: 'Visit not found' });
+      return;
+    }
+
+    // Q4: refused EARLY, before the transaction - a trip already called off cannot be called off
+    // again, and re-cancelling it would silently overwrite the FIRST reason with whatever this
+    // request sent, which is the customer-facing history #1550's class taught us to protect.
+    if (visitRow.status === 'CANCELLED') {
+      res.status(409).json({ error: 'Visit is cancelled' });
+      return;
+    }
+
+    const orgId = req.user!.organization_id;
+    const visit = await prisma.$transaction(async (tx) => {
+      // The SAME writer the lead side uses, passed no lead - not a job-side fork (D3).
+      const { cancelled } = await cancelWalkthroughRow(tx, {
+        walkthroughId: visitRow.id,
+        orgId,
+        cancelledAt: new Date(),
+        reason: cancelled_reason,
+        cancelledBy: req.user!.id,
+      });
+      await syncJobFromVisits(tx, { jobId: id, orgId });
+      // D16: the TRIP is off. Deliberately not the 'CANCELLED' event_type the job-level cancel
+      // writes - that would read as the job having been called off. ActivityPanel falls through
+      // to the description for any unrecognised type, which is what this row wants.
+      await tx.timelineEvent.create({
+        data: {
+          organization_id: orgId,
+          entity_type: 'JOB',
+          entity_id: id,
+          event_type: 'VISIT_CANCELLED',
+          description: `Visit ${cancelled.visit_seq} cancelled: ${cancelled_reason}`,
+          metadata: { visit_id: cancelled.id, visit_seq: cancelled.visit_seq, reason: cancelled_reason },
+          created_by: req.user!.id,
+        },
+      });
+      return cancelled;
+    });
+
+    // D16: this trip is off; the JOB is not cancelled, even when the derivation just took it to
+    // UNSCHEDULED because that was its last live visit. customer_email_sent_at is neither stamped
+    // nor cleared here - it records that the trip WAS announced, and it was.
+    //
+    // No automation event: there is no cancelled-visit member in AutomationTriggerType, and
+    // adding one needs a schema enum value, a portable enum migration, a TRIGGERS entry, a
+    // merge-field set and an audiencesFor entry, or catalog.test.ts's exhaustiveness check
+    // reddens. Out of scope for this slice.
+    const notifyResult = notifyCustomer
+      ? await notifyCustomerOfSchedule(req, {
+          jobId: id,
+          jobNumber: existing.job_number,
+          customer: existing.customer,
+          serviceLocation: existing.service_location,
+          crew: visitRow.assignees.map((a) => a.user).filter((u): u is { first_name: string; last_name: string } => u != null),
+          newStart: visitRow.scheduled_at,
+          newEnd: visitRow.scheduled_end,
+          kind: 'cancelled',
+          visitSeq: visitRow.visit_seq,
+          cancelledReason: cancelled_reason,
+          recipientEmail: notify?.notify_recipient_email,
+          cc: notify?.notify_cc_emails,
+          message: notify?.notify_message,
+        })
+      : undefined;
+
+    res.json({ visit, ...(notifyResult ? { notify: notifyResult } : {}) });
+  } catch (err) {
+    logger.error('Cancel visit error:', err);
+    res.status(500).json({ error: 'Failed to cancel visit' });
+  }
+}
+
+// ─── Editable record IDs (plan decision #7) ─────────────────────────────
+
+/**
+ * Read-only preview of a job renumber - no lock, no writes, matching computeRenumber's own
+ * contract. Gated `renumber Job` at the route (DISPATCHER by default, ADMIN via manage-all);
+ * canActOnRow mirrors the per-verb pattern the other job actions use (D14 reschedule,
+ * manage_lines, delete, assign) for a grant condition distinct from plain `read`/`update`.
+ */
+export async function previewNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+
+    const existing = await prisma.job.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    if (!(await canActOnRow(req, 'Job', prisma.job, existing.id, 'renumber'))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    const { number } = req.body as { number: string };
+
+    try {
+      const computation = await computeRenumber(prisma, 'job', existing.id, req.user!.organization_id, number);
+      res.json(computation);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Invalid record number')) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+  } catch (err) {
+    logger.error('Preview job number error:', err);
+    res.status(500).json({ error: 'Failed to preview job number change' });
+  }
+}
+
+/**
+ * Carries a conflict-bearing RenumberComputation out of the rename transaction to the HTTP
+ * layer. applyRenumber itself throws only a plain, message-only Error on conflict (see
+ * record-renumber.ts) - never a caller-supplied computation, by design, since it always
+ * re-derives its own. So the 409 body's structured conflict list is built by computing the
+ * SAME thing ourselves, fresh, inside the SAME locked transaction applyRenumber would
+ * otherwise redo internally - not by guessing at an error shape the engine doesn't have.
+ */
+class RenumberConflictError extends Error {
+  constructor(public readonly computation: RenumberComputation) {
+    super('Number change has conflicts');
+  }
+}
+
+/**
+ * The real write. Gated `renumber Job` + the same per-instance canActOnRow as preview above.
+ * Existence/ownership/format are all cheap to check before ever opening a transaction; only the
+ * write itself needs the lock. Mirrors updateOrganization's `SELECT ... FOR UPDATE` row-lock
+ * pattern, but at `FOR NO KEY UPDATE` strength: `jobs` is numbering.ts's default anchor and its
+ * allocateAnchoredNumber already locks this exact row that way for the same reason (a plain
+ * `FOR UPDATE` would conflict with the `FOR KEY SHARE` Postgres takes on `jobs` for every
+ * FK-carrying insert - line items, invoices, stock movements, logistic orders - blocking all of
+ * them for the life of this transaction; `FOR NO KEY UPDATE` still serializes against a
+ * concurrent renumber/allocation on this same row without that collateral blocking).
+ */
+export async function renumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+
+    const existing = await prisma.job.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true, job_number: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    if (!(await canActOnRow(req, 'Job', prisma.job, existing.id, 'renumber'))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    const { number } = req.body as { number: string };
+    const orgId = req.user!.organization_id;
+
+    let result: RenumberComputation;
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT id FROM jobs WHERE id = ${existing.id}::uuid AND organization_id = ${orgId}::uuid FOR NO KEY UPDATE`;
+
+        const preview = await computeRenumber(tx, 'job', existing.id, orgId, number);
+        if (preview.hasConflicts) {
+          throw new RenumberConflictError(preview);
+        }
+        return applyRenumber(tx, 'job', existing.id, orgId, number);
+      });
+    } catch (err) {
+      if (err instanceof RenumberConflictError) {
+        res.status(409).json({ error: 'Number change has conflicts', ...err.computation });
+        return;
+      }
+      if (err instanceof Error && err.message.startsWith('Invalid record number')) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    // Post-commit side effects, mirroring update()/cancel()'s ordering: the write is already
+    // durable, so a timeline/audit failure here must not roll it back or fail the request.
+    const derivedCount = result.derived.length + result.labelRefreshes.length;
+    await prisma.timelineEvent.create({
+      data: {
+        organization_id: orgId,
+        entity_type: 'JOB',
+        entity_id: existing.id,
+        event_type: 'JOB_RENUMBERED',
+        description: `Job number changed from ${result.oldNumber} to ${result.newNumber} (${derivedCount} related record${derivedCount === 1 ? '' : 's'} updated)`,
+        metadata: { old_number: result.oldNumber, new_number: result.newNumber, derived_count: derivedCount },
+        created_by: req.user!.id,
+      },
+    });
+    void logAudit({
+      req,
+      action: 'job.renumbered',
+      resourceType: 'Job',
+      resourceId: existing.id,
+      metadata: { old_number: result.oldNumber, new_number: result.newNumber },
+    });
+
+    // Built from the RenumberComputation itself (no extra re-select) - the frontend confirmation
+    // dialog (a later PR) gets the full derived-change list in the same round trip.
+    res.status(200).json({
+      job: { id: existing.id, job_number: result.newNumber },
+      ...result,
+    });
+  } catch (err) {
+    logger.error('Rename job number error:', err);
+    res.status(500).json({ error: 'Failed to change job number' });
   }
 }

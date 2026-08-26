@@ -1,10 +1,12 @@
-import { cn, getInitials } from '@/lib/utils';
-import { CheckCircle2, Circle } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { CheckCircle2, Circle, XCircle } from 'lucide-react';
 import { formatExactInstant } from '@/lib/format-date';
-import type { Task, TaskStatus } from '@/lib/tasks/types';
+import { isCompletedTaskStatus, isTerminalTaskStatus, type Task, type TaskStatus } from '@/lib/tasks/types';
 import { isOverdue, assessRisk } from '@/lib/tasks/tasks-logic';
 import type { RiskResult } from '@/lib/tasks/tasks-logic';
+import { taskAssignees } from '@/lib/tasks/assignees';
 import { useTaskDetailStore } from '@/stores/taskDetailStore';
+import { AssigneeStack } from './AssigneeStack';
 import { StatusBadge } from '@/components/data/status-badge';
 import { PriorityDot } from './PriorityDot';
 import { RiskBadge } from './RiskBadge';
@@ -12,9 +14,10 @@ import { LinkedEntityChip } from './LinkedEntityChip';
 
 interface TaskCardProps {
   task: Task;
-  /** When provided, a quick-complete toggle is shown that flips DONE/TODO. */
+  /** When provided, a quick-complete toggle is shown that closes an open task or reopens a closed one. */
   onStatusChange?: (status: TaskStatus) => void;
-  ownerOpenCount?: number;
+  /** Busiest assignee's open-task load - see `assigneeOpenCountFor`. */
+  assigneeOpenCount?: number;
   riskResult?: RiskResult;
   /** Suppress the linked-entity chip (redundant on a per-entity tab). */
   hideLinkedEntity?: boolean;
@@ -23,23 +26,26 @@ interface TaskCardProps {
 export function TaskCard({
   task,
   onStatusChange,
-  ownerOpenCount = 0,
+  assigneeOpenCount = 0,
   riskResult,
   hideLinkedEntity = false,
 }: TaskCardProps) {
   const now = new Date();
   const overdue = isOverdue(task, now);
-  const risk = riskResult ?? assessRisk(task, { now, ownerOpenCount });
+  const risk = riskResult ?? assessRisk(task, { now, assigneeOpenCount });
   const open = useTaskDetailStore((s) => s.open);
-  const done = task.status === 'DONE';
-  const ownerName = task.owner_name ?? '';
-  const initials = ownerName ? getInitials(ownerName) : '';
+  const done = isCompletedTaskStatus(task.status);
+  const cancelled = task.status === 'CANCELLED';
+  // Both terminal statuses dim and strike the card, and both make the toggle a REOPEN. What
+  // separates them is the glyph and the status badge, not whether the card looks closed.
+  const closed = isTerminalTaskStatus(task.status);
+  const assignees = taskAssignees(task);
 
   return (
     <div
       className={cn(
         'flex cursor-pointer flex-col gap-2 rounded-xl border border-border bg-surface-light p-4 shadow-card transition hover:shadow-md',
-        done && 'opacity-70'
+        closed && 'opacity-70'
       )}
       onClick={() => open(task.id)}
     >
@@ -50,17 +56,17 @@ export function TaskCard({
           // ghost cell reproduces that hover-to-brand-tone signal, not Button-shaped.
           <button
             type="button"
-            aria-label={done ? 'Mark task as to-do' : 'Mark task done'}
+            aria-label={closed ? 'Mark task as to-do' : 'Mark task done'}
             onClick={(e) => {
               e.stopPropagation();
-              onStatusChange(done ? 'TODO' : 'DONE');
+              onStatusChange(closed ? 'TODO' : 'DONE');
             }}
             className="mt-0.5 shrink-0 text-text-secondary/50 transition-colors hover:text-sage-700"
           >
-            {done ? <CheckCircle2 className="h-4 w-4 text-sage-700" /> : <Circle className="h-4 w-4" />}
+            {done ? <CheckCircle2 className="h-4 w-4 text-sage-700" /> : cancelled ? <XCircle className="h-4 w-4 text-danger" /> : <Circle className="h-4 w-4" />}
           </button>
         )}
-        <p className={cn('text-sm font-medium leading-snug', done && 'text-text-secondary line-through')}>
+        <p className={cn('text-sm font-medium leading-snug', closed && 'text-text-secondary line-through')}>
           {task.title}
         </p>
       </div>
@@ -71,17 +77,8 @@ export function TaskCard({
         <PriorityDot priority={task.priority} />
       </div>
 
-      {/* Owner */}
-      {ownerName ? (
-        <div className="flex items-center gap-1.5 text-xs text-text-secondary">
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary-subtle text-[9px] font-bold text-primary">
-            {initials}
-          </span>
-          <span className="font-medium text-text-primary">{ownerName}</span>
-        </div>
-      ) : (
-        <p className="text-xs italic text-text-secondary/70">Unassigned</p>
-      )}
+      {/* Assignees */}
+      <AssigneeStack assignees={assignees} showSoleName />
 
       {/* Due date */}
       {task.due_at ? (

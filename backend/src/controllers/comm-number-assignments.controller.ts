@@ -4,136 +4,26 @@ import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { tenantWhere } from '../lib/tenant';
 import { logAudit } from '../lib/audit';
-import { isCtmConfigured } from '../lib/ctm/client';
-import {
-  ensureVoicemailMenu,
-  routeNumberToVoiceMenu,
-  describeManualQueueScaffold,
-  type ManualQueueScaffoldInstructions,
-} from '../lib/ctm/routing';
-import { formatPhoneDisplay } from '../lib/phone-format';
 
 // Admin management of the many-to-many User<->PhoneNumber mapping (comm caller-ID
 // overhaul slice 3). These endpoints populate what resolveOutboundNumber (slice 2)
 // reads: which users may send from which numbers, each user's default, and the
 // org default. Every handler is admin-gated (canDo('update','Organization')) and
 // tenant-scoped — a number/user outside the caller's org is a 404.
+//
+// ASSIGNMENT DOES NOT TOUCH ROUTING (2026-08-12). It used to: assigning a number
+// created a voicemail menu, pointed the number's dial route at it, and
+// overwrote `route_to` - so buying a number made it ring, and then assigning it
+// to a user made it stop ringing and go to voicemail. That was an attempt to
+// automate a ring group, but only the voicemail half is API-drivable, and the
+// other half was a manual step in a vendor dashboard no customer has an account
+// for. Under the model this now implements, routing belongs to the NUMBER (the
+// forward destination set at purchase, editable on PATCH /numbers/:id) and an
+// assignment is a statement of responsibility: it says who is accountable for
+// the calls that number takes, which is what attribution reads at ingest.
 
 function userName(u: { first_name: string | null; last_name: string | null }): string {
   return [u.first_name, u.last_name].filter(Boolean).join(' ') || 'User';
-}
-
-// ─── Task D2: CTM inbound-routing sync ───────────────────────────────────────
-//
-// A number gaining an assignment (or becoming the org default) is the moment
-// ServWave knows CTM needs to be told where that number's calls should land.
-// Only the CONFIRMED-automatable half is called here — voicemail voice-menu
-// creation + the number's dial_routes PUT (`lib/ctm/routing.ts`'s
-// `ensureVoicemailMenu` / `routeNumberToVoiceMenu`). The Queue/Agent ring-config
-// half isn't confirmed API-drivable, so `describeManualQueueScaffold` turns
-// that gap into exact admin instructions instead of a silent no-op — see that
-// file's header for the full CTM-API verification writeup.
-
-/** A phone-number's routing-relevant columns (kept out of `select: {id:true}`
- *  everywhere else in this file so callers not doing a sync stay cheap). */
-type RoutablePhoneNumber = {
-  id: string;
-  e164: string;
-  label: string | null;
-  ctm_number_id: string | null;
-  route_to: unknown;
-};
-
-export type RoutingSyncResult =
-  | {
-      synced: true;
-      voice_menu_id: string;
-      voice_menu_name: string;
-      manual_scaffold: ManualQueueScaffoldInstructions;
-    }
-  | { synced: false; reason: string };
-
-/**
- * Establishes the voicemail fallback for `number` and returns the manual
- * scaffold instructions for the rest. Best-effort, mirroring buyNumber's
- * routing-failure handling (comm-numbers.controller.ts): a CTM hiccup — or an
- * org/number that isn't CTM-connected (e.g. a BYO number, or CTM simply not
- * configured in this environment) — must never fail the assignment write that
- * already committed. It degrades to `{synced:false, reason}` for the caller
- * to surface as a warning instead.
- *
- * Idempotent from our side: `route_to.voice_menu_id`, once persisted, is
- * passed back in as `existingId` so re-running this (e.g. editing an
- * assignment set that already had a voice menu) never double-creates one —
- * `ensureVoicemailMenu` no-ops the POST and just re-confirms the dial route.
- */
-async function syncInboundRouting(
-  req: Request,
-  number: RoutablePhoneNumber,
-  ctmAgentName: string | undefined,
-): Promise<RoutingSyncResult> {
-  if (!isCtmConfigured()) {
-    return { synced: false, reason: 'The phone system is not configured for this environment.' };
-  }
-  if (!number.ctm_number_id) {
-    return {
-      synced: false,
-      reason: 'This is a bring-your-own number (not provisioned here) — nothing to sync.',
-    };
-  }
-
-  const org = await prisma.organization.findUnique({
-    where: { id: req.user!.organization_id },
-    select: { ctm_account_id: true },
-  });
-  if (!org?.ctm_account_id) {
-    return { synced: false, reason: 'Organization is not connected to a phone system.' };
-  }
-
-  const numberFormatted = formatPhoneDisplay(number.e164) || number.e164;
-  const existing = (number.route_to ?? null) as { voice_menu_id?: string } | null;
-  const voiceMenuName = ctmAgentName
-    ? `${ctmAgentName} — Voicemail`
-    : `${number.label || numberFormatted} — Voicemail`;
-
-  try {
-    const voiceMenuId = await ensureVoicemailMenu(org.ctm_account_id, {
-      name: voiceMenuName,
-      existingId: existing?.voice_menu_id,
-    });
-    await routeNumberToVoiceMenu(org.ctm_account_id, number.ctm_number_id, voiceMenuId);
-
-    // Persist onto PhoneNumber.route_to — the same JSON column buyNumber
-    // already uses to record "what this TPN's dial route currently targets"
-    // (there `{forward_to}`, here `{voice_menu_id, voice_menu_name}`); no new
-    // column needed.
-    await prisma.phoneNumber.update({
-      where: { id: number.id },
-      data: { route_to: { voice_menu_id: voiceMenuId, voice_menu_name: voiceMenuName } },
-    });
-
-    const manualScaffold = describeManualQueueScaffold({
-      ctmAgentName,
-      voiceMenuId,
-      voiceMenuName,
-      numberFormatted,
-    });
-
-    return {
-      synced: true,
-      voice_menu_id: voiceMenuId,
-      voice_menu_name: voiceMenuName,
-      manual_scaffold: manualScaffold,
-    };
-  } catch (err) {
-    logger.warn(
-      `[ctm] inbound routing sync failed for number ${number.id}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return {
-      synced: false,
-      reason: 'Syncing inbound routing failed — contact support to finish setting it up.',
-    };
-  }
 }
 
 // ─── GET /number-assignments ─────────────────────────────────────────────────
@@ -194,7 +84,7 @@ export async function setNumberAssignments(req: Request, res: Response) {
     const numberId = req.params.id as string;
     const number = await prisma.phoneNumber.findFirst({
       where: { id: numberId, ...tenantWhere(req) },
-      select: { id: true, e164: true, label: true, ctm_number_id: true, route_to: true },
+      select: { id: true },
     });
     if (!number) {
       res.status(404).json({ error: 'Phone number not found' });
@@ -229,38 +119,14 @@ export async function setNumberAssignments(req: Request, res: Response) {
       }
     });
 
-    // Inbound-routing sync (Task D2): only when the number now HAS at least
-    // one assigned user. Unassigning down to zero users deliberately makes NO
-    // CTM call — there is no confirmed API to safely tear down the Queue-side
-    // config (see lib/ctm/routing.ts's header), so the safest thing to do is
-    // leave the existing voicemail dial-route in place: worst case, the
-    // number still reaches voicemail instead of ringing nobody. A future
-    // reassignment re-syncs it (idempotently) regardless.
-    let routing: RoutingSyncResult | null = null;
-    if (userIds.length > 0) {
-      // Only attach a concrete agent name to the manual-scaffold instructions
-      // when the resulting set is exactly one user (a dedicated per-user
-      // number) — a shared/team number falls back to the generic wording
-      // `describeManualQueueScaffold` already handles.
-      let ctmAgentName: string | undefined;
-      if (userIds.length === 1) {
-        const soleUser = await prisma.user.findFirst({
-          where: { id: userIds[0], ...tenantWhere(req) },
-          select: { first_name: true, last_name: true },
-        });
-        if (soleUser) ctmAgentName = userName(soleUser);
-      }
-      routing = await syncInboundRouting(req, number, ctmAgentName);
-    }
-
     void logAudit({
       req,
       action: 'phone_number.assignments_updated',
       resourceType: 'PhoneNumber',
       resourceId: numberId,
-      metadata: { user_ids: userIds, routing_synced: routing?.synced ?? null },
+      metadata: { user_ids: userIds },
     });
-    res.json({ ok: true, routing });
+    res.json({ ok: true });
   } catch (err) {
     logger.error('Failed to set number assignments:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -268,11 +134,8 @@ export async function setNumberAssignments(req: Request, res: Response) {
 }
 
 // ─── PUT /users/:userId/default-number ───────────────────────────────────────
-// No CTM routing sync here (Task D2): picking which of a user's ALREADY
-// assigned numbers is their outbound default doesn't change which numbers are
-// wired for inbound — that happened when the number was assigned via
-// setNumberAssignments (or made the org default). This endpoint only affects
-// resolveOutboundNumber's caller-ID choice.
+// Picks which of a user's already-assigned numbers is their outbound default.
+// Affects resolveOutboundNumber's caller-ID choice and nothing else.
 export const setUserDefaultSchema = z.object({
   phone_number_id: z.string().uuid().nullable(),
 });
@@ -340,7 +203,7 @@ export async function setOrgDefaultNumber(req: Request, res: Response) {
     const numberId = req.params.id as string;
     const number = await prisma.phoneNumber.findFirst({
       where: { id: numberId, ...tenantWhere(req) },
-      select: { id: true, e164: true, label: true, ctm_number_id: true, route_to: true },
+      select: { id: true },
     });
     if (!number) {
       res.status(404).json({ error: 'Phone number not found' });
@@ -362,24 +225,14 @@ export async function setOrgDefaultNumber(req: Request, res: Response) {
       }
     });
 
-    // Inbound-routing sync (Task D2): only on SETTING the org default — it's
-    // now the shared inbound fallback target, so it needs the voicemail
-    // wiring. No `ctmAgentName` (the org default isn't one person's number),
-    // so the manual-scaffold instructions use the generic wording.
-    // UNSETTING makes no CTM call, same reasoning as setNumberAssignments'
-    // unassign path: no confirmed API to safely revert Queue-side config, and
-    // the voicemail route already in place is safe to leave — a number that
-    // newly becomes org-default gets its own sync when THAT happens.
-    const routing = setDefault ? await syncInboundRouting(req, number, undefined) : null;
-
     void logAudit({
       req,
       action: 'phone_number.org_default_set',
       resourceType: 'PhoneNumber',
       resourceId: numberId,
-      metadata: { is_org_default: setDefault, routing_synced: routing?.synced ?? null },
+      metadata: { is_org_default: setDefault },
     });
-    res.json({ ok: true, routing });
+    res.json({ ok: true });
   } catch (err) {
     logger.error('Failed to set org default number:', err);
     res.status(500).json({ error: 'Internal server error' });

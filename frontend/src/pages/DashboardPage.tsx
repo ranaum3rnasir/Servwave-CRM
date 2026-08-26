@@ -6,11 +6,11 @@ import { Heading } from '@/components/ui/heading';
 import { useAuthStore } from '@/stores/auth.store';
 import { useDashboard } from '@/lib/api/dashboard';
 import NewMenu from '@/pages/dashboard/NewMenu';
-import { useDashboardLayout } from '@/pages/dashboard/layout/useDashboardLayout';
-import { WIDGETS } from '@/pages/dashboard/layout/widgetRegistry';
-import { SIZE_SPAN, type TimeRange } from '@/pages/dashboard/layout/types';
-import EditableWidget from '@/pages/dashboard/layout/EditableWidget';
-import CatalogDrawer from '@/pages/dashboard/layout/CatalogDrawer';
+import { useDashboardLayout } from '@/lib/dashboard/useDashboardLayout';
+import { WIDGETS } from '@/components/dashboard/widgetRegistry';
+import { SIZE_SPAN, type TimeRange } from '@/lib/dashboard/layoutTypes';
+import EditableWidget from '@/components/dashboard/EditableWidget';
+import CatalogDrawer from '@/components/dashboard/CatalogDrawer';
 
 function getGreeting(): string {
   const h = new Date().getHours();

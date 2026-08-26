@@ -1,6 +1,6 @@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { formatCurrency } from '@/lib/utils';
-import { bucketStatus, BUCKET_LABEL, type EstimateRow } from './estimates-report-logic';
+import { bucketStatus, BUCKET_LABEL, type EstimateRow } from '@/lib/reports/estimates-report-logic';
 
 /** Read-only detail for one estimate (mock phase — no editing). */
 export function EstimateDetailPanel({ estimate, onClose }: { estimate: EstimateRow | null; onClose: () => void }) {

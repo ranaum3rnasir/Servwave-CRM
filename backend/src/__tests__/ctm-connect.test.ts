@@ -9,7 +9,7 @@ const mockEnv = vi.hoisted(() => ({
     CTM_WEBHOOK_TOKEN: 'hook-token' as string | undefined,
     CTM_API_BASE: undefined as string | undefined,
     CTM_RECORDINGS_BUCKET: 'call-recordings',
-    BACKEND_PUBLIC_URL: 'https://servwave-dev-api.onrender.com' as string | undefined,
+    BACKEND_PUBLIC_URL: 'https://alpha-crm-test-env.onrender.com' as string | undefined,
   },
 }));
 vi.mock('../config/env', () => mockEnv);
@@ -38,11 +38,11 @@ const req = (body: Record<string, unknown> = {}) =>
   ({ body, user: { id: 'user-1', organization_id: 'org-1', email: 'admin@test.dev' } }) as any;
 
 const WEBURL = (position: string) =>
-  `https://servwave-dev-api.onrender.com/api/webhooks/ctm/${position}?token=hook-token`;
+  `https://alpha-crm-test-env.onrender.com/api/webhooks/ctm/${position}?token=hook-token`;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockEnv.env.BACKEND_PUBLIC_URL = 'https://servwave-dev-api.onrender.com';
+  mockEnv.env.BACKEND_PUBLIC_URL = 'https://alpha-crm-test-env.onrender.com';
   mockEnv.env.CTM_WEBHOOK_TOKEN = 'hook-token';
 
   client.isCtmConfigured.mockReturnValue(true);
@@ -51,8 +51,8 @@ beforeEach(() => {
     { id: 597911, name: 'Servwave' },
   ]);
   client.listNumbers.mockResolvedValue([
-    { id: 'TPN-A', number: '+15555550202', name: 'Main line' },
-    { id: 'TPN-B', number: '+15555550201', name: 'Ported line' },
+    { id: 'TPN-A', number: '+12019037784', name: 'Main line' },
+    { id: 'TPN-B', number: '+12017401509', name: 'Ported line' },
   ]);
   client.enableSms.mockResolvedValue('alreadyenabled');
   client.listWebhooks.mockResolvedValue([]);
@@ -102,7 +102,7 @@ describe('connectCtm', () => {
     expect(p.phoneNumber.upsert).toHaveBeenCalledTimes(2);
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
     expect(upsert.where).toEqual({
-      organization_id_e164: { organization_id: 'org-1', e164: '+15555550202' },
+      organization_id_e164: { organization_id: 'org-1', e164: '+12019037784' },
     });
     expect(upsert.create.ctm_number_id).toBe('TPN-A');
     expect(upsert.create.sms_enabled).toBe(true);

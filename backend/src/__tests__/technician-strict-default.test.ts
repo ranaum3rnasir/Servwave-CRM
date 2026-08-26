@@ -24,13 +24,14 @@ function techAbility() {
 }
 
 // owned / not-owned subject instances (the conditional grants use the assignment join tokens)
-const ownJob = subject('Job', { assignees: [{ user_id: TECH_ID }] }) as any;
-const otherJob = subject('Job', { assignees: [{ user_id: 'someone-else' }] }) as any;
+// S8 (D6): OWN_JOB reaches crew through the job's trips.
+const ownJob = subject('Job', { visits: [{ assignees: [{ user_id: TECH_ID }] }] }) as any;
+const otherJob = subject('Job', { visits: [{ assignees: [{ user_id: 'someone-else' }] }] }) as any;
 // Walkthrough-as-entity redesign, PR-B2: OWN_WALKTHROUGH is now a nested relation through the
-// walkthroughs -> performers join (defaultGrants.ts), not a direct walkthrough_performers
+// visits -> assignees join (defaultGrants.ts), not a direct visit_assignees
 // relation on Lead.
-const ownWalkLead = subject('Lead', { walkthroughs: [{ performers: [{ user_id: TECH_ID }] }] }) as any;
-const otherWalkLead = subject('Lead', { walkthroughs: [{ performers: [{ user_id: 'someone-else' }] }] }) as any;
+const ownWalkLead = subject('Lead', { visits: [{ assignees: [{ user_id: TECH_ID }] }] }) as any;
+const otherWalkLead = subject('Lead', { visits: [{ assignees: [{ user_id: 'someone-else' }] }] }) as any;
 
 describe('catalog — perform_walkthrough Lead', () => {
   it('perform_walkthrough Lead is a valid catalog entry', () => {
@@ -71,11 +72,15 @@ describe('strict TECHNICIAN default - what a tech CAN do', () => {
     expect(ability.can('read', 'Organization')).toBe(true);
   });
 
-  it('completes (closes out) their own assigned job', () => {
-    expect(techAbility().can('complete', ownJob)).toBe(true);
+  // Multi-visit S4 (D15/D7a): closing the JOB stopped being a technician default. It is now
+  // dispatcher/admin by default, an admin-grantable per-org row for anyone else, and what a
+  // technician actually closes is their own VISIT (which rides the `start Job` gate they keep).
+  // Orgs provisioned before this keep the row they were seeded with - see PRESERVED_ON_RESET.
+  it('does NOT close out a job by default, even one assigned to them', () => {
+    expect(techAbility().can('complete', ownJob)).toBe(false);
   });
 
-  it('cannot complete a job they are not assigned to', () => {
+  it('cannot complete a job they are not assigned to either', () => {
     expect(techAbility().can('complete', otherJob)).toBe(false);
   });
 

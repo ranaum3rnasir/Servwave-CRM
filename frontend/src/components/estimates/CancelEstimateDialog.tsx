@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import api from '@/lib/axios';
+import { setEstimateStatusTo } from '@/lib/api/estimates';
+import { ESTIMATE_STATUS } from '@/constants/estimateStatus';
 import { extractApiError } from '@/lib/utils';
 import {
   Dialog,
@@ -23,11 +24,12 @@ export function CancelEstimateDialog({ open, onOpenChange, estimateId }: CancelE
   const queryClient = useQueryClient();
   const [reason, setReason] = useState('');
 
+  // Spec B1 — routes through the free status setter, not POST /cancel. That endpoint still gates
+  // on DRAFT/SENT/PENDING, so archiving a won or declined estimate (legal now) would 400 there.
+  // The setter raises the same `estimate.cancelled` verb, so the notification feed is unchanged,
+  // and it also clears the stamps of whichever status the estimate is leaving.
   const mutation = useMutation({
-    mutationFn: async () => {
-      const { data } = await api.post(`/api/estimates/${estimateId}/cancel`, { cancelled_reason: reason });
-      return data;
-    },
+    mutationFn: async () => setEstimateStatusTo(estimateId, ESTIMATE_STATUS.ARCHIVED, { cancelled_reason: reason }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['estimate', estimateId] });
       queryClient.invalidateQueries({ queryKey: ['estimates'] });
@@ -44,8 +46,12 @@ export function CancelEstimateDialog({ open, onOpenChange, estimateId }: CancelE
               (POST .../cancel), the cancelled_reason field, and the estimate.cancelled verb are
               unchanged — this is copy-only. */}
           <DialogTitle>Archive Estimate</DialogTitle>
+          {/* Spec B1 - "This action cannot be undone" stopped being true when archive stopped being
+              terminal: an archived estimate moves to any other status from the pill. The reason
+              stays required, because recording it is what the archive is FOR. */}
           <DialogDescription>
-            This action cannot be undone. Please provide a reason.
+            The estimate leaves the active pipeline. You can move it back later from the status
+            picker. Please provide a reason.
           </DialogDescription>
         </DialogHeader>
 

@@ -44,7 +44,7 @@ const LEAD_ROW = {
   service_city: 'Austin',
   service_state: 'TX',
   customer: { first_name: 'John', last_name: 'Doe', company_name: null, phone: '5551234567' },
-  walkthroughs: [
+  visits: [
     {
       id: 'w-current',
       status: 'SCHEDULED',
@@ -150,9 +150,12 @@ describe('GET /api/search - leads are filtered out for an org whose plan lacks `
     for (const w of wheresOf(m.lead.findMany)) {
       // tenantWhere(req) survives untouched - the fix adds no where clause at all.
       expect(w.organization_id).toBe(TEST_USERS.admin.organization_id);
-      // ... and so does the schedule-scope relation filter (both board states - REQUESTED
-      // walkthroughs are the sidebar bucket, SCHEDULED ones sit on the calendar).
-      expect(w.walkthroughs).toEqual({ some: { status: { in: ['REQUESTED', 'SCHEDULED'] } } });
+      // ... and so does the schedule-scope relation filter. Multi-visit S4 changed BOTH halves of
+      // what this line used to pin: REQUESTED was retired from VisitStatus (the filter now names
+      // every LIVE state), and the filter is AND-composed rather than assigned onto `visits`, so
+      // that it can never delete a caller's own `visits`-keyed row-scope. Found in the tree rather
+      // than at a fixed key for exactly that reason.
+      expect(JSON.stringify(w)).toContain('"status":{"in":["SCHEDULED","EN_ROUTE","ON_SITE","IN_PROGRESS"]}');
     }
   });
 });

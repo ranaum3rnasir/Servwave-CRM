@@ -905,9 +905,8 @@ export default function MarketingAnalyticsPage() {
       </div>
 
       <p className="text-[11px] text-text-secondary pt-1">
-        Scaffold with mock data — wire to <code className="px-1 bg-border-soft rounded">/api/marketing</code> (revenue-by-source + CPBJ via Customer.ad_source). Figures are
-        modelled on a ~$6M/yr electronic-security &amp; door contractor and benchmarked against
-        published door/window CPL and cost-per-sold-job ranges. See the PRD in <code className="px-1 bg-border-soft rounded">servwave crm/solvave-marketing-research/</code>.
+        Sample figures shown for preview. Marketing attribution connects to your live lead sources
+        and job revenue once campaign tracking is enabled for your account.
       </p>
     </div>
   );

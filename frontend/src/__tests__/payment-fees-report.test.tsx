@@ -13,22 +13,22 @@ import { screen, within } from '@testing-library/react';
 import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './helpers';
 import ReportRoute from '@/pages/reports/ReportRoute';
-import type { PaymentFeesPayload } from '@/pages/reports/payment-fees-data';
+import type { PaymentFeesPayload } from '@/lib/reports/payment-fees-data';
 
 const hoisted = vi.hoisted(() => ({
   usePaymentFeesReport: vi.fn(),
 }));
 
-vi.mock('@/pages/reports/payment-fees-data', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/reports/payment-fees-data')>();
+vi.mock('@/lib/reports/payment-fees-data', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/reports/payment-fees-data')>();
   return { ...actual, usePaymentFeesReport: hoisted.usePaymentFeesReport };
 });
 
 // The main transaction list's own data source — stub to an empty, settled
 // result so this test only exercises the new fee-summary block, not the
 // (unrelated, already-covered) transaction table.
-vi.mock('@/pages/reports/payments-report-data', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/reports/payments-report-data')>();
+vi.mock('@/lib/reports/payments-report-data', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/reports/payments-report-data')>();
   return { ...actual, usePaymentsReport: () => ({ rows: [], now: new Date('2026-06-07T12:00:00.000Z'), isLoading: false }) };
 });
 

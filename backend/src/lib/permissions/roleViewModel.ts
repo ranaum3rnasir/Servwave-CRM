@@ -28,6 +28,10 @@ export const MODULES = [
   { subject: 'Department', label: 'Departments' },
   { subject: 'Location', label: 'Locations' },
   { subject: 'Automation', label: 'Automations' },
+  // Calendar Entries (Slice 01, spec §4). The Roles editor cannot see or toggle a grant that has
+  // no MODULES row (the D15 "complete Job" shape - see the TOGGLES comment further down) - this
+  // row is what makes the DEFAULT_GRANTS CalendarEntry rows editable, under the user-facing label.
+  { subject: 'CalendarEntry', label: 'Events' },
 ] as const;
 
 // Only these entities have an ownership chain → all four scope chips are real.
@@ -61,6 +65,17 @@ export const SENSITIVE = {
     // invoice, replacing the removed refund_deposit/Estimate action.
     { action: 'refund', subject: 'Invoice' },
   ],
+  // Editable record IDs (2026-08-19 plan, decision #7) - permission plumbing for a NOT-YET-BUILT
+  // capability (the PATCH .../:id/number endpoints ship in a later PR). ADMIN reaches every
+  // subject via the manage-all bypass; this bundle is what the Roles UI "Edit record ID numbers"
+  // switch writes/reads for every other role.
+  editRecordIds: [
+    { action: 'renumber', subject: 'Customer' },
+    { action: 'renumber', subject: 'Lead' },
+    { action: 'renumber', subject: 'Estimate' },
+    { action: 'renumber', subject: 'Job' },
+    { action: 'renumber', subject: 'Invoice' },
+  ],
 } as const;
 
 type ScopeConds = Record<ScopeValue, Record<string, unknown> | null>;
@@ -71,11 +86,14 @@ const SCOPE_CONDITIONS: Record<string, ScopeConds> = {
     Team: { lead_assignees: { some: { user: { department_id: '{{teamId}}' } } } },
     Location: { lead_assignees: { some: { user: { location_id: '{{locationId}}' } } } },
   },
+  // Multi-visit S8 (D6): crew lives on the visit, so every Job scope nests through `visits.some`.
+  // This table is the EMITTER - the migration repairs today's stored rows, and this is what stops
+  // the first admin Save after deploy from writing the dead path straight back in.
   Job: {
     All: null,
-    Owned: { assignees: { some: { user_id: '{{userId}}' } } },
-    Team: { assignees: { some: { user: { department_id: '{{teamId}}' } } } },
-    Location: { assignees: { some: { user: { location_id: '{{locationId}}' } } } },
+    Owned: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } },
+    Team: { visits: { some: { assignees: { some: { user: { department_id: '{{teamId}}' } } } } } },
+    Location: { visits: { some: { assignees: { some: { user: { location_id: '{{locationId}}' } } } } } },
   },
   Estimate: {
     All: null,
@@ -85,9 +103,9 @@ const SCOPE_CONDITIONS: Record<string, ScopeConds> = {
   },
   Invoice: {
     All: null,
-    Owned: { job: { assignees: { some: { user_id: '{{userId}}' } } } },
-    Team: { job: { assignees: { some: { user: { department_id: '{{teamId}}' } } } } },
-    Location: { job: { assignees: { some: { user: { location_id: '{{locationId}}' } } } } },
+    Owned: { job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } },
+    Team: { job: { visits: { some: { assignees: { some: { user: { department_id: '{{teamId}}' } } } } } } },
+    Location: { job: { visits: { some: { assignees: { some: { user: { location_id: '{{locationId}}' } } } } } } },
   },
 };
 
@@ -107,7 +125,7 @@ const SCOPE_CONDITION_ALIASES: Record<string, Partial<Record<ScopeValue, Record<
     Owned: [
       {
         OR: [
-          { assignees: { some: { user_id: '{{userId}}' } } },
+          { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } },
           { created_by_id: '{{userId}}' },
         ],
       },
@@ -125,6 +143,12 @@ type ToggleGrant = { action: string; subject: string; conditions: Record<string,
 
 const OWN_NOTIFICATION = { recipients: { some: { recipient_id: '{{userId}}' } } };
 
+// Multi-visit close-out (Q9, 2026-08-23) - same shape as defaultGrants.ts's OWN_JOB and
+// userCapabilities.ts's OWN_JOB, re-declared here for the same reason those two do: this module
+// is self-contained. Used ONLY as the seed condition for a toggle's FIRST-EVER grant on a role -
+// see the preserve-on-save note above the five entries below.
+const OWN_JOB = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } };
+
 export const TOGGLES = {
   dashboard: [{ action: 'read', subject: 'Dashboard', conditions: null }],
   accountSettings: [
@@ -138,14 +162,46 @@ export const TOGGLES = {
   ],
   modifyDoneJobs: [{ action: 'reopen', subject: 'Job', conditions: null }],
   cancelJobs: [{ action: 'cancel', subject: 'Job', conditions: null }],
+  // Multi-visit close-out (Q9). D15 stopped seeding `complete Job` for TECHNICIAN as a per-org
+  // toggle, but the Roles & Permissions page had no cell for it - or for its four milestone
+  // siblings - anywhere in MODULES/SENSITIVE/TOGGLES, so an admin could not see or grant any of
+  // them there (only on the per-user Permissions page, userCapabilities.ts). This bundle is what
+  // makes each one visible and toggleable at the role level.
+  //
+  // `conditions: OWN_JOB` is ONLY the seed for a role's FIRST-EVER grant of the action (no
+  // existing row). It is NOT what gets written on every Save: role.controller.ts's
+  // putRolePermissions preserves whatever condition an EXISTING row already carries for every key
+  // in TOGGLE_KEYS, rather than re-stamping this default over it. That preserve step is load-
+  // bearing here in a way it wasn't for modifyDoneJobs/cancelJobs above: confirmed on staging
+  // (redacted-staging-ref, 2026-08-23), DISPATCHER holds all five of these grants UNCONDITIONALLY
+  // (org-wide) while TECHNICIAN holds them OWN_JOB-scoped. A single hardcoded condition applied
+  // unconditionally on Save would silently narrow every DISPATCHER's complete/start/arrive/
+  // en_route/reschedule authority to "own job only" the next time anyone saved that role's page
+  // for ANY reason. Do not remove the preserve step without re-verifying this against live data.
+  enRouteJobs: [{ action: 'en_route', subject: 'Job', conditions: OWN_JOB }],
+  arriveJobs: [{ action: 'arrive', subject: 'Job', conditions: OWN_JOB }],
+  startJobs: [{ action: 'start', subject: 'Job', conditions: OWN_JOB }],
+  completeJobs: [{ action: 'complete', subject: 'Job', conditions: OWN_JOB }],
+  rescheduleJobs: [{ action: 'reschedule', subject: 'Job', conditions: OWN_JOB }],
 } satisfies Record<string, ToggleGrant[]>;
 
 export type ToggleKey = keyof typeof TOGGLES;
 
+// Every (action,subject) pair any TOGGLES bundle can emit. Used by role.controller.ts's
+// putRolePermissions to decide when a Save must PRESERVE the grant's existing stored condition
+// instead of re-emitting the bundle's hardcoded seed - see the comment on the milestone-verb
+// toggles above for why that distinction matters and is not merely defensive.
+const TOGGLE_GRANT_KEYS = new Set(
+  Object.values(TOGGLES).flatMap((bundle) => bundle.map((g) => `${g.action}:${g.subject}`)),
+);
+export function isToggleGrant(action: string, subject: string): boolean {
+  return TOGGLE_GRANT_KEYS.has(`${action}:${subject}`);
+}
+
 export interface RoleViewModel {
   role: string;
   matrix: Record<string, CrudCell>;
-  sensitive: { seeFinancials: boolean; managePayments: boolean; viewReports: boolean };
+  sensitive: { seeFinancials: boolean; managePayments: boolean; viewReports: boolean; editRecordIds: boolean };
   toggles: Record<ToggleKey, boolean>;
   scope: Record<string, ScopeValue>;
   general: { description: string };
@@ -231,6 +287,7 @@ export function assembleRoleViewModel(role: string, grants: Grant[]): RoleViewMo
     seeFinancials: SENSITIVE.seeFinancials.every((s) => has(s.action, s.subject)),
     managePayments: SENSITIVE.managePayments.every((s) => has(s.action, s.subject)),
     viewReports: SENSITIVE.viewReports.every((s) => has(s.action, s.subject)),
+    editRecordIds: SENSITIVE.editRecordIds.every((s) => has(s.action, s.subject)),
   };
 
   const toggles = {} as Record<ToggleKey, boolean>;
@@ -275,6 +332,8 @@ export function viewModelToGrants(vm: RoleViewModel): Grant[] {
   // role.controller.ts's putRolePermissions, where `existing` IS in scope.
   if (vm.sensitive.viewReports)
     for (const s of SENSITIVE.viewReports) grants.push({ action: s.action, subject: s.subject, conditions: null });
+  if (vm.sensitive.editRecordIds)
+    for (const s of SENSITIVE.editRecordIds) grants.push({ action: s.action, subject: s.subject, conditions: null });
 
   // Each bundle carries its OWN conditions (see TOGGLES above) - never hardcode null here, or
   // `notifications` would emit an org-wide grant instead of the self-scope it actually means.

@@ -9,6 +9,14 @@ import { MemoryRouter } from "react-router-dom";
 
 const useCallTranscript = vi.hoisted(() => vi.fn());
 
+// These specs render deep phone components without a QueryClientProvider - every
+// data hook is stubbed individually. Times now resolve against the ORG's zone, so
+// the org query joins that list; pinned here so the rendered clock is fixed rather
+// than the runner's.
+vi.mock("@/lib/api/organization", () => ({
+  useOrganization: () => ({ data: { timezone: "America/New_York" } }),
+}));
+
 vi.mock("@/lib/api/communication", () => ({
   usePhoneCustomers: () => ({ data: [] }),
   usePhoneAgents: () => ({ data: [] }),
@@ -43,7 +51,7 @@ const NO_RECORDING_CALL: CallSession = {
   id: "cd000000-0000-0000-0000-000000000002",
   direction: "inbound",
   fromNumber: "+15551230000",
-  toNumber: "+15555550202",
+  toNumber: "+12019037784",
   status: "completed",
   answeredBy: { kind: "none" },
   startedAt: new Date().toISOString(),

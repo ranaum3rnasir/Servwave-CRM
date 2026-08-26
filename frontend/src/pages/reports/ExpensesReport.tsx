@@ -21,12 +21,14 @@ import { SelectField } from '@/components/form/SelectField';
 import { formatCurrencyWhole } from '@/lib/utils';
 import { ChartCard } from '@/components/charts';
 import { chartPalette, token } from '@/design-system/tokens';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
-import { Delta, MultiSelectFilter, FacetFilter, type FacetGroup } from './_shared';
+import { MultiSelectFilter, FacetFilter } from './_shared';
+import { Delta } from '@/components/reports/ReportIndicators';
+import type { FacetGroup } from '@/lib/reports/types';
 import { DateRangeControl } from './DateRangeControl';
-import { buildExpenses, buildMonthlyRevenue } from './expenses-data';
-import { periodExpenseKpis, periodProfitSummary, withinRange, previousPeriod, EXPENSE_CATEGORIES, spendByCategoryByMonth, spendByCategoryForCardholder, filterExpenses, EXPENSE_STATUSES, EXPENSE_ATTRIBUTES, BUSINESS_UNITS, CARDHOLDERS, USERS, type ExpenseFilters, type ExpenseRow } from './expenses-logic';
+import { buildExpenses, buildMonthlyRevenue } from '@/lib/reports/expenses-data';
+import { periodExpenseKpis, periodProfitSummary, withinRange, previousPeriod, EXPENSE_CATEGORIES, spendByCategoryByMonth, spendByCategoryForCardholder, filterExpenses, EXPENSE_STATUSES, EXPENSE_ATTRIBUTES, BUSINESS_UNITS, CARDHOLDERS, USERS, type ExpenseFilters, type ExpenseRow } from '@/lib/reports/expenses-logic';
 import { exportCsvFile } from '@/lib/csv';
 
 const NOW = new Date(2026, 5, 6, 12, 0, 0);

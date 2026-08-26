@@ -34,8 +34,9 @@ const TECH_ID = TEST_USERS.technician.id;
 
 // A technician's own job vs. one they cannot see - same shape as
 // comm-visibility.test.ts's fixtures, kept local so this file stands alone.
-const MY_JOB = { id: 'ab000000-0000-0000-0000-00000000000a', assignees: [{ user_id: TECH_ID }] };
-const OTHER_JOB = { id: 'ab000000-0000-0000-0000-00000000000b', assignees: [{ user_id: 'someone-else' }] };
+// S8 (D6): OWN_JOB reaches crew through the job's trips, so these rows carry it there.
+const MY_JOB = { id: 'ab000000-0000-0000-0000-00000000000a', visits: [{ assignees: [{ user_id: TECH_ID }] }] };
+const OTHER_JOB = { id: 'ab000000-0000-0000-0000-00000000000b', visits: [{ assignees: [{ user_id: 'someone-else' }] }] };
 
 /** Grant a TECHNICIAN `update Communication` on top of their default OWN-job
  *  grants, so the assign/archive/snooze visibility scoping is exercised by a
@@ -356,7 +357,7 @@ describe('PATCH /api/communication/emails/threads/:id/assign', () => {
     const res = await request(app)
       .patch('/api/communication/emails/threads/d0000000-0000-4000-8000-000000000001/assign')
       .set(authHeader('admin'))
-      .send({ user_id: '99555555-0224-9999-9999-995555550224' });
+      .send({ user_id: '99999999-9999-9999-9999-999999999999' });
 
     expect(res.status).toBe(404);
     expect(p.emailThread.updateMany).not.toHaveBeenCalled();

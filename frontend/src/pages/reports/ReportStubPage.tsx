@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { Heading } from '@/components/ui/heading';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { featureNotInPlanCopy } from '@/lib/entitlements/catalog';
 
 interface Props {

@@ -100,9 +100,20 @@ export function findUnresolved(candidates) {
   writeFileSync(contentFile, `<div class="${[...candidates.keys()].join(' ')}"></div>`);
   writeFileSync(inFile, '@tailwind utilities;\n');
   // Reuse the REAL theme; only the content source is swapped.
+  //
+  // `.default ?? mod` is load-bearing, not defensive. tailwind.config.js is ESM,
+  // and Node's require(esm) hands back the module namespace - `{ __esModule,
+  // default }` - not the config. Spreading that yields an object with no
+  // `theme` at all, so Tailwind falls back to its stock palette and every
+  // token-derived class in the tree reads as unresolved: 55 phantom violations
+  // across 80 files, most of them legacy files nobody had touched. Tailwind's
+  // own loadConfig unwraps the same way (lib/lib/load-config.js), which is why
+  // the app kept building correctly while this harness went blind.
   writeFileSync(
     cfgFile,
-    `const real = require(${JSON.stringify(join(FRONTEND, 'tailwind.config.js'))});\n` +
+    `const mod = require(${JSON.stringify(join(FRONTEND, 'tailwind.config.js'))});\n` +
+      `const real = mod.default ?? mod;\n` +
+      `if (!real.theme) throw new Error('tailwind config loaded without a theme - check the ESM interop above');\n` +
       `module.exports = { ...real, content: [${JSON.stringify(contentFile)}], safelist: [] };\n`,
   );
 

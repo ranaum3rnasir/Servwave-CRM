@@ -17,10 +17,10 @@ import { Heading } from '@/components/ui/heading';
 import { SelectField } from '@/components/form/SelectField';
 import { ChartCard } from '@/components/charts';
 import { chartPalette, token } from '@/design-system/tokens';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { exportCsvFile } from '@/lib/csv';
-import { hashStr, mulberry32, rangeRnd } from './_shared';
+import { hashStr, mulberry32, rangeRnd } from '@/lib/reports/random';
 
 const money0 = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`;
 const pct = (n: number) => `${Math.round(n)}%`;

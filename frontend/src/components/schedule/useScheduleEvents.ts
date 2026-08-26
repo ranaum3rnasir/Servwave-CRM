@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { jobToEvent, walkthroughToEvent } from './eventAdapters';
+import { calendarEntryToEvent, jobToBucketEvent, jobToEvents, walkthroughToEvent } from './eventAdapters';
 import {
   conflictedEventIds,
   type SchedulableEvent,
@@ -11,6 +11,9 @@ export interface ScheduleEventsArgs {
   walkthroughLeads: Record<string, unknown>[] | undefined;
   unassignedJobs: Record<string, unknown>[] | undefined;
   unscheduledWalkthroughs: Record<string, unknown>[] | undefined;
+  // Slice 03 — optional so callers (and the pre-existing test suite) that predate calendar
+  // entries keep compiling and behaving byte-identically without passing this key at all.
+  calendarEntries?: Record<string, unknown>[] | undefined;
   hiddenSidebarIds: Set<string>;
   tz: string;
 }
@@ -33,26 +36,34 @@ export function useScheduleEvents({
   walkthroughLeads,
   unassignedJobs,
   unscheduledWalkthroughs,
+  calendarEntries,
   hiddenSidebarIds,
   tz,
 }: ScheduleEventsArgs): UseScheduleEventsReturn {
-  // Scheduled work for the calendar + member columns (states 2 and 4). The type
+  // Scheduled work for the calendar + member columns (states 2 and 4), PLUS calendar entries
+  // (slice 03) — entries have no unscheduled state (start/end are required columns), so they
+  // are merged straight into scheduledEvents and never reach bucketEvents below. The type
   // predicate narrows start/end to real WallClocks — downstream (calendar accessors)
   // needs no casts. This is the read boundary: every instant crosses into org-tz
   // wall-clock space here, once, via the adapters (schedule-tz.ts).
   const scheduledEvents = useMemo<ScheduledBoardEvent[]>(
     () =>
       [
-        ...((scheduledJobs ?? []).map((j) => jobToEvent(j, tz))),
+        // flatMap, not map: multi-visit S6 turns one job row into one event per live trip.
+        ...((scheduledJobs ?? []).flatMap((j) => jobToEvents(j, tz))),
         ...((walkthroughLeads ?? []).map((l) => walkthroughToEvent(l, tz))),
+        ...((calendarEntries ?? []).map((e) => calendarEntryToEvent(e, tz))),
       ].filter((e): e is ScheduledBoardEvent => e.start !== null && e.end !== null),
-    [scheduledJobs, walkthroughLeads, tz],
+    [scheduledJobs, walkthroughLeads, calendarEntries, tz],
   );
 
   // Unscheduled work for the buckets (states 1 and 3 — state 3 keeps its crew).
   const bucketEvents = useMemo<SchedulableEvent[]>(
     () => [
-      ...((unassignedJobs ?? []).map((j) => jobToEvent(j, tz))),
+      // map, NOT flatMap: the bucket is a JOB-level surface (D16 - "unscheduled" means the job
+      // holds no live trip), so its card addresses the job and offers first-booking. See
+      // jobToBucketEvent for the `/unassign` leftover this is guarding against.
+      ...((unassignedJobs ?? []).map((j) => jobToBucketEvent(j, tz))),
       ...((unscheduledWalkthroughs ?? []).map((l) => walkthroughToEvent(l, tz))),
     ],
     [unassignedJobs, unscheduledWalkthroughs, tz],
@@ -65,7 +76,7 @@ export function useScheduleEvents({
       bucketEvents.filter((ev) =>
         ev.type === 'walkthrough'
           ? !hiddenSidebarIds.has(ev.raw.id as string)
-          : !hiddenSidebarIds.has(ev.id),
+          : !hiddenSidebarIds.has(ev.boardId),
       ),
     [bucketEvents, hiddenSidebarIds],
   );

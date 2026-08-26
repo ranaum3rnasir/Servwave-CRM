@@ -88,7 +88,7 @@ const UNKNOWN_THREAD: MessageThread = {
 
 const SMS_NUMBER = {
   id: 'num-1',
-  e164: '+15555550208',
+  e164: '+15512827064',
   sms_enabled: true,
   created_at: '2026-07-01T00:00:00Z',
 };

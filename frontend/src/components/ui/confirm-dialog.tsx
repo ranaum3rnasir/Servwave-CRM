@@ -60,6 +60,11 @@ export interface ConfirmDialogProps {
   onConfirm: () => void;
   onCancel?: () => void;
   isLoading?: boolean;
+  /**
+   * Holds Confirm disabled while the body's own precondition is unmet - e.g. a
+   * type-the-name gate on an irreversible action. Cancel stays enabled.
+   */
+  confirmDisabled?: boolean;
   /** Rich body content (e.g. a from/to comparison panel) rendered between the description and the footer. */
   children?: ReactNode;
   /** Layout-only, e.g. a wider dialog for a richer body. */
@@ -79,6 +84,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
   isLoading = false,
+  confirmDisabled = false,
   children,
   className,
 }: ConfirmDialogProps) {
@@ -116,7 +122,7 @@ export function ConfirmDialog({
           >
             {cancelLabel}
           </Button>
-          <Button tone={resolvedTone} onClick={onConfirm} disabled={isLoading}>
+          <Button tone={resolvedTone} onClick={onConfirm} disabled={isLoading || confirmDisabled}>
             {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {confirmLabel}
           </Button>

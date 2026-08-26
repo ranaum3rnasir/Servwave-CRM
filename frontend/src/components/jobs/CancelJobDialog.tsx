@@ -4,6 +4,7 @@ import { AlertTriangle } from 'lucide-react';
 import api from '@/lib/axios';
 import { extractApiError } from '@/lib/utils';
 import { listJobLines } from '@/lib/api/jobs';
+import { jobVisitsQueryKey } from '@/lib/useJobVisits';
 import { useLogisticOrders, type LogisticOrderListRow } from '@/lib/api/logisticOrders';
 import { StatusBadge } from '@/components/data/status-badge';
 import { useFeature } from '@/lib/entitlements';
@@ -75,6 +76,10 @@ export function CancelJobDialog({ open, onOpenChange, jobId }: CancelJobDialogPr
       // Anchored LOs may flip to CANCELLED/RETURNED server-side — refresh their lists.
       queryClient.invalidateQueries({ queryKey: ['logistic-orders'] });
       queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      // Cancelling the job cancels its live visits in the same transaction (multi-visit,
+      // job.controller cancel()), so the visits query is stale too - without this the Visits
+      // tab keeps showing the trips as SCHEDULED for the full staleTime.
+      queryClient.invalidateQueries({ queryKey: jobVisitsQueryKey(jobId) });
       onOpenChange(false);
       setReason('');
     },

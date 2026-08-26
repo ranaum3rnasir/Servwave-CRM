@@ -48,7 +48,7 @@ const CUSTOMER_THREAD: MessageThread = {
 // An owned, texting-capable number (wire shape of GET /api/communication/numbers).
 const SMS_NUMBER = {
   id: 'num-1',
-  e164: '+15555550208',
+  e164: '+15512827064',
   sms_enabled: true,
   created_at: '2026-07-01T00:00:00Z',
 };

@@ -78,6 +78,7 @@ import { Softphone } from "./Softphone";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 /* ───────────────────────── Global dialer ─────────────────────────
  * Header entry point: a phone button that opens the dedicated `/phone`
@@ -86,7 +87,7 @@ import { Button } from "@/components/ui/button";
  * every entity "Call" button (phoneTabHandoff), so the header button, a call
  * from a Job, and a call from a Customer all land on the same live phone tab.
  * The full search + softphone + right-panel workspace now lives inside that
- * tab (PhoneShell → DialerWorkspace), not here. */
+ * tab (PhoneTabPage → DialerWorkspace), not here. */
 
 export function GlobalDialer() {
   return (
@@ -595,10 +596,14 @@ function CallHistoryRow({
   call,
   open,
   onToggle,
+  tz,
 }: {
   call: CallSession;
   open: boolean;
   onToggle: () => void;
+  /** Org zone, passed down rather than re-subscribed per row - this list can be
+   *  long, and one query subscription per row is a real render cost. */
+  tz: string;
 }) {
   const transcriptQuery = useCallTranscript(call.id, open);
   const transcript = call.transcriptPreview ?? transcriptQuery.data?.transcript ?? null;
@@ -607,7 +612,7 @@ function CallHistoryRow({
       <div className="flex items-center gap-1.5">
         <DirIcon call={call} />
         <span className="text-[11px] font-semibold text-text-primary">
-          {dayLabel(call.startedAt)} · {shortTime(call.startedAt)}
+          {dayLabel(call.startedAt, tz)} · {shortTime(call.startedAt, tz)}
         </span>
         {call.disposition && (
           <span className="ml-auto rounded-full bg-background-light px-1.5 py-0.5 text-[9px] font-medium text-text-secondary">
@@ -661,6 +666,7 @@ export function CustomerPanel({
    *  customer row — hub calls attribute the customer explicitly (E2). */
   onCall: (phone: string, ctx?: DialerEntityContext) => void;
 }) {
+  const tz = useScheduleTimezone();
   const { customer, jobs, focusedJobId } = selection;
   const navigate = useNavigate();
   const requestLeave = useSettingsGuard((s) => s.requestLeave);
@@ -817,7 +823,7 @@ export function CustomerPanel({
                     <div className="border-t border-border px-2 py-1.5">
                       {p.expectedDate && (
                         <p className="mb-1 text-[10px] text-text-secondary">
-                          Expected {dayLabel(p.expectedDate)}
+                          Expected {dayLabel(p.expectedDate, tz)}
                         </p>
                       )}
                       <ul className="space-y-0.5">
@@ -855,6 +861,7 @@ export function CustomerPanel({
               <CallHistoryRow
                 key={c.id}
                 call={c}
+                tz={tz}
                 open={openCall === c.id}
                 onToggle={() => setOpenCall(openCall === c.id ? null : c.id)}
               />
@@ -920,6 +927,7 @@ function MessagePanel({
   onConference: () => void;
   onToast: (m: string) => void;
 }) {
+  const tz = useScheduleTimezone();
   const { data: threads = [] } = useMessageThreads();
   const sendSms = useSendSms();
   const seed = customer
@@ -1034,7 +1042,7 @@ function MessagePanel({
                       : "text-text-secondary",
                   ].join(" ")}
                 >
-                  {shortTime(m.ts)}
+                  {shortTime(m.ts, tz)}
                 </span>
               </div>
             </div>

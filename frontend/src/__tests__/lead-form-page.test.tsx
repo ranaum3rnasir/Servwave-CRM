@@ -115,11 +115,11 @@ describe('LeadFormPage — ?phone= create-prefill (dialer slice 2.2)', () => {
   it('seeds the phone field from /leads/new?phone=<e164>, country code stripped + masked', async () => {
     renderWithProviders(<LeadFormPage />, {
       ability: adminAbility,
-      initialEntries: ['/leads/new?phone=%2B15555550212'],
+      initialEntries: ['/leads/new?phone=%2B15555550199'],
     });
 
     await waitFor(() =>
-      expect(screen.getByDisplayValue('(555) 555-0212')).toBeInTheDocument(),
+      expect(screen.getByDisplayValue('(609) 874-5252')).toBeInTheDocument(),
     );
   });
 });

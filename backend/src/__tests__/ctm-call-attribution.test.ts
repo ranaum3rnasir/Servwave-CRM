@@ -37,7 +37,7 @@ const PENDING_ID = 'f0000000-0000-0000-0000-000000000001';
 
 const OUT_BODY = {
   direction: 'out',
-  from_number: '(555) 555-0208',
+  from_number: '(551) 282-7064',
   to_number: '(555) 123-4567',
   status: 'ringing',
 };
@@ -433,7 +433,7 @@ const OUT_STARTS = {
   sid: 'CA8001',
   account_id: 596375,
   direction: 'outbound',
-  tracking_number: '+15555550203',
+  tracking_number: '+12395395911',
   called_number: '+15551234567',
   unix_time: 1_752_400_000,
 };
@@ -457,7 +457,7 @@ const PENDING_ROW = {
 // placer match — not a number match — can reunite the call with its job.
 const PLACER_ROW = {
   ...PENDING_ROW,
-  to_number: '+15555550220',
+  to_number: '+19739516607',
 };
 
 // Outbound end whose agent leg resolves to the placing user (via agent.email),
@@ -467,8 +467,8 @@ const OUT_END_EDITED = {
   sid: 'CA8009',
   account_id: 596375,
   direction: 'outbound',
-  tracking_number: '+15555550203',
-  called_number: '+15555550212',
+  tracking_number: '+12395395911',
+  called_number: '+15555550199',
   unix_time: 1_752_400_000,
   dial_status: 'answered',
   talk_time: 20,
@@ -602,7 +602,7 @@ describe('ingestCall — pending attribution consume', () => {
         sid: 'CA8002',
         direction: 'inbound',
         caller_number: '+15551234567',
-        tracking_number: '+15555550203',
+        tracking_number: '+12395395911',
         unix_time: 1_752_400_000,
       },
       'starts',
@@ -699,7 +699,7 @@ describe('ingestCall — pending attribution consume', () => {
     const tier1 = p.pendingCallAttribution.findFirst.mock.calls[0][0];
     expect(tier1.where).toEqual({
       organization_id: ORG_ID,
-      to_number: '+15555550212',
+      to_number: '+15555550199',
       consumed_at: null,
       created_at: { gte: expect.any(Date) },
     });

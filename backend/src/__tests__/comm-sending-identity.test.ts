@@ -31,7 +31,6 @@ describe('GET /api/communication/sending-identity', () => {
     (orgSendingIdentity as any).mockResolvedValue({
       address: 'alphadoors@mail.servwave.com',
       name: 'Alpha Doors',
-      customDomain: false,
       sendingEnabled: true,
     });
 
@@ -43,28 +42,8 @@ describe('GET /api/communication/sending-identity', () => {
     expect(res.body).toMatchObject({
       address: 'alphadoors@mail.servwave.com',
       name: 'Alpha Doors',
-      customDomain: false,
       sendingEnabled: true,
     });
-  });
-
-  it('reports a verified custom domain as such, so the UI can say which it is', async () => {
-    mockAuthAs('admin');
-    const { orgSendingIdentity } = await import('../lib/email.js');
-    (orgSendingIdentity as any).mockResolvedValue({
-      address: 'no-reply@alphadoors.com',
-      name: 'Alpha Doors',
-      customDomain: true,
-      sendingEnabled: true,
-    });
-
-    const res = await request(app)
-      .get('/api/communication/sending-identity')
-      .set(authHeader('admin'));
-
-    expect(res.status).toBe(200);
-    expect(res.body.customDomain).toBe(true);
-    expect(res.body.address).toBe('no-reply@alphadoors.com');
   });
 
   it('says sending is off rather than showing an address that will not send', async () => {
@@ -76,7 +55,6 @@ describe('GET /api/communication/sending-identity', () => {
     (orgSendingIdentity as any).mockResolvedValue({
       address: 'alphadoors@mail.servwave.com',
       name: 'Alpha Doors',
-      customDomain: false,
       sendingEnabled: false,
     });
 
@@ -94,7 +72,6 @@ describe('GET /api/communication/sending-identity', () => {
     (orgSendingIdentity as any).mockResolvedValue({
       address: 'alphadoors@mail.servwave.com',
       name: 'Alpha Doors',
-      customDomain: false,
       sendingEnabled: true,
     });
 

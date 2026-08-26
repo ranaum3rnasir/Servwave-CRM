@@ -264,7 +264,7 @@ describe('POST /api/inventory/restock (B2/V5)', () => {
     mockPrisma.priceBookItem.findFirst.mockResolvedValue(null);
     mockPrisma.inventoryLocation.findFirst.mockResolvedValue(INVENTORY_LOCATION_FIXTURE);
     const res = await request(app).post('/api/inventory/restock').set(authHeader('admin'))
-      .send({ itemId: '99555555-0224-9999-9999-995555550224', locationId: INVENTORY_LOCATION_FIXTURE.id, qty: 5 });
+      .send({ itemId: '99999999-9999-9999-9999-999999999999', locationId: INVENTORY_LOCATION_FIXTURE.id, qty: 5 });
     expect(res.status).toBe(404);
   });
 

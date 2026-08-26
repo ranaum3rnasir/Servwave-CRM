@@ -35,6 +35,7 @@ import organizationRoutes from './routes/organization.routes';
 import locationRoutes from './routes/location.routes';
 import servicePlanRoutes from './routes/service-plan.routes';
 import taskRoutes from './routes/task.routes';
+import calendarEntryRoutes from './routes/calendar-entry.routes';
 import roleRoutes from './routes/role.routes';
 import tableViewRoutes from './routes/table-view.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -54,6 +55,7 @@ import invTechsJobsRoutes from './routes/inv-techs-jobs.routes';
 import invAssetsRoutes from './routes/inv-assets.routes';
 // ─── Logistic Orders (mounted at /api/logistic-orders) ───
 import logisticOrderRoutes from './routes/logistic-order.routes';
+import supportRoutes from './routes/support.routes';
 // ─── Communication module (mounted at /api/communication) ───
 import commCallsRoutes from './routes/comm-calls.routes';
 import commThreadsRoutes from './routes/comm-threads.routes';
@@ -62,6 +64,7 @@ import commConfigRoutes from './routes/comm-config.routes';
 import commEmailRoutes from './routes/comm-email.routes';
 import commSharedRoutes from './routes/comm-shared.routes';
 import commWhatsappRoutes from './routes/comm-whatsapp.routes';
+import commUsageRoutes from './routes/comm-usage.routes';
 import commNumbersRoutes from './routes/comm-numbers.routes';
 import commPhoneAccessRoutes from './routes/comm-phone-access.routes';
 import commNumberAssignmentsRoutes from './routes/comm-number-assignments.routes';
@@ -172,6 +175,7 @@ app.use('/api/organization', organizationRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/service-plans', servicePlanRoutes);
 app.use('/api/tasks', taskRoutes);
+app.use('/api/calendar-entries', calendarEntryRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/me/table-views', tableViewRoutes);
 app.use('/api/copilot', copilotRoutes);
@@ -194,6 +198,9 @@ app.use('/api/inventory', invAssetsRoutes);
 // ─── Logistic Orders (LO-2): the single stock-deduction document (own base path) ───
 app.use('/api/logistic-orders', logisticOrderRoutes);
 
+// ─── In-app contact with the ServWave team ("Reach sales") ───
+app.use('/api/support', supportRoutes);
+
 // ─── Communication module (multiple routers share the /api/communication base) ───
 // MOUNT ORDER IS LOAD-BEARING. Every router below receives every request under
 // this base and falls through when it owns no matching route - but the seven
@@ -208,6 +215,7 @@ app.use('/api/logistic-orders', logisticOrderRoutes);
 app.use('/api/communication', commEmailRoutes);
 app.use('/api/communication', commSharedRoutes);
 app.use('/api/communication', commWhatsappRoutes);
+app.use('/api/communication', commUsageRoutes);
 app.use('/api/communication', commCallsRoutes);
 app.use('/api/communication', commThreadsRoutes);
 app.use('/api/communication', commAgentsRoutes);

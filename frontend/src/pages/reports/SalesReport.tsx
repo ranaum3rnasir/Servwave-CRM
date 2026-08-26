@@ -27,10 +27,11 @@ import { ResizableTable } from '@/components/data/ResizableTable';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Button } from '@/components/ui/button';
 import { Modal } from '@/components/ui/modal';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { DateRangeControl } from './DateRangeControl';
-import { hashStr, mulberry32, ReportToolbar, ReportPager, ReportSelectTrigger } from './_shared';
+import { ReportToolbar, ReportPager, ReportSelectTrigger } from './_shared';
+import { hashStr, mulberry32 } from '@/lib/reports/random';
 import { exportCsvFile } from '@/lib/csv';
 
 // ── Domain vocab (Alpha Security US) ─────────────────────────────────────────

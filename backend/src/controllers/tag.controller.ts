@@ -8,8 +8,11 @@ import type { TagEntityType } from '../lib/tags';
 
 // ─── Zod Schemas ───────────────────────────────────────
 
+// Trim BEFORE the length checks - see the note on updateTagSchema below. This
+// half of the bug predates the Settings tag card: without it POST could still
+// mint the blank tag that PATCH can no longer create.
 export const createTagSchema = z.object({
-  name: z.string().min(1).max(50).transform((s) => s.trim()),
+  name: z.string().trim().min(1).max(50),
   color: z
     .string()
     .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
@@ -17,9 +20,33 @@ export const createTagSchema = z.object({
     .default('#6B7280'),
 });
 
+// `.trim()` FIRST, then the length checks - zod applies a ZodString's checks in
+// the order they are chained, so `.min(1).max(50).transform(s => s.trim())` sized
+// the RAW string and trimmed afterwards. A name of nothing but spaces therefore
+// cleared min(1) and left the schema as '', which the handler wrote to the shared
+// Tag row: an empty chip on every record carrying the tag, unfindable by name.
+// The same ordering rejected 52 characters that trim to a legal 50.
+export const updateTagSchema = z
+  .object({
+    name: z.string().trim().min(1).max(50).optional(),
+    color: z
+      .string()
+      .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
+      .optional(),
+  })
+  .refine((data) => data.name !== undefined || data.color !== undefined, {
+    message: 'Provide name or color',
+  });
+
+// Same trim-before-length order as createTagSchema/updateTagSchema above. These two
+// schemas could never mint a BLANK tag - `resolveTagId` and the `.refine()` below both
+// treat a post-trim '' as falsy and answer 400 - but chained the old way they kept the
+// other half of the bug: `max(50)` read the RAW string, so a legal 50-character name
+// typed with surrounding whitespace was rejected on every per-record tag route while
+// the same name succeeded on POST /api/tags.
 export const addTagToEntitySchema = z.object({
   tag_id: z.string().uuid().optional(),
-  name: z.string().min(1).max(50).transform((s) => s.trim()).optional(),
+  name: z.string().trim().min(1).max(50).optional(),
   color: z
     .string()
     .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
@@ -38,7 +65,7 @@ export const addTagToLeadSchema = addTagToEntitySchema;
 export const bulkTagEntitySchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(100),
   tag_id: z.string().uuid().optional(),
-  name: z.string().min(1).max(50).transform((s) => s.trim()).optional(),
+  name: z.string().trim().min(1).max(50).optional(),
   color: z
     .string()
     .regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color')
@@ -76,7 +103,7 @@ async function entityExistsInOrg(
 
 // ─── Handlers ──────────────────────────────────────────
 
-/** GET /api/tags — list this org's tags (for autocomplete) */
+/** GET /api/tags — list this org's tags (for autocomplete and the Settings card) */
 export async function list(req: Request, res: Response) {
   try {
     const tags = await prisma.tag.findMany({
@@ -173,7 +200,9 @@ async function ensureRowScopeAccess(
 async function resolveTagId(
   req: Request,
   body: { tag_id?: string; name?: string; color?: string },
-): Promise<{ ok: true; tagId: string } | { ok: false; status: number; error: string }> {
+): Promise<
+  { ok: true; tagId: string } | { ok: false; status: number; error: string; code?: string }
+> {
   const orgId = req.user!.organization_id;
   let tagId: string | undefined = body.tag_id;
 
@@ -182,7 +211,12 @@ async function resolveTagId(
       where: { id: tagId, ...tenantWhere(req) },
     });
     if (!tag) {
-      return { ok: false, status: 404, error: 'Tag not found' };
+      // The caller held a tag id that no longer resolves in this org - almost
+      // always because an admin deleted the tag from Settings while this client
+      // still had it in a cached picker list. `code` so the client can say so
+      // precisely instead of matching on prose; a bare 404 on this route is
+      // ambiguous between a missing tag and a missing record.
+      return { ok: false, status: 404, error: 'Tag not found', code: 'TAG_NOT_FOUND' };
     }
   }
 
@@ -242,6 +276,86 @@ async function attachTagAssignment(
 }
 
 /**
+ * PATCH /api/tags/:id — rename and/or recolour a tag org-wide.
+ *
+ * Edits the shared Tag row, so every record already carrying the tag shows the
+ * new name/colour. ADMIN-only via `update Tag` (no default grant row).
+ */
+export async function update(req: Request, res: Response): Promise<void> {
+  try {
+    const id = param(req, 'id');
+    const { name, color } = req.body as { name?: string; color?: string };
+
+    // Scope by tenant first — prisma.tag.update() keys on the unique id alone and
+    // would happily edit another org's row.
+    const existing = await prisma.tag.findFirst({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Tag not found' });
+      return;
+    }
+
+    if (name) {
+      const clash = await prisma.tag.findUnique({
+        where: {
+          organization_id_name: { organization_id: req.user!.organization_id, name },
+        },
+        select: { id: true },
+      });
+      if (clash && clash.id !== id) {
+        res.status(409).json({ error: 'A tag with that name already exists' });
+        return;
+      }
+    }
+
+    const tag = await prisma.tag.update({
+      where: { id },
+      data: {
+        ...(name !== undefined ? { name } : {}),
+        ...(color !== undefined ? { color } : {}),
+      },
+      select: { id: true, name: true, color: true },
+    });
+
+    res.json({ tag });
+  } catch (err) {
+    logger.error('Update tag error:', err);
+    res.status(500).json({ error: 'Failed to update tag' });
+  }
+}
+
+/**
+ * DELETE /api/tags/:id — delete a tag org-wide.
+ *
+ * Destructive: the assignment rows cascade (schema onDelete: Cascade on both
+ * tag_assignments and lead_tags), so the tag disappears from every customer,
+ * lead, estimate, job and invoice carrying it. ADMIN-only via `delete Tag`.
+ */
+export async function remove(req: Request, res: Response): Promise<void> {
+  try {
+    const id = param(req, 'id');
+
+    const existing = await prisma.tag.findFirst({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Tag not found' });
+      return;
+    }
+
+    await prisma.tag.delete({ where: { id } });
+
+    res.status(204).send();
+  } catch (err) {
+    logger.error('Delete tag error:', err);
+    res.status(500).json({ error: 'Failed to delete tag' });
+  }
+}
+
+/**
  * Factory: build a handler that attaches a tag to a LEAD or JOB.
  * Mounted as POST /api/leads/:id/tags or POST /api/jobs/:id/tags.
  */
@@ -264,7 +378,10 @@ export function addTagToEntity(entityType: TagEntityType) {
 
       const tagResult = await resolveTagId(req, req.body);
       if (!tagResult.ok) {
-        res.status(tagResult.status).json({ error: tagResult.error });
+        res.status(tagResult.status).json({
+          error: tagResult.error,
+          ...(tagResult.code ? { code: tagResult.code } : {}),
+        });
         return;
       }
 
@@ -375,7 +492,13 @@ export function removeTagFromEntity(entityType: TagEntityType) {
         },
       });
       if (!assignment) {
-        res.status(404).json({ error: `Tag not attached to this ${entityLabel}` });
+        // Same staleness as TAG_NOT_FOUND, seen from the other side: deleting a
+        // tag cascades its assignment rows, so a chip rendered from a stale copy
+        // of the record detaches into nothing.
+        res.status(404).json({
+          error: `Tag not attached to this ${entityLabel}`,
+          code: 'TAG_NOT_ATTACHED',
+        });
         return;
       }
 

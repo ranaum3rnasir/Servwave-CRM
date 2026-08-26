@@ -26,10 +26,12 @@ import {
   MailWarning,
 } from 'lucide-react';
 import api from '@/lib/axios';
-import { ESTIMATE_STATUS } from '@/constants/estimateStatus';
+import { ESTIMATE_STATUS, type EstimateStatusValue } from '@/constants/estimateStatus';
+import { STATUS_REGISTRY } from '@/design-system/status-registry';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EstimateNameTitle } from '@/features/estimate-workspace/components/EstimateNameTitle';
+import { RecordNumberEditor } from '@/components/crm/RecordNumberEditor';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,7 +58,7 @@ import { extractApiError } from '@/lib/utils';
 import {
   deleteEstimate,
   setEstimateStatus,
-  approveEstimateInternal,
+  setEstimateStatusTo,
   copyEstimateToInvoice,
   type EstimateLineItem,
   type Scope,
@@ -129,13 +131,20 @@ const fmtDate = (s?: string | null) =>
  * as its own small card (rather than folded into the hero) since hero/identity changes are
  * DEFERRED per the v12 plan §1.
  */
-function EstimateInfoCard({ estimate }: { estimate: RawEstimate }) {
+function EstimateInfoCard({
+  estimate,
+}: {
+  estimate: RawEstimate;
+}) {
   return (
     <SectionCard title="Estimate Info" icon={<FileText className="h-4 w-4 text-text-secondary" />}>
       <div className="flex flex-col gap-1 text-sm">
         <div className="flex items-center justify-between">
           <span className="text-text-secondary">Number</span>
-          <span className="text-text-primary">{estimate.estimate_number}</span>
+          {/* Read-only here on purpose: the editor moved to the page header, beside the id,
+              where every other record keeps it. Leaving a second one in the rail would give
+              the same field two pencils in two places. */}
+          <span className="text-sm font-medium text-text-secondary">{estimate.estimate_number}</span>
         </div>
         {estimate.creator && (
           <div className="flex items-center justify-between">
@@ -324,8 +333,27 @@ export default function EstimateWorkspacePage() {
 
   // R4 (2026-07-21) — lifecycle verbs (port-plan §3.2/§10.3). backtodraft/backtosent replace
   // Revise as the same-row correction path; approve-internal records a verbal/off-platform win.
+  // Spec B1 — the single mutation behind every free status move from the pill. Targets that need
+  // something the setter cannot invent (a lost_reason, a cancellation reason, or the mark-sent
+  // ceremony) open their dialog instead of calling this.
+  const statusMutation = useMutation({
+    mutationFn: async (vars: { status: EstimateStatusValue }) => setEstimateStatusTo(id!, vars.status),
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['estimate', id] });
+      queryClient.invalidateQueries({ queryKey: ['estimates'] });
+      toast({ title: `Moved to ${STATUS_REGISTRY.estimate[vars.status]?.label ?? vars.status}` });
+    },
+    onError: (err: unknown) =>
+      toast({ title: 'Status change failed', description: extractApiError(err, 'Failed to change status'), variant: 'destructive' }),
+  });
+
+  // Spec B1 - recall goes through the FREE setter, not the retained `backtodraft` alias. The alias
+  // keeps its original source-status gate (SENT, PENDING) by design, so leaving it here made the pill's
+  // Draft row render enabled on a won/declined/archived estimate and 400 on click. It keeps its own
+  // mutation rather than folding into statusMutation only for its richer success copy - the
+  // customer's link dying is worth saying out loud.
   const backToDraftMutation = useMutation({
-    mutationFn: async () => setEstimateStatus(id!, 'backtodraft'),
+    mutationFn: async () => setEstimateStatusTo(id!, ESTIMATE_STATUS.DRAFT),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['estimate', id] });
       queryClient.invalidateQueries({ queryKey: ['estimates'] });
@@ -346,16 +374,9 @@ export default function EstimateWorkspacePage() {
       toast({ title: 'Update failed', description: extractApiError(err, 'Failed to move estimate back to sent'), variant: 'destructive' }),
   });
 
-  const approveInternalMutation = useMutation({
-    mutationFn: async () => approveEstimateInternal(id!),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['estimate', id] });
-      queryClient.invalidateQueries({ queryKey: ['estimates'] });
-      toast({ title: 'Marked approved', description: 'Recorded as a verbal/off-platform win.' });
-    },
-    onError: (err: unknown) =>
-      toast({ title: 'Approve failed', description: extractApiError(err, 'Failed to approve estimate'), variant: 'destructive' }),
-  });
+  // (approveInternalMutation removed - Spec B1 routes Approve (Verbal) through statusMutation, so
+  // the pill and the Actions menu share one request. POST /:id/approve-internal itself stays: the
+  // public estimate flow and the API still use it.)
 
   const createJobMutation = useMutation({
     mutationFn: async () => {
@@ -435,13 +456,32 @@ export default function EstimateWorkspacePage() {
   const canArchive = canCancelEstimate && (isDraft || isSent);
   const canCopyLink = !!estimate.public_token;
 
+  // Spec B1 — the ONE rule that still blocks a status change: a won estimate whose money trail is
+  // already real cannot be unwound, because that would orphan invoices or payments pointing at it.
+  // Mirrors the backend's blockedByMoneyTrail() so the row is disabled with an explanation instead
+  // of failing on click. Everything else is reachable.
+  // Only the DEPOSIT half is predicted here, because that is the only half this payload carries -
+  // estimateDetailSelect does not include the job's invoices, and widening a shared select just to
+  // grey out a row is not worth it. The job half stays server-enforced: the row is offered, and a
+  // refusal comes back as the backend's own message in a destructive toast. Better an occasional
+  // honest refusal than a row greyed out on a guess the client cannot actually make.
+  const depositPaidOut = (depositInvoice?.payments?.length ?? 0) > 0;
+  const blockedByMoney = isApproved && depositPaidOut;
+  const moneyTrailReason = blockedByMoney ? 'The deposit has payments recorded' : undefined;
+
   // Lifecycle handlers, named once so the status pill's dropdown and the Actions menu below invoke
   // the IDENTICAL confirm copy + mutation. Two call sites for the same verb is exactly how the two
   // surfaces would drift apart otherwise.
   const confirmRecallToDraft = async () => {
     const ok = await confirm({
       title: `Recall ${estimate.estimate_number} to Draft?`,
-      description: `The customer's current link will stop working${isSigned ? ' and their signature will be cleared' : ''}.`,
+      // Only promise to kill a link that exists - most estimates reaching here from WON/DECLINED/
+      // ARCHIVED have no live token, and warning about one is noise that teaches users to skim.
+      description: [
+        estimate.public_token ? "The customer's current link will stop working" : 'The estimate reopens for editing',
+        isSigned ? ' and their signature will be cleared' : '',
+        '.',
+      ].join(''),
       confirmLabel: 'Recall to Draft',
       tone: 'danger',
     });
@@ -460,43 +500,70 @@ export default function EstimateWorkspacePage() {
       description: 'Verbal or off-platform win. No signature will be captured.',
       confirmLabel: 'Record as approved',
     });
-    if (ok) approveInternalMutation.mutate();
+    if (ok) statusMutation.mutate({ status: ESTIMATE_STATUS.WON });
+  };
+  // PENDING means "customer approved and signed, deposit outstanding". Set by hand it is honestly
+  // UNSIGNED, and the customer is still asked to sign if they open their link - so the confirm
+  // says so rather than letting a rep assume a signature exists.
+  const confirmMarkPending = async () => {
+    const ok = await confirm({
+      title: `Move ${estimate.estimate_number} to Approved — Deposit Pending?`,
+      description: 'Records the approval without a customer signature. If the customer later opens their link, they will still be asked to sign.',
+      confirmLabel: 'Move to Deposit Pending',
+    });
+    if (ok) statusMutation.mutate({ status: ESTIMATE_STATUS.PENDING });
   };
 
-  // Which statuses the pill's dropdown offers. Each entry mirrors the capability + status gate its
-  // Actions-menu twin already uses; `reason` is what the disabled row explains. See
-  // EstimateStatusMenu for why PENDING is absent entirely.
+  // Which statuses the pill's dropdown offers. Under Spec B1 estimate status is UNORDERED: every
+  // status is reachable from every other, so these entries gate on PERMISSION and on the single
+  // integrity rule (the money trail), never on where the estimate currently sits. The reachability
+  // reasons that used to live here ("Send the estimate before marking it Won") are gone with the
+  // ordering they enforced.
+  //
+  // Three targets still route through a dialog rather than straight to the setter, because they
+  // need something the setter cannot invent: SENT on a never-sent estimate needs the real
+  // mark-sent ceremony (customer link + T&C snapshot + deposit invoice), DECLINED needs a
+  // lost_reason, ARCHIVED takes an optional cancellation reason.
   const statusTargets: EstimateStatusMenuProps['targets'] = {
     [ESTIMATE_STATUS.DRAFT]: {
-      enabled: canBackToDraft,
-      reason: 'You do not have permission to change this estimate',
+      enabled: canSetStatus && !blockedByMoney,
+      reason: moneyTrailReason ?? 'You do not have permission to change this estimate',
       onSelect: confirmRecallToDraft,
     },
     [ESTIMATE_STATUS.SENT]: {
-      // Two different routes to SENT: forward from DRAFT (mark-sent), back from PENDING.
-      enabled: canMarkSent || canBackToSent,
-      reason: isDraft
-        ? 'You do not have permission to send this estimate'
-        : 'You do not have permission to change this estimate',
-      onSelect: canMarkSent ? () => setMarkSentOpen(true) : confirmBackToSent,
+      // SENT is a label like the other five - it records where the estimate sits, not that a
+      // customer link exists. So this is always the plain setter, never the ceremony.
+      //
+      // It used to branch on `public_token` and open MarkSentDialog when there was none. That
+      // dialog posts to /:id/mark-sent, which accepts DRAFT only, so every token-less
+      // WON/DECLINED/ARCHIVED estimate offered "Sent" and then refused it. Minting a customer link
+      // stays where it belongs: Send, Resend and Mark as sent in the Actions menu, each an explicit
+      // act of delivery rather than a side effect of relabelling.
+      enabled: canSetStatus && !blockedByMoney,
+      reason: moneyTrailReason ?? 'You do not have permission to change this estimate',
+      onSelect: () => statusMutation.mutate({ status: ESTIMATE_STATUS.SENT }),
     },
     [ESTIMATE_STATUS.PENDING]: {
-      enabled: false,
-      reason: 'Pending is set only when the customer signs the estimate',
+      // Now reachable. A staff-set PENDING is honestly unsigned, and approvePublic keys its
+      // skip-the-signature branch on the signature actually on file, so the customer is still
+      // asked to sign — the reason this transition was withheld no longer holds.
+      enabled: canSetStatus && !blockedByMoney,
+      reason: moneyTrailReason ?? 'You do not have permission to change this estimate',
+      onSelect: confirmMarkPending,
     },
     [ESTIMATE_STATUS.WON]: {
-      enabled: canApproveInternal,
-      reason: isSentLike ? 'You do not have permission to approve estimates' : 'Send the estimate before marking it Won',
+      enabled: canSetStatus,
+      reason: 'You do not have permission to change this estimate',
       onSelect: confirmApproveInternal,
     },
     [ESTIMATE_STATUS.DECLINED]: {
-      enabled: canDeclineInternal,
-      reason: isSentLike ? 'You do not have permission to decline estimates' : 'Send the estimate before marking it Declined',
+      enabled: canSetStatus && !blockedByMoney,
+      reason: moneyTrailReason ?? 'You do not have permission to change this estimate',
       onSelect: () => setDeclineInternalOpen(true),
     },
     [ESTIMATE_STATUS.ARCHIVED]: {
-      enabled: canArchive,
-      reason: isDraft || isSent ? 'You do not have permission to archive estimates' : 'Only a draft or sent estimate can be archived',
+      enabled: canSetStatus && !blockedByMoney,
+      reason: moneyTrailReason ?? 'You do not have permission to change this estimate',
       onSelect: () => setCancelOpen(true),
     },
   };
@@ -541,12 +608,27 @@ export default function EstimateWorkspacePage() {
             name={estimate.name}
             estimateNumber={estimate.estimate_number}
             canEdit={ability.can('update', 'Estimate')}
+            numberSlot={
+              <RecordNumberEditor
+                entity="estimate"
+                id={id!}
+                number={estimate.estimate_number}
+                canEdit={ability.can('renumber', 'Estimate')}
+                isDerivedAndLocked={!!estimate.container_kind && !estimate.number_is_custom}
+                onRenamed={() => {
+                  queryClient.invalidateQueries({ queryKey: ['estimate', id] });
+                  queryClient.invalidateQueries({ queryKey: ['estimates'] });
+                }}
+              />
+            }
           />
           <EstimateStatusMenu
             status={status}
-            // A terminal or locked estimate has no reachable target, so the pill stays a pill
-            // rather than a dropdown of six dead rows.
-            readOnly={isTerminal || locked}
+            // Spec B1 — no status is terminal any more, so the only thing that makes the pill
+            // inert is having no permission to change it at all. `locked` (deposit paid) locks the
+            // DOCUMENT, not the lifecycle; unwinding a paid one is refused by the money guard
+            // below, which explains itself on the row rather than hiding the whole control.
+            readOnly={!canSetStatus}
             targets={statusTargets}
           />
         </div>
@@ -867,7 +949,9 @@ export default function EstimateWorkspacePage() {
                 canEditNow={canEditNow}
               />
             )}
-            <EstimateInfoCard estimate={estimate} />
+            <EstimateInfoCard
+              estimate={estimate}
+            />
             {(showWaive || showRefund) && (
               <div className="rounded-card border border-border bg-surface-light p-4 shadow-card">
                 {/* eyebrow style, no matching Heading variant - left raw */}

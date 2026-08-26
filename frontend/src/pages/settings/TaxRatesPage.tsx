@@ -5,10 +5,12 @@ import { useAppAbility } from '@/contexts/AbilityContext';
 import { Card } from '@/components/ui/card';
 import { useConfirm } from '@/hooks/useConfirm';
 import { Button } from '@/components/ui/button';
+import { Heading } from '@/components/ui/heading';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { EmptyState } from '@/components/ui/empty-state';
+import { Table } from '@/components/data/table';
 import { toast } from '@/components/ui/use-toast';
 import { extractApiError } from '@/lib/utils';
 import { ConfirmRateChangeDialog } from '@/components/tax/ConfirmRateChangeDialog';
@@ -139,7 +141,7 @@ export default function TaxRatesPage() {
     setEditingId(r.id);
     setEditField(field);
     setEditName(r.name);
-    // toFixed, not String(): 0.0946 * 100 is 9.459995555550224 in binary floating point, and that
+    // toFixed, not String(): 0.0946 * 100 is 9.459999999999999 in binary floating point, and that
     // is what the user would otherwise find in the field they just clicked.
     setEditPct(toPct(r.rate).toFixed(3));
   };
@@ -177,7 +179,10 @@ export default function TaxRatesPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-text-primary">Tax Rates</h2>
+        {/* `scale="lg"` because level 2 defaults to `sm`; the pair renders
+            `text-lg font-semibold text-text-primary`, byte for byte the class
+            string this h2 carried. */}
+        <Heading level={2} scale="lg">Tax Rates</Heading>
         <p className="mt-0.5 text-sm text-text-secondary">
           Your organization&apos;s tax rates. Switch on the ones you actually bill in and they are the
           only rates offered on estimates, jobs and invoices. Editing a rate changes what new
@@ -215,103 +220,115 @@ export default function TaxRatesPage() {
               }
             />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text-secondary">
-                    <th className="pb-2 pr-3 font-medium">Name</th>
-                    <th className="pb-2 pr-3 font-medium">Rate</th>
-                    <th className="pb-2 pr-3 font-medium">Show in dropdown</th>
-                    <th className="pb-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r) => (
-                    <tr key={r.id} className="border-b border-border last:border-0">
-                      <td className="py-2 pr-3">
-                        {editingId === r.id ? (
+            /* The design-system Table owns the scroll wrapper and the table's
+               own base classes. `wrapper="x"` is the horizontal-only axis this
+               table already had, and the base it applies is `w-full
+               caption-bottom text-sm` - `caption-bottom` is inert with no
+               <caption>, so this renders the identical box.
+
+               The head/body cluster stays raw, deliberately. TableHead's three
+               named variants are the three measured header signatures in the
+               tree, and this header is a fourth: `compact` plus `font-medium`.
+               There is no weight axis on TableHead, and expressing the weight
+               with a className instead would add a soft appearance override at
+               a call site - `layering-guard.test.ts` holds that count at 163
+               with zero slack, so the honest options are a new prop on the
+               primitive or leaving these cells raw. Left raw. */
+            <Table wrapper="x">
+              <thead>
+                <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text-secondary">
+                  <th className="pb-2 pr-3 font-medium">Name</th>
+                  <th className="pb-2 pr-3 font-medium">Rate</th>
+                  <th className="pb-2 pr-3 font-medium">Show in dropdown</th>
+                  <th className="pb-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r) => (
+                  <tr key={r.id} className="border-b border-border last:border-0">
+                    <td className="py-2 pr-3">
+                      {editingId === r.id ? (
+                        <Input
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          onBlur={() => commitEdit(r)}
+                          onKeyDown={(e) => e.key === 'Enter' && commitEdit(r)}
+                          className="h-8"
+                          autoFocus={editField === 'name'}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="text-left font-medium text-text-primary disabled:cursor-default"
+                          onClick={() => canEdit && startEdit(r, 'name')}
+                          disabled={!canEdit}
+                        >
+                          {r.name}
+                        </button>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3">
+                      {editingId === r.id ? (
+                        <div className="flex items-center gap-1">
                           <Input
-                            value={editName}
-                            onChange={(e) => setEditName(e.target.value)}
+                            type="number"
+                            value={editPct}
+                            onChange={(e) => setEditPct(e.target.value)}
                             onBlur={() => commitEdit(r)}
                             onKeyDown={(e) => e.key === 'Enter' && commitEdit(r)}
-                            className="h-8"
-                            autoFocus={editField === 'name'}
+                            className="h-8 w-24"
+                            autoFocus={editField === 'rate'}
+                            min={0}
+                            max={100}
+                            step={0.001}
                           />
-                        ) : (
-                          <button
-                            type="button"
-                            className="text-left font-medium text-text-primary disabled:cursor-default"
-                            onClick={() => canEdit && startEdit(r, 'name')}
-                            disabled={!canEdit}
-                          >
-                            {r.name}
-                          </button>
-                        )}
-                      </td>
-                      <td className="py-2 pr-3">
-                        {editingId === r.id ? (
-                          <div className="flex items-center gap-1">
-                            <Input
-                              type="number"
-                              value={editPct}
-                              onChange={(e) => setEditPct(e.target.value)}
-                              onBlur={() => commitEdit(r)}
-                              onKeyDown={(e) => e.key === 'Enter' && commitEdit(r)}
-                              className="h-8 w-24"
-                              autoFocus={editField === 'rate'}
-                              min={0}
-                              max={100}
-                              step={0.001}
-                            />
-                            <span className="text-text-secondary">%</span>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="tabular-nums text-text-secondary disabled:cursor-default"
-                            onClick={() => canEdit && startEdit(r, 'rate')}
-                            disabled={!canEdit}
-                          >
-                            {fmtPct(r.rate)}
-                          </button>
-                        )}
-                      </td>
-                      <td className="py-2 pr-3">
-                        <Switch
-                          checked={r.is_visible}
+                          <span className="text-text-secondary">%</span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="tabular-nums text-text-secondary disabled:cursor-default"
+                          onClick={() => canEdit && startEdit(r, 'rate')}
                           disabled={!canEdit}
-                          onCheckedChange={(next) => toggleMutation.mutate({ id: r.id, is_visible: next })}
-                          aria-label={`Show ${r.name} in tax dropdowns`}
-                        />
-                      </td>
-                      <td className="py-2 text-right">
-                        {canEdit && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={async () => {
-                              const ok = await confirm({
-                                title: `Remove the "${r.name}" tax rate?`,
-                                description:
-                                  'Documents already taxed at this rate keep it. It just stops being offered.',
-                                tone: 'danger',
-                              });
-                              if (ok) deleteMutation.mutate(r.id);
-                            }}
-                            disabled={deleteMutation.isPending}
-                            aria-label={`Delete ${r.name}`}
-                          >
-                            <Trash2 className="h-4 w-4 text-danger" />
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                        >
+                          {fmtPct(r.rate)}
+                        </button>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <Switch
+                        checked={r.is_visible}
+                        disabled={!canEdit}
+                        onCheckedChange={(next) => toggleMutation.mutate({ id: r.id, is_visible: next })}
+                        aria-label={`Show ${r.name} in tax dropdowns`}
+                      />
+                    </td>
+                    <td className="py-2 text-right">
+                      {canEdit && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            const ok = await confirm({
+                              title: `Remove the "${r.name}" tax rate?`,
+                              description:
+                                'Documents already taxed at this rate keep it. It just stops being offered.',
+                              tone: 'danger',
+                            });
+                            if (ok) deleteMutation.mutate(r.id);
+                          }}
+                          disabled={deleteMutation.isPending}
+                          aria-label={`Delete ${r.name}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-danger" />
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
           )}
 
           {canEdit && (

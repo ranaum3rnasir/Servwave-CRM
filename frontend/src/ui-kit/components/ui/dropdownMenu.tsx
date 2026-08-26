@@ -20,9 +20,13 @@ const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
 
 const contentClasses = [
-  "bg-kit-popover text-kit-popover-foreground z-50 min-w-[13rem] overflow-hidden rounded-lg border p-1.5 shadow-popover",
-  "max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto",
-  "origin-(--radix-dropdown-menu-content-transform-origin)",
+  // `overflow-x-hidden`, not `overflow-hidden`: paired with the `overflow-y-auto`
+  // on the next line the two would be a same-property conflict decided by
+  // stylesheet order rather than by this file, and the menu's ability to scroll
+  // is not something to leave to a coin toss.
+  "bg-kit-popover text-kit-popover-foreground z-floating min-w-[13rem] overflow-x-hidden rounded-lg border p-1.5 shadow-popover",
+  "max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto",
+  "origin-[var(--radix-dropdown-menu-content-transform-origin)]",
   "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
   "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
 ];
@@ -183,7 +187,7 @@ function DropdownMenuSubContent({
   return (
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"
-      className={cn(contentClasses, "origin-(--radix-dropdown-menu-content-transform-origin)", className)}
+      className={cn(contentClasses, "origin-[var(--radix-dropdown-menu-content-transform-origin)]", className)}
       {...props}
     />
   );

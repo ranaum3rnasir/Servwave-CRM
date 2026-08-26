@@ -167,7 +167,10 @@ describe('backfillOrg', () => {
     expect(f.ingestSms).toHaveBeenCalledWith(f.deps.prisma, ORG_ID, smsByMessageId, { suppressNotifications: true });
     expect(f.ingestSms).toHaveBeenCalledWith(f.deps.prisma, ORG_ID, smsWrapped, { suppressNotifications: true });
     expect(f.ingestCall).toHaveBeenCalledTimes(1);
-    expect(f.ingestCall).toHaveBeenCalledWith(f.deps.prisma, ORG_ID, call, 'end', { suppressNotifications: true });
+    expect(f.ingestCall).toHaveBeenCalledWith(f.deps.prisma, ORG_ID, call, 'end', {
+      suppressNotifications: true,
+      ctmAccountId: ACCOUNT_ID,
+    });
     expect(counters).toMatchObject({ calls: 1, sms: 3 });
   });
 
@@ -183,12 +186,32 @@ describe('backfillOrg', () => {
     await backfillOrg(f.deps, { orgId: ORG_ID });
 
     for (const call of f.ingestCall.mock.calls) {
-      expect(call[4]).toEqual({ suppressNotifications: true });
+      // The assertion this test exists for is the suppression flag; the account
+      // id rides along on the same opts object (see c3) and is checked there.
+      expect(call[4]).toMatchObject({ suppressNotifications: true });
     }
     for (const call of f.ingestSms.mock.calls) {
       expect(call[3]).toEqual({ suppressNotifications: true });
     }
     expect(f.ingestCall.mock.calls.length + f.ingestSms.mock.calls.length).toBe(4);
+  });
+
+  // (c3) forwarded-answer attribution - a historical call answered on a
+  // forwarded phone names nobody in its payload; ingest can only resolve it
+  // with the org's CTM account id, so the backfill has to hand it over or the
+  // whole imported history stays unattributed.
+  it('passes the CTM account id so historical forwarded answers resolve', async () => {
+    const f = makeDeps([[{ sid: 'CA1' }]]);
+
+    await backfillOrg(f.deps, { orgId: ORG_ID });
+
+    expect(f.ingestCall).toHaveBeenCalledWith(
+      f.deps.prisma,
+      ORG_ID,
+      { sid: 'CA1' },
+      'end',
+      expect.objectContaining({ ctmAccountId: ACCOUNT_ID }),
+    );
   });
 
   // (d) recording re-attempt

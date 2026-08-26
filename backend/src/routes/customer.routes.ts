@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/authenticate';
 import { attachAbility } from '../middleware/attachAbility';
 import { canDo } from '../middleware/canGuard';
 import { validate } from '../middleware/validate';
+import { requireUuidParam } from '../middleware/requireUuidParam';
 import { expensiveLimiter } from '../middleware/rate-limit';
 import * as customerController from '../controllers/customer.controller';
 import * as jobCommunicationsController from '../controllers/job-communications.controller';
@@ -31,6 +32,11 @@ router.delete('/:id', canDo('delete', 'Customer'), customerController.remove);
 // Update
 router.patch('/:id', canDo('update', 'Customer'), validate(customerController.updateCustomerSchema), customerController.update);
 
+// Editable record ID (Workiz dual-run) - preview is read-only/advisory (no lock);
+// rename is the real write and takes the parent row lock itself.
+router.post('/:id/number/preview', canDo('renumber', 'Customer'), validate(customerController.renumberCustomerSchema), customerController.previewCustomerNumber);
+router.patch('/:id/number', canDo('renumber', 'Customer'), validate(customerController.renumberCustomerSchema), customerController.renameCustomer);
+
 // Lifecycle (entity-redesign §10)
 router.post('/:id/archive', canDo('archive', 'Customer'), customerController.archiveCustomer);
 router.post('/:id/unarchive', canDo('archive', 'Customer'), customerController.unarchiveCustomer);
@@ -47,8 +53,14 @@ router.get('/:id/communications', canDo('read', 'Communication'), jobCommunicati
 router.post('/:id/notes', canDo('update', 'Customer'), validate(customerController.createNoteSchema), customerController.addNote);
 
 // Tags (polymorphic)
-router.post('/:id/tags', canDo('update', 'Customer'), validate(tagController.addTagToEntitySchema), tagController.addTagToCustomer);
-router.delete('/:id/tags/:tagId', canDo('update', 'Customer'), tagController.removeTagFromCustomer);
+// Tag routes take BOTH ids straight from the path into `where` clauses over Postgres
+// `uuid` columns, so without these guards a stray segment makes the driver throw P2023
+// and the controller's catch reports a 500 for what is only a bad URL. They sit AFTER
+// canDo so a caller without the grant still gets 403 rather than learning whether the
+// id was well-formed, and they return the SAME 404 text the handler gives for a row
+// that genuinely is not there.
+router.post('/:id/tags', canDo('update', 'Customer'), requireUuidParam('id', 'customer not found'), validate(tagController.addTagToEntitySchema), tagController.addTagToCustomer);
+router.delete('/:id/tags/:tagId', canDo('update', 'Customer'), requireUuidParam('id', 'customer not found'), requireUuidParam('tagId', 'Tag not attached to this customer'), tagController.removeTagFromCustomer);
 
 // Service locations
 router.post('/:id/locations', canDo('update', 'Customer'), validate(customerController.createLocationSchema), customerController.addLocation);

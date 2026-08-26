@@ -35,6 +35,7 @@
   "overrides": {
     "undici": "^7.28.0",
     "form-data": "^4.0.6",
+    "nanoid": "^3.3.18",
     "shell-quote": "^1.9.0",
     "express": {
       "path-to-regexp": "0.1.13"

@@ -89,13 +89,22 @@ export interface ActivityEvent {
   description: string;
   created_at: string;
   creator_name: string | null;
+  /**
+   * The feed is org-wide and carries no entity filter, so an event can outlive the row it names
+   * (a deleted task keeps its timeline as the audit trail). When true, `entity_label` is the
+   * snapshot taken at delete time and is the only identity that row has left, and the event MUST
+   * NOT be given anything to navigate to.
+   */
+  entity_deleted: boolean;
+  /** Non-null exactly when `entity_deleted`; never empty. */
+  entity_label: string | null;
 }
 
 export interface DashboardKpis {
   jobs_today: { total: number; scheduled: number; in_progress: number; completed: number; vs_yesterday: number };
   revenue_mtd: { invoiced: number; collected: number; target: number; pct_of_goal: number; vs_last_month_pct: number };
   ar: { total: number; current: number; over_30: number; over_60: number };
-  leads_open: { count: number; unassigned: number; need_followup_today: number };
+  leads_open: { count: number; unassigned: number };
   close_rate: { rate: number; won: number; lost: number; vs_last_period_pp: number };
   // net-new KPIs
   collected_today: { amount: number; jobs_done: number };

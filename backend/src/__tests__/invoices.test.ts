@@ -2140,7 +2140,7 @@ describe('#106 base update/delete enforcement (per-instance owner check)', () =>
 
   it('PATCH 403s + never calls prisma.invoice.update when the invoice is owned by ANOTHER user', async () => {
     // Owned by a different user → the per-instance owner condition cannot match.
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRowOwnedBy('99555555-0224-9999-9999-995555550224'));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRowOwnedBy('99999999-9999-9999-9999-999999999999'));
     // The scoped visibility probe finds nothing for an un-owned row.
     mockPrisma.invoice.findFirst.mockResolvedValue(null);
 
@@ -2171,7 +2171,7 @@ describe('#106 base update/delete enforcement (per-instance owner check)', () =>
   });
 
   it('DELETE 403s + never calls prisma.invoice.delete when the invoice is owned by ANOTHER user', async () => {
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRowOwnedBy('99555555-0224-9999-9999-995555550224'));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRowOwnedBy('99999999-9999-9999-9999-999999999999'));
     mockPrisma.invoice.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
@@ -2242,7 +2242,7 @@ describe('#106 P0: DISPATCHER fail-open closed — grant-driven per-instance + l
     { action: 'void', subject: 'Invoice', conditions: OWN_INVOICE_VIA_JOB },
   ];
 
-  const OTHER_USER = '99555555-0224-9999-9999-995555550224';
+  const OTHER_USER = '99999999-9999-9999-9999-999999999999';
 
   beforeEach(() => {
     clearPermissionCache();
@@ -4085,6 +4085,7 @@ describe('POST /api/invoices/:id/payments', () => {
     mockAuthAs('admin');
     const estimateUpdate = vi.fn().mockResolvedValue({});
     const leadUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     const invoiceFixture = buildPaymentInvoice({
       kind: 'DEPOSIT',
       amount_due: 500,
@@ -4093,6 +4094,9 @@ describe('POST /api/invoices/:id/payments', () => {
         lead_id: 'ld000000-0000-0000-0000-000000000001',
         status: 'SENT',
         estimate_number: 'E00001',
+        // Spec #1751 D6: the door hands the lead's CURRENT status to the one status writer, which
+        // records it as the ledger entry's `from`. It is in recordPayment's select.
+        lead: { commission_owner_id: null, status: 'ESTIMATED' },
       },
     });
     mockPrisma.invoice.findUnique.mockResolvedValue(invoiceFixture);
@@ -4111,7 +4115,7 @@ describe('POST /api/invoices/:id/payments', () => {
           findUniqueOrThrow: vi.fn().mockResolvedValue({ amount_due: 500, status: 'SENT' }),
           update: vi.fn().mockResolvedValue(updatedInvoice),
         },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        timelineEvent: { create: txTimelineCreate },
         estimate: { update: estimateUpdate },
         lead: { updateMany: leadUpdateMany },
       });
@@ -4139,12 +4143,20 @@ describe('POST /api/invoices/:id/payments', () => {
         data: { status: 'WON' },
       }),
     );
+    // Spec #1751 D6: the win is now also recorded as a from/to ledger entry — the whole reason
+    // the nine scattered lead-to-WON writers were routed through one helper.
+    const statusChange = txTimelineCreate.mock.calls
+      .map((c: any[]) => c[0]?.data)
+      .filter((d: any) => d?.event_type === 'STATUS_CHANGE');
+    expect(statusChange).toHaveLength(1);
+    expect(statusChange[0].metadata).toMatchObject({ from: 'ESTIMATED', to: 'WON' });
   });
 
   it('DEPOSIT cascade is idempotent / safe on re-pay (estimate already WON)', async () => {
     mockAuthAs('admin');
     const estimateUpdate = vi.fn().mockResolvedValue({});
     const leadUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const txTimelineCreate = vi.fn().mockResolvedValue({});
     const invoiceFixture = buildPaymentInvoice({
       kind: 'DEPOSIT',
       amount_due: 500,
@@ -4154,6 +4166,9 @@ describe('POST /api/invoices/:id/payments', () => {
         lead_id: 'ld000000-0000-0000-0000-000000000002',
         status: 'WON',
         estimate_number: 'E00002',
+        // Re-pay of a deposit whose estimate is already WON: the lead is already won too, which
+        // is exactly the case the notIn guard existed to survive.
+        lead: { commission_owner_id: null, status: 'WON' },
       },
     });
     mockPrisma.invoice.findUnique.mockResolvedValue(invoiceFixture);
@@ -4172,7 +4187,7 @@ describe('POST /api/invoices/:id/payments', () => {
           findUniqueOrThrow: vi.fn().mockResolvedValue({ amount_due: 500, status: 'SENT' }),
           update: vi.fn().mockResolvedValue(updatedInvoice),
         },
-        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        timelineEvent: { create: txTimelineCreate },
         estimate: { update: estimateUpdate },
         lead: { updateMany: leadUpdateMany },
       });
@@ -4184,13 +4199,17 @@ describe('POST /api/invoices/:id/payments', () => {
       .send({ amount: 500, method: 'CHECK' });
 
     expect(res.status).toBe(201);
-    // Idempotent: still issues the update (no-op write is fine) and the notIn guard
+    // Idempotent: the estimate write is still issued (a no-op write is fine).
     expect(estimateUpdate).toHaveBeenCalled();
-    expect(leadUpdateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ status: { notIn: ['WON', 'LOST', 'CANCELLED'] } }),
-      }),
-    );
+    // The lead is NOT re-won. Spec #1751 D6 moved that decision in front of the database: the one
+    // writer refuses a terminal `from` outright, so where this used to prove the shape of a notIn
+    // guard, it now proves the stronger thing — no status write at all, and no second ledger
+    // entry announcing a win that already happened.
+    const leadStatusWrites = leadUpdateMany.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((args: any) => args?.data?.status !== undefined);
+    expect(leadStatusWrites).toHaveLength(0);
+    expect(txTimelineCreate.mock.calls.filter((c: any[]) => c[0]?.data?.event_type === 'STATUS_CHANGE')).toHaveLength(0);
   });
 
   it('partial payment on a kind=DEPOSIT invoice does NOT approve the estimate', async () => {

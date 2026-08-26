@@ -38,8 +38,10 @@ describe('emit — brief representative tests', () => {
       object: { type: 'JOB', id: 'j1' }, entity: { assignee_ids: [] } })).resolves.toEqual([]);
   });
 
+  // Was `task.assigned` — now a REGISTERED verb, so it no longer demonstrates the skip.
+  // task.overdue is still deferred (it needs a cron) and keeps this case honest.
   it('skips unknown/deferred verbs without inserting', async () => {
-    await emit({ verb: 'task.assigned', organizationId: 'org1', actorId: null,
+    await emit({ verb: 'task.overdue', organizationId: 'org1', actorId: null,
       object: { type: 'TASK', id: 't1' }, entity: {} });
     expect(prisma.notification.create).not.toHaveBeenCalled();
   });
@@ -89,7 +91,7 @@ describe('emit — returns the notified recipients', () => {
   });
 
   it('returns [] for an unknown verb', async () => {
-    const notified = await emit({ verb: 'task.assigned', organizationId: 'org1', actorId: null,
+    const notified = await emit({ verb: 'task.overdue', organizationId: 'org1', actorId: null,
       object: { type: 'TASK', id: 't1' }, entity: {} });
     expect(notified).toEqual([]);
   });

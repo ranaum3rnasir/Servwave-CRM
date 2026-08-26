@@ -17,9 +17,21 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
 import { toPriceBookBody } from '@/lib/api/inventory';
+
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_WH: 'aaaaaaa1-0000-4000-8000-000000000001',
@@ -193,7 +205,9 @@ describe('Category rename + delete on the Stock page (SRVW-93)', () => {
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(`/api/price-book/categories/${h.CAT_UNUSED_ID}`);
     });
-    expect(await screen.findByText(/Category "Bulbs" deleted/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(expect.stringMatching(/Category "Bulbs" deleted/)),
+    );
 
     // A second, also locally-unused category: the server rejects anyway,
     // representing the routine divergence between the page's by-NAME guard
@@ -211,7 +225,11 @@ describe('Category rename + delete on the Stock page (SRVW-93)', () => {
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(`/api/price-book/categories/${h.CAT_UNUSED2_ID}`);
     });
-    expect(await screen.findByText(/Could not delete the category "Widgets"/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.stringMatching(/Could not delete the category "Widgets"/),
+      ),
+    );
     // The row is still there - it was never removed from local state.
     await userEvent.click(screen.getByTitle('Filter items by category'));
     expect(within(await screen.findByRole('listbox')).getByText('Widgets')).toBeInTheDocument();
@@ -235,7 +253,11 @@ describe('Vendor + category created inline from Add Item (SRVW-93)', () => {
     await userEvent.click(screen.getByRole('button', { name: /add item/i }));
     const dialog = within(await screen.findByRole('dialog'));
 
-    await userEvent.click(dialog.getByLabelText('Add new vendor'));
+    // The creator is reached through the dropdown's own "+ Add new vendor…"
+    // entry. The separate + button beside the select was removed - two routes
+    // into one dialog was the inconsistency, not a convenience.
+    await userEvent.click(dialog.getByRole('combobox', { name: 'Vendor / Source' }));
+    await userEvent.click(await screen.findByRole('option', { name: /add new vendor/i }));
     const vendorDialog = within(await screen.findByRole('dialog', { name: /add new vendor/i }));
     await userEvent.type(vendorDialog.getByLabelText(/vendor name/i), 'ADI Supply');
     await userEvent.click(vendorDialog.getByRole('button', { name: /save vendor/i }));
@@ -245,6 +267,9 @@ describe('Vendor + category created inline from Add Item (SRVW-93)', () => {
     });
 
     await userEvent.type(dialog.getByPlaceholderText(/Dual Run Capacitor/), 'New Widget');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(dialog.getByLabelText(/^SKU/), 'WIDGET-1');
     await userEvent.click(dialog.getByRole('button', { name: /save item/i }));
 
     await waitFor(() => {
@@ -271,7 +296,9 @@ describe('Vendor + category created inline from Add Item (SRVW-93)', () => {
     await userEvent.click(screen.getByRole('button', { name: /add item/i }));
     const dialog = within(await screen.findByRole('dialog'));
 
-    await userEvent.click(dialog.getByLabelText('Add new category'));
+    // Same single route as the vendor case above.
+    await userEvent.click(dialog.getByRole('combobox', { name: 'Category' }));
+    await userEvent.click(await screen.findByRole('option', { name: /add new category/i }));
     const categoryDialog = within(await screen.findByRole('dialog', { name: /add new category/i }));
     await userEvent.type(categoryDialog.getByLabelText(/category name/i), 'Thermostats');
     await userEvent.click(categoryDialog.getByRole('button', { name: /save category/i }));
@@ -281,6 +308,9 @@ describe('Vendor + category created inline from Add Item (SRVW-93)', () => {
     });
 
     await userEvent.type(dialog.getByPlaceholderText(/Dual Run Capacitor/), 'New Widget');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(dialog.getByLabelText(/^SKU/), 'WIDGET-1');
     await userEvent.click(dialog.getByRole('button', { name: /save item/i }));
 
     await waitFor(() => {
@@ -349,7 +379,10 @@ describe('Opening stock on item create (SRVW-93)', () => {
     const dialog = within(await screen.findByRole('dialog'));
 
     await userEvent.type(dialog.getByPlaceholderText(/Dual Run Capacitor/), 'New Widget');
-    await userEvent.type(dialog.getByLabelText(/starting qty/i), '12');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(dialog.getByLabelText(/^SKU/), 'WIDGET-1');
+    await userEvent.type(dialog.getByLabelText(/on hand/i), '12');
     await userEvent.click(dialog.getByRole('button', { name: /save item/i }));
 
     await waitFor(() => {
@@ -379,13 +412,18 @@ describe('Opening stock on item create (SRVW-93)', () => {
     const dialog = within(await screen.findByRole('dialog'));
 
     await userEvent.type(dialog.getByPlaceholderText(/Dual Run Capacitor/), 'New Widget');
-    await userEvent.type(dialog.getByLabelText(/starting qty/i), '12');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(dialog.getByLabelText(/^SKU/), 'WIDGET-1');
+    await userEvent.type(dialog.getByLabelText(/on hand/i), '12');
     await userEvent.click(dialog.getByRole('button', { name: /save item/i }));
 
-    expect(
-      await screen.findByText(/New Widget-\d+.*starting quantity could not be recorded|starting quantity could not be recorded/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/^✓ .* added to the catalog$/)).toBeNull();
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.stringMatching(/starting quantity could not be recorded/),
+      ),
+    );
+    expect(mockToast).not.toHaveBeenCalledWith(expect.stringMatching(/^✓ .* added to the catalog$/));
   });
 });
 

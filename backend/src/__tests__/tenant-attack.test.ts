@@ -750,6 +750,8 @@ describe('Attack 9 — Timeline / attachment list scoping', () => {
 // ═══════════════════════════════════════════════════════════════════════
 // 10. TAGS — cross-org tag attach/remove and list scoping
 // ═══════════════════════════════════════════════════════════════════════
+const ORG_B_LEAD_ID = 'ba000000-0000-0000-0000-000000000001';
+
 describe('Attack 10 — Tag cross-org IDOR', () => {
   it('GET /api/tags as Org B → query scoped to Org B (no Org A tags)', async () => {
     mockAuthAs('orgB_admin');
@@ -777,11 +779,14 @@ describe('Attack 10 — Tag cross-org IDOR', () => {
 
   it('POST /api/leads/:own-id/tags with Org A tag_id as Org B → 404, no link created', async () => {
     mockAuthAs('orgB_admin');
-    (prisma.lead.findFirst as Mock).mockResolvedValue({ id: 'orgb-lead', organization_id: ORG_B_ID });
+    // A well-formed uuid rather than the old `orgb-lead` placeholder: the tag routes now reject a
+    // malformed `:id` before the controller runs, which would short-circuit this request ahead of
+    // the tag lookup and leave the org-scoping assertion below with nothing to inspect.
+    (prisma.lead.findFirst as Mock).mockResolvedValue({ id: ORG_B_LEAD_ID, organization_id: ORG_B_ID });
     (prisma.tag.findFirst as Mock).mockResolvedValue(null); // tag is in Org A
 
     const res = await request(app)
-      .post(`/api/leads/orgb-lead/tags`)
+      .post(`/api/leads/${ORG_B_LEAD_ID}/tags`)
       .set(authHeader('orgB_admin'))
       .send({ tag_id: 'a0000000-0000-0000-0000-000000000001' });
 

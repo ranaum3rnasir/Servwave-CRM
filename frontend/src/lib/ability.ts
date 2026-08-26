@@ -13,7 +13,10 @@ export type AppSubject =
   // data" switch; kept in lockstep with backend permissions catalog. Deliberately distinct from
   // 'Invoice', which is about invoice RECORDS.
   | 'Pricing'
-  | 'Location' | 'Role' | 'Timeclock' | 'AiCenter' | 'ServicePlan' | 'Automation' | 'all';
+  | 'Location' | 'Role' | 'Timeclock' | 'AiCenter' | 'ServicePlan' | 'Automation'
+  // Calendar Entries (Slice 01) - kept in lockstep with backend permissions catalog
+  // (backend/src/lib/permissions/catalog.ts). No table/API/UI reads or writes one yet.
+  | 'CalendarEntry' | 'all';
 
 export type AppAction =
   | 'manage' | 'create' | 'read' | 'update' | 'delete'
@@ -37,7 +40,11 @@ export type AppAction =
   // CASL keys off the (action,subject) pair). `void_approval` is D13's guarded unwind — ADMIN-only
   // by design, no role grant exists for it, so `ability.can('void_approval','Estimate')` is false
   // for every non-admin without a server round-trip.
-  | 'decline' | 'void_approval';
+  | 'decline' | 'void_approval'
+  // Editable record IDs (2026-08-19 plan) - dedicated action gating the number-rename
+  // endpoints (POST .../:id/number/preview, PATCH .../:id/number), kept in lockstep with
+  // backend permissions catalog (backend/src/lib/permissions/catalog.ts).
+  | 'renumber';
 
 export type AppAbility = MongoAbility<[AppAction, AppSubject]>;
 export type AbilityRule = RawRuleOf<AppAbility>;
@@ -75,7 +82,15 @@ export function canSeePricing(ability: AppAbility): boolean {
 export function canOnJob(
   ability: AppAbility,
   verb: AppAction,
-  job: { assignees?: { user: { id: string } }[] | null; created_by_id?: string | null },
+  job: {
+    // Multi-visit S8: crew lives on the VISIT. The job-level array is the visit-derived UNION
+    // the API still serves under the same wire key, kept here so a caller that has only the job
+    // payload (list rows before their visits arrive, the copilot's job tool) still answers
+    // correctly. Either source satisfying the scope is the right rule: they describe one set.
+    assignees?: { user: { id: string } }[] | null;
+    visits?: { assignees?: { user_id: string }[] | null }[] | null;
+    created_by_id?: string | null;
+  },
   userId: string,
 ): boolean {
   // FIRST: the type-level check, which honours INVERTED (deny) rules. A per-user deny override
@@ -96,7 +111,9 @@ export function canOnJob(
   // the technician made but was taken off, and OFFER it on every job they happen to be crewed on -
   // wrong in both directions, and the second is a button the API refuses.
   const facts = {
-    assigned: job.assignees?.some((a) => a.user.id === userId) ?? false,
+    assigned:
+      (job.assignees?.some((a) => a.user.id === userId) ?? false) ||
+      (job.visits?.some((v) => v.assignees?.some((a) => a.user_id === userId)) ?? false),
     // `!!created_by_id` first: a legacy row carries null, and null === undefined-userId would be a
     // false match on every pre-migration job.
     creator: !!job.created_by_id && job.created_by_id === userId,
@@ -122,6 +139,12 @@ function satisfiesJobScope(
   return entries.every(([key, value]) => {
     switch (key) {
       case 'assignees':
+        return facts.assigned;
+      // Multi-visit S8: the stored OWN_JOB condition is
+      // `{ visits: { some: { assignees: { some: { user_id } } } } }`. Without this arm the
+      // `default` below hides EVERY row-scoped technician control with no error, while an
+      // admin-principal test stays green - see canOnJob's docstring.
+      case 'visits':
         return facts.assigned;
       case 'created_by_id':
         return facts.creator;

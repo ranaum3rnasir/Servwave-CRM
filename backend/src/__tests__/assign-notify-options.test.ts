@@ -60,6 +60,36 @@ function dispatchedType(type: string) {
 function wireSetAssigneesTx(updatedJob: any, currentCrew: { user_id: string }[] = []) {
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
+      // S8 (D6): the crew statement lands on the job's CURRENT visit, so the tx client needs the
+      // `visit` delegate - a write to a delegate a hand-listed tx fake omits throws INSIDE the
+      // transaction and the route 500s with no useful message.
+      visit: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+            visit_seq: 1, status: 'SCHEDULED',
+            scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+            scheduled_end: new Date('2026-10-01T11:00:00.000Z'),
+            is_all_day: false, created_at: new Date('2026-09-01T00:00:00.000Z'),
+            en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+          },
+        ]),
+        create: vi.fn().mockResolvedValue({ id: 'v0000000-0000-0000-0000-0000000000f1', visit_seq: 1 }),
+        update: vi.fn().mockResolvedValue({ id: 'v0000000-0000-0000-0000-0000000000f1', visit_seq: 1 }),
+        aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+      },
+      // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+      // transaction, so the union it writes can never evict someone off another visit. Without
+      // this delegate the read throws inside the tx and the route 500s opaquely.
+      visitAssignee: {
+        // S8 (D6): the crew that is really on the trip - the delta the notifications read comes
+        // off THIS delegate now, not the dropped job-level one.
+        findMany: vi.fn().mockResolvedValue(currentCrew),
+        // S3: /assign now restates the named crew on the visit it booked or moved, so this
+        // tx client needs the WRITE delegates too, not just the union read.
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       jobAssignee: {
         findMany: vi.fn().mockResolvedValue(currentCrew),
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -122,8 +152,9 @@ describe('POST /api/jobs/:id/assignees — notify options (#361)', () => {
   it('notify.email:false suppresses the TECH_ASSIGNED dispatch but STILL emits dispatch.job_assigned; removal path unaffected', async () => {
     mockAuthAs('admin');
     // Current crew = [sales]; new crew = [technician] → tech added, sales removed.
+    // S8 (D6): the PRE-read crew is the union across the job's trips.
     mockPrisma.job.findUnique
-      .mockResolvedValueOnce({ ...JOB_FIXTURE, assignees: [{ user_id: TEST_USERS.sales.id }] });
+      .mockResolvedValueOnce({ ...JOB_FIXTURE, visits: [{ assignees: [{ user_id: TEST_USERS.sales.id }] }] });
     wireSetAssigneesTx(
       { ...JOB_FIXTURE, assignees: [{ user_id: TEST_USERS.technician.id }] },
       [{ user_id: TEST_USERS.sales.id }],

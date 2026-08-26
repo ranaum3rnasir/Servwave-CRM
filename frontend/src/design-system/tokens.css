@@ -54,6 +54,30 @@
   /* Info (status only) */
   --info: 59 130 246;      /* #3B82F6 */
 
+  /* Olive (Calendar Entry board accent — slice 03/06, calendar-entries spec §3, §9 risk 4).
+     REPLACES the original --bronze-600 (#8B6F47), whose ~4.7:1-on-white estimate was never
+     checked against the surface it actually paints. The card composites this token at LOW
+     ALPHA over the board canvas (#EEF1F3) - `bg-event/5` in EVENT_TYPE_META, `bg-event/10` on
+     the Standard view - so "white" was the wrong background to measure against. Measured on
+     the real 10% composite (#e4e4e2, the worse of the two tints): bronze's text-on-tint
+     contrast was 3.70:1, failing AA (needs 4.5).
+     Bronze's hue (~32°) also sat almost on top of warning/amber's (~27°, walkthrough's accent)
+     - raw-RGB distance 79.4, the weakest separation of any pair on this board - which is what
+     let an Event and a Walkthrough card read as near-siblings at a glance.
+     Olive (~60° on the hue wheel) is the one warm-adjacent hue this board had not already
+     claimed: danger=red(~6°), warning=amber(~27°), success=green(~155°), info=blue(~217°),
+     ai=indigo(~237°), neutral(completed)=blue-grey(~200°). Candidates that moved further into
+     green (forest #2F5D3A) or teal (#1F5F5B) fixed the amber problem but created a WORSE one -
+     forest sits only 47.4 from success's green and teal only 34.1, both closer than bronze ever
+     was to amber. Olive stays 72.7 from success while lifting walkthrough separation to 97.6
+     (from 79.4) and clearing AA at 5.48:1 on the same 10% composite. See scheduleModel.ts's
+     EVENT_TYPE_META comment for why this stays a single DEFAULT-only token (matching
+     `--info`/`--warning`/`--ai`) rather than the -surface/-border/-text/-strong badge quartet -
+     and for the honest limit of a colour-only fix (§9 risk 4's "soft lie": no candidate in this
+     family gets background separation from the completed treatment past ~30/441, because both
+     are low-alpha tints over the same near-white canvas). */
+  --olive-700: 90 90 46; /* #5A5A2E */
+
   /* AI extras - the copilot panel is a DARK surface, so it needs values the
      light-surface status scale does not carry. */
   --ai-300:         151 163 255; /* #97A3FF  voice-orb highlight */
@@ -142,6 +166,7 @@
   --danger:  var(--terracotta);
   --ai:      var(--indigo-600);
   --notify:  var(--notify-rose);
+  --event:   var(--olive-700); /* Calendar Entry board accent — slice 03/06, AA-corrected */
 
   /* Surfaces */
   --background-light: var(--canvas);

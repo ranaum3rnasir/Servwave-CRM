@@ -1,8 +1,8 @@
 import { useMemo, useState, type DragEvent } from 'react';
 import { useTasksStore } from '@/stores/tasksStore';
 import { useFilteredTasks } from '@/lib/tasks/useFilteredTasks';
-import { assessRisk } from '@/lib/tasks/tasks-logic';
-import { TASK_STATUSES, type TaskStatus } from '@/lib/tasks/types';
+import { assessRisk, assigneeOpenCountFor, assigneeOpenCounts } from '@/lib/tasks/tasks-logic';
+import { BOARD_TASK_STATUSES, TASK_STATUSES, isCompletedTaskStatus, isTerminalTaskStatus, type TaskStatus } from '@/lib/tasks/types';
 import { cn } from '@/lib/utils';
 import { STATUS_REGISTRY } from '@/design-system/status-registry';
 
@@ -24,43 +24,35 @@ export default function BoardView() {
     void updateStatus(taskId, status);
   }
 
-  // Build owner open-count map for risk assessment
-  const ownerOpen = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const t of tasks) {
-      if (t.status !== 'DONE') m.set(t.owner_id, (m.get(t.owner_id) ?? 0) + 1);
-    }
-    return m;
-  }, [tasks]);
+  // Build per-assignee open-count map for risk assessment
+  const assigneeOpen = useMemo(() => assigneeOpenCounts(tasks), [tasks]);
 
-  // Partition tasks: at-risk (non-DONE) go to At Risk lane only; others go to their status column
+  // Partition tasks: at-risk (unfinished) go to At Risk lane only; others go to their status
+  // column. CANCELLED has no column (issue 03) and those tasks are dropped from the board.
   const { atRiskTasks, byStatus, riskByTask } = useMemo(() => {
     const atRisk: typeof tasks = [];
-    const cols: Record<TaskStatus, typeof tasks> = {
-      TODO: [],
-      IN_PROGRESS: [],
-      BLOCKED: [],
-      DONE: [],
-    };
+    const cols: Record<string, typeof tasks> = {};
+    for (const s of BOARD_TASK_STATUSES) cols[s] = [];
     const riskMap = new Map<string, ReturnType<typeof assessRisk>>();
     for (const t of tasks) {
       const risk = assessRisk(t, {
         now: new Date(),
-        ownerOpenCount: ownerOpen.get(t.owner_id) ?? 0,
+        assigneeOpenCount: assigneeOpenCountFor(t, assigneeOpen),
       });
       riskMap.set(t.id, risk);
-      if (risk.atRisk && t.status !== 'DONE') {
+      if (!cols[t.status]) continue;
+      if (risk.atRisk && !isTerminalTaskStatus(t.status)) {
         atRisk.push(t);
       } else {
-        cols[t.status].push(t);
+        cols[t.status]!.push(t);
       }
     }
     return { atRiskTasks: atRisk, byStatus: cols, riskByTask: riskMap };
-  }, [tasks, ownerOpen]);
+  }, [tasks, assigneeOpen]);
 
   const allColumns = [
     { key: 'AT_RISK' as const, label: '⚠ At Risk', tasks: atRiskTasks },
-    ...TASK_STATUSES.map((s) => ({ key: s, label: STATUS_REGISTRY.task[s]?.label ?? s, tasks: byStatus[s] })),
+    ...BOARD_TASK_STATUSES.map((s) => ({ key: s, label: STATUS_REGISTRY.task[s]?.label ?? s, tasks: byStatus[s] ?? [] })),
   ];
 
   return (
@@ -104,7 +96,7 @@ export default function BoardView() {
                   />
                 </div>
                 {/* Status selector - TaskCard doesn't expose a status control, so we add one here */}
-                {col.key !== 'DONE' && (
+                {!isCompletedTaskStatus(col.key) && (
                   <SelectField
                     value={t.status}
                     onValueChange={(v) => updateStatus(t.id, v as TaskStatus)}

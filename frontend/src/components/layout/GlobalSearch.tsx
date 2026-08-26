@@ -157,17 +157,11 @@ export default function GlobalSearch({ onSelect, placeholder = 'Search...', clas
     [showDropdown, hasResults, flatResults, activeIndex, handleSelect],
   );
 
-  // Ctrl+F / Cmd+F global shortcut
-  useEffect(() => {
-    function handleGlobalKey(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault();
-        inputRef.current?.focus();
-      }
-    }
-    document.addEventListener('keydown', handleGlobalKey);
-    return () => document.removeEventListener('keydown', handleGlobalKey);
-  }, []);
+  // No Ctrl+F / Cmd+F binding. It used to focus this field and call
+  // preventDefault, which took the browser's own find-on-page away from every
+  // screen in the app - the one shortcut a user is most certain of. The hint
+  // that advertised it came out with it, since a hint for a key that no longer
+  // does anything is worse than no hint.
 
   // ─── Render helpers ────────────────────────────────────
 
@@ -282,17 +276,6 @@ export default function GlobalSearch({ onSelect, placeholder = 'Search...', clas
           >
             <X className="h-4 w-4" />
           </button>
-        )}
-        {/* Ctrl+F hint */}
-        {!query && (
-          <div className="absolute right-2.5 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-0.5">
-            <kbd className="rounded border border-border bg-surface-light px-1.5 py-0.5 text-[10px] font-medium text-text-secondary">
-              Ctrl
-            </kbd>
-            <kbd className="rounded border border-border bg-surface-light px-1.5 py-0.5 text-[10px] font-medium text-text-secondary">
-              F
-            </kbd>
-          </div>
         )}
       </div>
 

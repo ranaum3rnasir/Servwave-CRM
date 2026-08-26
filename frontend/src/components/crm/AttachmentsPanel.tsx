@@ -4,7 +4,8 @@ import { formatDistanceToNow } from 'date-fns';
 import { UploadedImage } from '@/components/ui/uploaded-image';
 import { ChevronDown, ChevronRight, Plus, Trash2, FileText, Film, Image as ImageIcon, Upload } from 'lucide-react';
 import api from '@/lib/axios';
-import { cn } from '@/lib/utils';
+import { cn, extractApiError } from '@/lib/utils';
+import { ACCEPTED_UPLOAD_TYPES } from '@/lib/uploadTypes';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -13,6 +14,7 @@ import { AttachmentLightbox } from '@/components/ui/AttachmentLightbox';
 import { useConfirm } from '@/hooks/useConfirm';
 import { deleteAttachmentPrompt } from '@/lib/confirmPrompts';
 import { EmptyState } from '@/components/ui/empty-state';
+import { useToast } from '@/components/ui/use-toast';
 
 interface AttachmentsPanelProps {
   entityType: string;
@@ -45,7 +47,7 @@ const CONTEXTS: ContextConfig[] = [
   { key: 'OTHER', label: 'Other', badgeColor: 'bg-neutral-surface text-neutral-text' },
 ];
 
-const ACCEPTED_TYPES = 'image/jpeg,image/png,image/heic,video/mp4,application/pdf';
+const ACCEPTED_TYPES = ACCEPTED_UPLOAD_TYPES;
 
 function FileIcon({ fileType }: { fileType: string }) {
   if (fileType.startsWith('image/')) return <ImageIcon className="h-4 w-4" />;
@@ -61,6 +63,7 @@ function formatFileSize(bytes: number): string {
 
 export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     WALKTHROUGH: true,
     JOB_WORK: true,
@@ -134,8 +137,15 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
       });
 
       queryClient.invalidateQueries({ queryKey: ['attachments', entityType, entityId] });
-    } catch {
-      // Error is visible via the mutation pattern; for panel quick-upload we just stop spinner
+    } catch (err) {
+      // A rejected upload (wrong type, too large, no permission) has to say so: this is a
+      // plain try/catch, not a mutation, so nothing else renders the failure and a silent
+      // catch reads to the user as "the file uploaded and then vanished".
+      toast({
+        title: 'Upload failed',
+        description: extractApiError(err, 'Please try again.'),
+        variant: 'destructive',
+      });
     } finally {
       setUploading((prev) => ({ ...prev, [context]: false }));
       // Revoke the object URL to free memory (#33)

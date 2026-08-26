@@ -1,7 +1,31 @@
-import type { Task, TaskPerson } from './types';
+import { isCompletedTaskStatus, isTerminalTaskStatus, type Task, type TaskPerson } from './types';
+import { isAssignedTo, matchesAssignee } from './assignees';
+
+/**
+ * The instant a task stopped being work, or null while it is still open.
+ *
+ * DONE carries `completed_at`, stamped when the work finished. CANCELLED deliberately never
+ * sets it (issue 03) - that column means the work FINISHED - so the abandonment instant has to
+ * come from `updated_at`, which is exact when cancelling was the last edit and drifts later if
+ * the row is touched afterwards. The timeline holds the precise event, and list rows carry no
+ * timeline, so this is the closest honest answer a list row can give.
+ *
+ * A DONE row with no `completed_at` is bad data and gets no instant at all, which is what the
+ * old `status !== 'DONE' || !completed_at` guard in the completion log was for.
+ */
+export function taskClosedAt(task: Task): Date | null {
+  if (isCompletedTaskStatus(task.status)) {
+    if (!task.completed_at) return null;
+    const at = new Date(task.completed_at);
+    return Number.isNaN(at.getTime()) ? null : at;
+  }
+  if (task.status !== 'CANCELLED') return null;
+  const at = new Date(task.updated_at);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
 
 export function isOverdue(task: Task, now: Date): boolean {
-  if (!task.due_at || task.status === 'DONE') return false;
+  if (!task.due_at || isTerminalTaskStatus(task.status)) return false;
   return new Date(task.due_at).getTime() < now.getTime();
 }
 
@@ -11,7 +35,16 @@ export function ageInStageMs(task: Task, now: Date): number {
 
 export interface RiskContext {
   now: Date;
-  ownerOpenCount: number;
+  /**
+   * Open-task load of the BUSIEST assignee on this task.
+   *
+   * A task with three assignees is at risk if ANY ONE of them is drowning, so
+   * the max is the honest input - averaging would let two idle helpers mask an
+   * overloaded lead, and summing would call every shared task overloaded.
+   * `assigneeOpenCountFor` computes it; every caller should use that rather
+   * than picking a number itself.
+   */
+  assigneeOpenCount: number;
 }
 
 export interface RiskResult {
@@ -23,7 +56,7 @@ export interface RiskResult {
 const DAY = 24 * 60 * 60 * 1000;
 
 export function assessRisk(task: Task, ctx: RiskContext): RiskResult {
-  if (task.status === 'DONE') return { score: 0, reason: null, atRisk: false };
+  if (isTerminalTaskStatus(task.status)) return { score: 0, reason: null, atRisk: false };
 
   const reasons: string[] = [];
   let score = 0;
@@ -39,8 +72,8 @@ export function assessRisk(task: Task, ctx: RiskContext): RiskResult {
   if (ageDays >= 5) { score += 20; reasons.push(`sat ${Math.floor(ageDays)}d in ${task.status.toLowerCase()}`); }
   else if (ageDays >= 3) { score += 10; }
 
-  if (ctx.ownerOpenCount >= 8) { score += 20; reasons.push('owner overloaded'); }
-  else if (ctx.ownerOpenCount >= 5) { score += 10; }
+  if (ctx.assigneeOpenCount >= 8) { score += 20; reasons.push('assignee overloaded'); }
+  else if (ctx.assigneeOpenCount >= 5) { score += 10; }
 
   if (task.status === 'BLOCKED') { score += 15; reasons.push('blocked'); }
 
@@ -54,6 +87,17 @@ export function assessRisk(task: Task, ctx: RiskContext): RiskResult {
 
 const PRIORITY_RANK: Record<Task['priority'], number> = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 
+/**
+ * UTC day equality, for DUE DATES ONLY.
+ *
+ * `due_at` is a calendar date the org typed ("this is due on the 12th"). It is
+ * stored at a UTC midnight and every date control in this module reads it back
+ * in UTC, so a due date never drifts a day for a reader in another timezone.
+ *
+ * Do NOT reach for this when bucketing `completed_at` - see the completion-log
+ * block near the bottom of this file for why the two are deliberately
+ * different.
+ */
 function isSameUtcDay(a: Date, b: Date): boolean {
   return a.getUTCFullYear() === b.getUTCFullYear()
     && a.getUTCMonth() === b.getUTCMonth()
@@ -68,7 +112,7 @@ function myDayBucket(task: Task, now: Date): number {
 
 export function rankMyDay(tasks: Task[], userId: string, now: Date): Task[] {
   return tasks
-    .filter((t) => t.owner_id === userId && t.status !== 'DONE')
+    .filter((t) => isAssignedTo(t, userId) && !isTerminalTaskStatus(t.status))
     .sort((a, b) => {
       const ba = myDayBucket(a, now);
       const bb = myDayBucket(b, now);
@@ -92,31 +136,53 @@ export interface TaskStats {
   trend: TrendPoint[];
 }
 
-function ownerOpenCounts(tasks: Task[]): Map<string, number> {
+/**
+ * Open tasks per assignee.
+ *
+ * A task with three assignees counts ONCE FOR EACH of them, so the totals here
+ * deliberately exceed the number of tasks. That is the question being asked -
+ * "how much is on this person's plate" - and three people each owing the same
+ * deliverable each really do owe it. Do not "fix" the totals to sum to the task
+ * count; that would be a different, less useful metric.
+ */
+export function assigneeOpenCounts(tasks: Task[]): Map<string, number> {
   const m = new Map<string, number>();
   for (const t of tasks) {
-    if (t.status === 'DONE') continue;
-    m.set(t.owner_id, (m.get(t.owner_id) ?? 0) + 1);
+    if (isTerminalTaskStatus(t.status)) continue;
+    for (const id of t.assignee_ids) m.set(id, (m.get(id) ?? 0) + 1);
   }
   return m;
 }
 
-export function computeStats(tasks: Task[], now: Date): TaskStats {
-  const openCounts = ownerOpenCounts(tasks);
+/** The busiest assignee's load - see `RiskContext.assigneeOpenCount`. */
+export function assigneeOpenCountFor(task: Task, counts: Map<string, number>): number {
+  let max = 0;
+  for (const id of task.assignee_ids) max = Math.max(max, counts.get(id) ?? 0);
+  return max;
+}
 
-  const open = tasks.filter((t) => t.status !== 'DONE').length;
+export function computeStats(tasks: Task[], now: Date): TaskStats {
+  const openCounts = assigneeOpenCounts(tasks);
+
+  const open = tasks.filter((t) => !isTerminalTaskStatus(t.status)).length;
   const blocked = tasks.filter((t) => t.status === 'BLOCKED').length;
 
   const atRisk = tasks.filter(
-    (t) => assessRisk(t, { now, ownerOpenCount: openCounts.get(t.owner_id) ?? 0 }).atRisk,
+    (t) => assessRisk(t, { now, assigneeOpenCount: assigneeOpenCountFor(t, openCounts) }).atRisk,
   ).length;
 
-  const done = tasks.filter((t) => t.status === 'DONE' && t.completed_at);
+  // COMPLETED, not merely closed: the on-time rate, the top-closer credit and the trend line
+  // all describe delivered work, and a cancelled task delivered none.
+  const done = tasks.filter((t) => isCompletedTaskStatus(t.status) && t.completed_at);
   const onTime = done.filter((t) => t.due_at && new Date(t.completed_at!).getTime() <= new Date(t.due_at).getTime()).length;
   const onTimePct = done.length === 0 ? 100 : Math.round((onTime / done.length) * 100);
 
+  // Same per-assignee rule as the open counts: everyone who held a closed task
+  // gets credit for closing it.
   const closeCounts = new Map<string, number>();
-  for (const t of done) closeCounts.set(t.owner_id, (closeCounts.get(t.owner_id) ?? 0) + 1);
+  for (const t of done) {
+    for (const id of t.assignee_ids) closeCounts.set(id, (closeCounts.get(id) ?? 0) + 1);
+  }
   let topCloserId: string | null = null;
   let topCount = -1;
   for (const [uid, c] of closeCounts) if (c > topCount) { topCount = c; topCloserId = uid; }
@@ -124,7 +190,7 @@ export function computeStats(tasks: Task[], now: Date): TaskStats {
   const byAssignee: AssigneeStat[] = Array.from(openCounts.keys()).map((userId) => ({
     userId,
     open: openCounts.get(userId) ?? 0,
-    overdue: tasks.filter((t) => t.owner_id === userId && isOverdue(t, now)).length,
+    overdue: tasks.filter((t) => isAssignedTo(t, userId) && isOverdue(t, now)).length,
   })).sort((a, b) => b.open - a.open);
 
   const WEEK = 7 * DAY;
@@ -158,16 +224,22 @@ export interface TaskFilter {
 
 export const ALL_FILTER: TaskFilter = { memberId: 'all', departmentId: 'all', tag: 'all', category: 'all' };
 
-// people: list used to resolve an owner's department for the department filter.
+// people: list used to resolve an assignee's department for the department filter.
+//
+// Both the member and the department arms are ANY-ASSIGNEE tests, not equality
+// on one person: a task shared by Sales and Field shows under BOTH department
+// filters, and under either member's filter. Anything narrower would hide a
+// task from someone who is genuinely on it.
 export function applyTaskFilter(tasks: Task[], filter: TaskFilter, people: TaskPerson[], now: Date = new Date()): Task[] {
-  const deptOf = (ownerId: string) => people.find((p) => p.id === ownerId)?.department ?? null;
-  const openCounts = filter.atRisk ? ownerOpenCounts(tasks) : null;
+  const deptOf = (userId: string) => people.find((p) => p.id === userId)?.department ?? null;
+  const openCounts = filter.atRisk ? assigneeOpenCounts(tasks) : null;
   const base = tasks.filter((t) => {
-    if (filter.memberId !== 'all' && t.owner_id !== filter.memberId) return false;
-    if (filter.departmentId !== 'all' && deptOf(t.owner_id) !== filter.departmentId) return false;
+    if (filter.memberId !== 'all' && !isAssignedTo(t, filter.memberId)) return false;
+    if (filter.departmentId !== 'all'
+      && !t.assignee_ids.some((id) => deptOf(id) === filter.departmentId)) return false;
     if (filter.tag !== 'all' && !t.tags.includes(filter.tag)) return false;
     if (filter.overdue && !isOverdue(t, now)) return false;
-    if (filter.atRisk && !assessRisk(t, { now, ownerOpenCount: openCounts!.get(t.owner_id) ?? 0 }).atRisk) return false;
+    if (filter.atRisk && !assessRisk(t, { now, assigneeOpenCount: assigneeOpenCountFor(t, openCounts!) }).atRisk) return false;
     if (filter.dueFrom || filter.dueTo) {
       if (!t.due_at) return false;
       const d = t.due_at.slice(0, 10);
@@ -184,24 +256,24 @@ export function applyTaskFilter(tasks: Task[], filter: TaskFilter, people: TaskP
 
   const category = filter.category ?? 'all';
   if (category === 'all') return base;
-  if (category === 'open') return base.filter((t) => t.status !== 'DONE');
+  if (category === 'open') return base.filter((t) => !isTerminalTaskStatus(t.status));
   if (category === 'blocked') return base.filter((t) => t.status === 'BLOCKED');
   if (category === 'onTime') {
     return base.filter((t) =>
-      t.status === 'DONE' && !!t.completed_at && !!t.due_at &&
+      isCompletedTaskStatus(t.status) && !!t.completed_at && !!t.due_at &&
       new Date(t.completed_at).getTime() <= new Date(t.due_at).getTime());
   }
-  // atRisk — compute owner open-counts over `base` so the drilled list exactly
-  // matches computeStats' At Risk card for the same member/dept/tag scope.
-  const catOpenCounts = ownerOpenCounts(base);
-  return base.filter((t) => assessRisk(t, { now, ownerOpenCount: catOpenCounts.get(t.owner_id) ?? 0 }).atRisk);
+  // atRisk — compute assignee open-counts over `base` so the drilled list
+  // exactly matches computeStats' At Risk card for the same member/dept/tag scope.
+  const catOpenCounts = assigneeOpenCounts(base);
+  return base.filter((t) => assessRisk(t, { now, assigneeOpenCount: assigneeOpenCountFor(t, catOpenCounts) }).atRisk);
 }
 
 // ---------------------------------------------------------------------------
 // History analytics
 // ---------------------------------------------------------------------------
 
-export interface HistorySnapshot { todo: number; inProgress: number; blocked: number; done: number; }
+export interface HistorySnapshot { todo: number; inProgress: number; blocked: number; done: number; cancelled: number; }
 export interface FlowPoint { weekIndex: number; created: number; closed: number; }
 export interface UpcomingBuckets { thisWeek: Task[]; nextWeek: Task[]; later: Task[]; }
 export interface TaskHistory {
@@ -218,7 +290,10 @@ export function computeHistory(tasks: Task[], now: Date): TaskHistory {
     todo:       tasks.filter((t) => t.status === 'TODO').length,
     inProgress: tasks.filter((t) => t.status === 'IN_PROGRESS').length,
     blocked:    tasks.filter((t) => t.status === 'BLOCKED').length,
-    done:       tasks.filter((t) => t.status === 'DONE').length,
+    done:       tasks.filter((t) => isCompletedTaskStatus(t.status)).length,
+    // Its own bucket rather than folded into `done`: the snapshot is a census of where the
+    // work stands, and "finished" and "abandoned" are different answers to that.
+    cancelled:  tasks.filter((t) => t.status === 'CANCELLED').length,
   };
 
   const flow: FlowPoint[] = Array.from({ length: 8 }, (_, i) => ({ weekIndex: i, created: 0, closed: 0 }));
@@ -229,15 +304,18 @@ export function computeHistory(tasks: Task[], now: Date): TaskHistory {
   for (const t of tasks) {
     const ci = bucketIdx(t.created_at);
     if (ci >= 0) flow[ci]!.created += 1;
-    if (t.status === 'DONE' && t.completed_at) {
-      const di = bucketIdx(t.completed_at);
+    // CLOSED, either way: the flow chart weighs work arriving against work leaving the
+    // backlog, and a cancellation removes it from the backlog exactly as a completion does.
+    const closedAt = taskClosedAt(t);
+    if (closedAt) {
+      const di = bucketIdx(closedAt.toISOString());
       if (di >= 0) flow[di]!.closed += 1;
     }
   }
 
   const upcoming: UpcomingBuckets = { thisWeek: [], nextWeek: [], later: [] };
   for (const t of tasks) {
-    if (t.status === 'DONE' || !t.due_at) continue;
+    if (isTerminalTaskStatus(t.status) || !t.due_at) continue;
     const ms = new Date(t.due_at).getTime() - now.getTime();
     if (ms < 0) continue;                 // overdue is not "upcoming"
     if (ms <= WEEK_MS) upcoming.thisWeek.push(t);
@@ -246,4 +324,191 @@ export function computeHistory(tasks: Task[], now: Date): TaskHistory {
   }
 
   return { snapshot, flow, upcoming };
+}
+
+// ---------------------------------------------------------------------------
+// Completion log
+//
+// LOCAL DAY, NOT UTC - deliberate, and the opposite of `isSameUtcDay` above.
+// Do not "align" the two.
+//
+//   due_at       a calendar date somebody typed. Read in UTC so "due on the
+//                12th" stays the 12th no matter who opens the page.
+//   completed_at a real instant, stamped the moment someone closed the task.
+//                An instant has no calendar day of its own - only the reader's
+//                clock gives it one. Bucketing it by its UTC day files a task
+//                closed at 8pm ET on Friday under Saturday, and prints its
+//                time as 12:00 AM, which is simply the wrong story about when
+//                the person did the work.
+//
+// So everything below reads LOCAL calendar parts and formats without a
+// `timeZone` option.
+// ---------------------------------------------------------------------------
+
+export type CompletionRange = '7d' | '30d' | '90d' | 'all';
+export type CompletionScope = 'mine' | 'everyone';
+
+export interface CompletionLogQuery {
+  /** 'mine' keeps only the viewer's own closures. */
+  scope: CompletionScope;
+  viewerId: string;
+  range: CompletionRange;
+  /** Free text over title, task number, assignees, linked entity and tags. */
+  search: string;
+}
+
+export interface CompletionEntry {
+  task: Task;
+  /**
+   * Which way the task ended. The History table paints the two differently and must not have
+   * to re-derive it from `task.status`, which is also what a caller filtering the log reads.
+   */
+  outcome: 'DONE' | 'CANCELLED';
+  /** When it closed - `completed_at` for a completion, `updated_at` for a cancellation. */
+  completedAt: Date;
+  /** How long the task was open. `null` when `created_at` is unparseable. */
+  timeToCloseMs: number | null;
+}
+
+export interface CompletionDayGroup {
+  /** 'YYYY-MM-DD' in the VIEWER'S calendar - the group's identity. */
+  key: string;
+  /** Local midnight of that day, for labelling. */
+  date: Date;
+  entries: CompletionEntry[];
+}
+
+const COMPLETION_RANGE_DAYS: Record<CompletionRange, number | null> = {
+  '7d': 7,
+  '30d': 30,
+  '90d': 90,
+  all: null,
+};
+
+/**
+ * 'YYYY-MM-DD' from a date's LOCAL calendar parts. Mirrors `isoDateLocal` in
+ * `lib/format-date`, restated here so this module keeps importing nothing but
+ * its own types. Never `toISOString()`, which shifts to UTC and can report the
+ * previous day.
+ */
+export function localDayKey(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+function matchesCompletionSearch(task: Task, needle: string): boolean {
+  if (!needle) return true;
+  return task.title.toLowerCase().includes(needle)
+    || task.task_number.toLowerCase().includes(needle)
+    || matchesAssignee(task, needle)
+    || (task.linked_entity?.label ?? '').toLowerCase().includes(needle)
+    || task.tags.some((t) => t.toLowerCase().includes(needle));
+}
+
+/**
+ * The closed-task log, newest first.
+ *
+ * `tasks` is whatever the hub's Member/Department/Tag filter already narrowed
+ * to, so this only layers the log's own dimensions on top: closed (see
+ * `taskClosedAt`), the viewer's own work unless the scope is widened, inside
+ * the range, matching the search.
+ *
+ * BOTH terminal statuses land here (issue 03). A cancelled task is closed work
+ * and History is the only surface that shows it, so excluding it would make it
+ * unreachable; `outcome` is what keeps it from reading as a completion.
+ */
+export function selectCompletionLog(
+  tasks: Task[],
+  query: CompletionLogQuery,
+  now: Date,
+): CompletionEntry[] {
+  const days = COMPLETION_RANGE_DAYS[query.range];
+  const cutoff = days === null ? null : now.getTime() - days * DAY;
+  const needle = query.search.trim().toLowerCase();
+
+  const entries: CompletionEntry[] = [];
+  for (const task of tasks) {
+    const completedAt = taskClosedAt(task);
+    if (!completedAt) continue;
+    if (query.scope === 'mine' && !isAssignedTo(task, query.viewerId)) continue;
+
+    const closedMs = completedAt.getTime();
+    if (cutoff !== null && closedMs < cutoff) continue;
+    if (!matchesCompletionSearch(task, needle)) continue;
+
+    const createdMs = new Date(task.created_at).getTime();
+    entries.push({
+      task,
+      outcome: isCompletedTaskStatus(task.status) ? 'DONE' : 'CANCELLED',
+      completedAt,
+      // Clamped at 0: a row whose completed_at precedes its created_at is bad
+      // data, and "closed in -3d" is worse than "closed in <1m".
+      timeToCloseMs: Number.isNaN(createdMs) ? null : Math.max(0, closedMs - createdMs),
+    });
+  }
+
+  return entries.sort((a, b) => b.completedAt.getTime() - a.completedAt.getTime());
+}
+
+/**
+ * Buckets an already-sorted log into local days, preserving the input order
+ * both between groups and inside them.
+ */
+export function groupCompletionsByLocalDay(entries: CompletionEntry[]): CompletionDayGroup[] {
+  const groups: CompletionDayGroup[] = [];
+  const byKey = new Map<string, CompletionDayGroup>();
+
+  for (const entry of entries) {
+    const key = localDayKey(entry.completedAt);
+    let group = byKey.get(key);
+    if (!group) {
+      const d = entry.completedAt;
+      group = { key, date: new Date(d.getFullYear(), d.getMonth(), d.getDate()), entries: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.entries.push(entry);
+  }
+
+  return groups;
+}
+
+/** 'Today' / 'Yesterday' / 'Fri, Jun 5' - relative to the viewer's local day. */
+export function formatCompletionDayLabel(day: Date, now: Date): string {
+  const key = localDayKey(day);
+  if (key === localDayKey(now)) return 'Today';
+
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (key === localDayKey(yesterday)) return 'Yesterday';
+
+  // No `timeZone` option anywhere below: the viewer's zone is the whole point.
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    ...(day.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  }).format(day);
+}
+
+/** Wall-clock time of the close, in the viewer's zone. */
+export function formatCompletionTime(at: Date): string {
+  return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(at);
+}
+
+/** Compact "how long it stayed open": '<1m' / '45m' / '6h' / '3d' / '2w'. */
+export function formatTimeToClose(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
+
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 1) return '<1m';
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+
+  const days = Math.round(hours / 24);
+  if (days < 14) return `${days}d`;
+
+  return `${Math.round(days / 7)}w`;
 }

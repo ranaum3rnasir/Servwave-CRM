@@ -12,6 +12,7 @@ import {
   type SignatureValue,
 } from "@/lib/inventory/signatures";
 import { useAuthStore } from "@/stores/auth.store";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 type Props = {
   /**
@@ -97,6 +98,7 @@ export function SignatureField({
   // parent dialog does not pass an explicit `currentUser`, derive it from the
   // auth store so signatures + the "You" audit chip stay attributable.
   const authUser = useAuthStore((s) => s.user);
+  const tz = useScheduleTimezone();
   const currentUser = useMemo<{ id: string; name: string } | undefined>(() => {
     if (currentUserProp) return currentUserProp;
     if (!authUser) return undefined;
@@ -177,7 +179,7 @@ export function SignatureField({
         {/* The script-rendered signature */}
         <div
           className="sig-script mt-1 select-none text-2xl leading-tight text-primary"
-          title={`Signed ${fmtSignedAt(value.signedAt)}`}
+          title={`Signed ${fmtSignedAt(value.signedAt, tz)}`}
         >
           {value.fullName}
         </div>
@@ -189,7 +191,7 @@ export function SignatureField({
             {effectiveSignerLabel || value.fullName}
           </span>
           <span aria-hidden>·</span>
-          <span>{fmtSignedAt(value.signedAt)}</span>
+          <span>{fmtSignedAt(value.signedAt, tz)}</span>
           {value.method === "auto_applied" && (
             <span
               className="inline-flex items-center gap-0.5 rounded bg-primary-subtle px-1 py-px text-[9px] font-medium text-primary"
@@ -340,7 +342,7 @@ export function SignatureField({
             </Button>
           </div>
           <div className="mt-1 flex items-center justify-between text-[10px] text-primary/80">
-            <span>Adopted {fmtSignedAt(saved!.adoptedAt)}</span>
+            <span>Adopted {fmtSignedAt(saved!.adoptedAt, tz)}</span>
             <div className="flex items-center gap-2">
               {/* link/brand's idle text-primary is close to the raw's
                   inherited text-primary/80 (this row's ambient colour);
@@ -465,11 +467,12 @@ export function SignatureField({
  * a doc has been countersigned without re-rendering the full SignatureField.
  */
 export function SignedBadge({ value }: { value: SignatureValue }) {
+  const tz = useScheduleTimezone();
   return useMemo(
     () => (
       <span
         className="inline-flex items-center gap-1 rounded-full border border-success/20 bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success"
-        title={`Signed by ${value.fullName} · ${fmtSignedAt(value.signedAt)}`}
+        title={`Signed by ${value.fullName} · ${fmtSignedAt(value.signedAt, tz)}`}
       >
         <CheckCircle2 className="h-2.5 w-2.5" />
         Signed

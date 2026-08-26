@@ -59,7 +59,6 @@ beforeEach(() => {
     email_sending_enabled: true,
     name: 'Acme Plumbing',
   });
-  (prisma.organizationDomain.findUnique as Mock).mockResolvedValue(null);
   resendSend.mockResolvedValue({ data: { id: 're_1' }, error: null });
 });
 

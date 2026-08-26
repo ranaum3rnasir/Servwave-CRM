@@ -3,7 +3,7 @@
 // through the hook (useCtmSoftphone-incoming.test.ts); nothing consumed it
 // yet — the ONLY answer() in the app was Softphone.tsx's local simulation
 // (setState("active"), reachable only via the `incomingNumber` prop the main
-// app's "Simulate incoming call" demo drives — PhoneShell never passes that
+// app's "Simulate incoming call" demo drives - the phone tab never passes that
 // prop, so /phone never routed through it in the first place). This proves
 // the /phone tab now renders IncomingCallCard.tsx off a REAL 'incoming'
 // event, resolves caller identity the same way Softphone's own screen-pop
@@ -35,19 +35,19 @@ const CALLER: Customer = {
       id: "contact-1",
       name: "Jamie Rivera",
       role: "Ops manager",
-      channels: [{ id: "ch-1", kind: "phone", value: "+15555550212" }],
+      channels: [{ id: "ch-1", kind: "phone", value: "+15555550199" }],
     },
   ],
 };
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   fmtPhone: (n: string) => n,
   usePhoneCustomers: () => ({ data: [CALLER] }),
   usePlaceCall: () => placeCall,
   useStashCallAttribution: () => stashAttribution,
   useCallOutcome: () => ({ data: null }),
-  // PhoneShell now hosts the full DialerWorkspace — these are pulled in too.
+  // PhoneTabPage hosts the full DialerWorkspace - these are pulled in too.
   useCalls: () => ({ data: [] }),
   useDialerSearch: () => ({ data: undefined, isFetching: false }),
   matchByNumber: (customers: Customer[], e164: string) => {
@@ -96,7 +96,7 @@ vi.mock("@/lib/api/phoneNumbers", async () => {
   };
 });
 
-import { PhoneShell } from "../PhoneShell";
+import PhoneTabPage from "@/pages/v2/communication/PhoneTabPage";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -121,7 +121,7 @@ beforeEach(() => {
   };
 });
 
-function ring(info: Record<string, unknown> = { from: "+15555550212", call_id: "abc123" }) {
+function ring(info: Record<string, unknown> = { from: "+15555550199", call_id: "abc123" }) {
   expect(incomingCb).not.toBeNull();
   // The mocked onIncoming callback fires a React state update outside of an
   // event handler / userEvent's own act-wrapping — wrap it explicitly so the
@@ -139,18 +139,18 @@ function ring(info: Record<string, unknown> = { from: "+15555550212", call_id: "
 // components/communication/phone/__tests__/softphone-outbound-only.test.tsx.
 describe.runIf(BROWSER_INBOUND_ANSWER_ENABLED)("/phone incoming-call UI (Task C2)", () => {
   it("subscribes to the hook's REAL onIncoming on mount", () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     expect(softphone.current!.onIncoming).toHaveBeenCalled();
   });
 
   it("renders no incoming-call card until a real 'incoming' event fires", () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     expect(screen.queryByText("Incoming call")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /answer/i })).not.toBeInTheDocument();
   });
 
   it("renders resolved caller identity on a real incoming ring", () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     ring();
 
     expect(screen.getByText("Incoming call")).toBeInTheDocument();
@@ -159,14 +159,14 @@ describe.runIf(BROWSER_INBOUND_ANSWER_ENABLED)("/phone incoming-call UI (Task C2
   });
 
   it("shows 'Unknown caller' for an unmatched number", () => {
-    renderWithProviders(<PhoneShell />);
-    ring({ from: "+15555550219" });
+    renderWithProviders(<PhoneTabPage />);
+    ring({ from: "+19294039424" });
 
     expect(screen.getByText("Unknown caller")).toBeInTheDocument();
   });
 
   it("Answer calls the hook's REAL device answer() (not a local simulation) and shows in-call controls", async () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     ring();
 
     await userEvent.click(screen.getByRole("button", { name: /answer/i }));
@@ -179,7 +179,7 @@ describe.runIf(BROWSER_INBOUND_ANSWER_ENABLED)("/phone incoming-call UI (Task C2
   });
 
   it("Decline calls the hook's REAL hangup() and dismisses the card", async () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     ring();
 
     await userEvent.click(screen.getByRole("button", { name: /decline/i }));
@@ -189,7 +189,7 @@ describe.runIf(BROWSER_INBOUND_ANSWER_ENABLED)("/phone incoming-call UI (Task C2
   });
 
   it("hanging up mid-call also calls the REAL hangup() and dismisses the card", async () => {
-    renderWithProviders(<PhoneShell />);
+    renderWithProviders(<PhoneTabPage />);
     ring();
     await userEvent.click(screen.getByRole("button", { name: /answer/i }));
 

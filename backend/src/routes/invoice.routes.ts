@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/authenticate';
 import { attachAbility } from '../middleware/attachAbility';
 import { canDo } from '../middleware/canGuard';
 import { validate } from '../middleware/validate';
+import { requireUuidParam } from '../middleware/requireUuidParam';
 import { featureDisabled } from '../middleware/featureDisabled';
 import { publicReadLimiter, publicActionLimiter, expensiveLimiter } from '../middleware/rate-limit';
 import { unscopedRequest } from '../middleware/unscopedRequest';
@@ -35,6 +36,13 @@ router.get('/:id', canDo('read', 'Invoice'), invoiceController.getById);
 router.get('/:id/pdf', expensiveLimiter, canDo('read', 'Invoice'), invoiceController.getPdf);
 router.patch('/:id', canDo('update', 'Invoice'), validate(invoiceController.editInvoiceSchema), invoiceController.update);
 router.delete('/:id', canDo('delete', 'Invoice'), invoiceController.remove);
+
+// Editable record ids (Workiz dual-run, SERV10X record-renumber). Preview is read-only/advisory
+// (no lock); PATCH is the real rename, transactional. Both gated by the dedicated `renumber`
+// grant (distinct from `update`) - canAccessRow inside the controller does the per-instance
+// ownership check.
+router.post('/:id/number/preview', canDo('renumber', 'Invoice'), validate(invoiceController.invoiceNumberSchema), invoiceController.previewNumber);
+router.patch('/:id/number', canDo('renumber', 'Invoice'), validate(invoiceController.invoiceNumberSchema), invoiceController.renameNumber);
 
 // Actions
 router.post('/:id/send', canDo('send', 'Invoice'), validate(invoiceController.sendInvoiceSchema), invoiceController.send);
@@ -83,7 +91,13 @@ router.get('/:id/notes', canDo('read', 'Invoice'), invoiceController.getNotes);
 router.post('/:id/notes', canDo('update', 'Invoice'), validate(invoiceController.addNoteSchema), invoiceController.addNote);
 
 // Tags (polymorphic)
-router.post('/:id/tags', canDo('update', 'Invoice'), validate(tagController.addTagToEntitySchema), tagController.addTagToInvoice);
-router.delete('/:id/tags/:tagId', canDo('update', 'Invoice'), tagController.removeTagFromInvoice);
+// Tag routes take BOTH ids straight from the path into `where` clauses over Postgres
+// `uuid` columns, so without these guards a stray segment makes the driver throw P2023
+// and the controller's catch reports a 500 for what is only a bad URL. They sit AFTER
+// canDo so a caller without the grant still gets 403 rather than learning whether the
+// id was well-formed, and they return the SAME 404 text the handler gives for a row
+// that genuinely is not there.
+router.post('/:id/tags', canDo('update', 'Invoice'), requireUuidParam('id', 'invoice not found'), validate(tagController.addTagToEntitySchema), tagController.addTagToInvoice);
+router.delete('/:id/tags/:tagId', canDo('update', 'Invoice'), requireUuidParam('id', 'invoice not found'), requireUuidParam('tagId', 'Tag not attached to this invoice'), tagController.removeTagFromInvoice);
 
 export default router;

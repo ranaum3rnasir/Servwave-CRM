@@ -18,10 +18,10 @@ import { ChartCard, WaveAreaChart } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { token } from '@/design-system';
 import { formatCurrencyWhole } from '@/lib/utils';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
-import { useRevenueReport } from './revenue-data';
+import { useRevenueReport } from '@/lib/reports/revenue-data';
 
 const money0 = (n: number) => formatCurrencyWhole(n);
 const pct = (n: number) => `${Math.round(n)}%`;

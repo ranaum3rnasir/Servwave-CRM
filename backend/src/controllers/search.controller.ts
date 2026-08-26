@@ -6,7 +6,7 @@ import { scopeWhereForReq } from '../lib/permissions/enforce';
 import { addOrFilter } from '../lib/permissions/whereCompose';
 import { phoneSearchClauses, phoneRelationSearchClauses } from '../lib/phone-search';
 import type { Subject } from '../lib/permissions/catalog';
-import { walkthroughSnapshotSelect, resolveCurrentWalkthrough, type WalkthroughSnapshotRow } from '../services/walkthrough.service';
+import { walkthroughSnapshotSelect, resolveCurrentWalkthrough, LIVE_VISIT_STATUSES, type WalkthroughSnapshotRow } from '../services/walkthrough.service';
 import { hasFeature } from '../middleware/requireFeature';
 import { derivePlanFields, type VisitLike } from '../lib/servicePlans/derive';
 
@@ -58,10 +58,18 @@ function mergeById<T extends { id: string }>(arrays: T[][], limit: number): T[] 
   return merged;
 }
 
-/** Run a query safely — returns [] on error instead of throwing. */
+/**
+ * Run a query safely — returns [] on error instead of throwing. Also coerces a resolved
+ * `undefined`/`null` to `[]` (Slice 09): an un-mocked `vi.fn()` in a test resolves `undefined`
+ * rather than throwing or rejecting, so a bare `prisma.<model>.findMany` call passed straight to
+ * this wrapper (no intermediate `.map`/`.filter` to force a throw, unlike e.g. `findSchedulePlans`)
+ * would otherwise hand `undefined` to `mergeById`, which throws iterating a non-array — a
+ * production-impossible shape (Prisma always resolves an array or rejects) that should never
+ * escape this boundary regardless of why it occurred.
+ */
 async function safeQuery<T>(fn: () => Promise<T[]>): Promise<T[]> {
   try {
-    return await fn();
+    return (await fn()) ?? [];
   } catch (err) {
     logger.warn('Search sub-query failed:', err);
     return [];
@@ -70,11 +78,20 @@ async function safeQuery<T>(fn: () => Promise<T[]>): Promise<T[]> {
 
 // ─── Shared select shapes ───────────────────────────────
 
+// S8 repoint (D14), FINISHED: `first_visit_start` (S8 §4, #1698 - MIN(scheduled_at) over
+// non-cancelled visits, stored and maintained) replaces `scheduled_start` here, in `jobOrderBy`
+// below, and in the `date:` projection near the bottom of this file - the three TODOs #1705 left
+// pointing at this comment. A REAL, ORDERABLE scalar, unlike the A5 "next upcoming live visit"
+// projection used on the job detail/list payloads: this is a sort/filter need (Prisma cannot
+// ORDER BY a to-many relation's aggregate), not a "current window" need - same distinction A1 drew
+// for JOB_SORT_FIELDS. The FILTER (`inRangeWhere` below) was already repointed to the visit set in
+// the same PR that left these TODOs, which is the part that actually loses rows (the
+// D16-collapse/7,492-row bug); this is the remaining display/order half.
 const JOB_SELECT = {
   id: true,
   job_number: true,
   status: true,
-  scheduled_start: true,
+  first_visit_start: true,
   customer: { select: { first_name: true, last_name: true, company_name: true, phone: true } },
   service_location: { select: { address_line1: true, city: true, state: true } },
 } as const;
@@ -101,7 +118,7 @@ const LEAD_SELECT = {
   // from this relation via resolveCurrentWalkthrough (D15's "current visit"), so a lead
   // whose walkthrough already COMPLETED (dual-write never clears walkthrough_scheduled_at
   // on completion) correctly stops showing up as "upcoming" in schedule-scope search.
-  walkthroughs: { select: walkthroughSnapshotSelect },
+  visits: { select: walkthroughSnapshotSelect },
   service_address_line1: true,
   service_city: true,
   service_state: true,
@@ -109,13 +126,26 @@ const LEAD_SELECT = {
 } as const;
 
 /**
- * The walkthrough states the schedule board actually renders: SCHEDULED ones sit on the
- * calendar, REQUESTED ones sit in the sidebar's Walkthroughs bucket (that bucket is fed by
- * `walkthrough_status=needs_scheduling`, which lead.filters.ts expands to REQUESTED). Search
- * used to admit SCHEDULED only, so every card in the sidebar bucket was unfindable by the
- * board's own search - the reported bug.
+ * The visit states the schedule board actually renders: every LIVE one - the calendar shows a
+ * booked trip, and the sidebar's Walkthroughs bucket shows leads with none. Search used to admit
+ * SCHEDULED only, so every card in the sidebar bucket was unfindable by the board's own search -
+ * the reported bug.
+ *
+ * Until multi-visit S4 this named REQUESTED, a VisitStatus the S1 migration retired. It typechecks
+ * because leadBaseWhere is a Record<string, unknown>, and safeQuery swallows the Prisma validation
+ * error into an empty array - so against a real database schedule-scope lead search returned
+ * NOTHING while every mocked test stayed green. Sourced from the shared constant now, so it cannot
+ * drift out of the enum again.
  */
-const BOARD_WALKTHROUGH_STATUSES = { in: ['REQUESTED', 'SCHEDULED'] } as const;
+const BOARD_WALKTHROUGH_STATUSES = { in: [...LIVE_VISIT_STATUSES] } as const;
+
+/**
+ * Narrow a lead `where` to leads with a live visit, WITHOUT touching whatever `visits` predicate
+ * the caller's row-scope already put there. See the call sites for why assignment is a leak.
+ */
+function addBoardVisitFilter(where: Record<string, unknown>): void {
+  addAndWords(where, [{ visits: { some: { status: BOARD_WALKTHROUGH_STATUSES } } }]);
+}
 
 /**
  * Prisma cannot ORDER BY a to-many relation's scalar field (`walkthroughs` is 1:N on Lead), so
@@ -126,11 +156,11 @@ const BOARD_WALKTHROUGH_STATUSES = { in: ['REQUESTED', 'SCHEDULED'] } as const;
  */
 const SCHEDULE_OVERFETCH = 25;
 
-type ScheduleLeadRow = { id: string; walkthroughs?: WalkthroughSnapshotRow[] } & Record<string, unknown>;
+type ScheduleLeadRow = { id: string; visits?: WalkthroughSnapshotRow[] } & Record<string, unknown>;
 
-/** The current visit's scheduled_at, or null for a REQUESTED (not-yet-scheduled) walkthrough. */
+/** The current visit's scheduled_at, or null when the lead holds no visit at all. */
 function currentVisitAt(l: ScheduleLeadRow): Date | null {
-  return resolveCurrentWalkthrough(l.walkthroughs ?? [])?.scheduled_at ?? null;
+  return resolveCurrentWalkthrough(l.visits ?? [])?.scheduled_at ?? null;
 }
 
 /**
@@ -207,6 +237,17 @@ const ESTIMATE_SELECT = {
   customer: { select: { first_name: true, last_name: true, company_name: true, phone: true } },
 } as const;
 
+/**
+ * The scheduler's fourth schedulable type (scheduleModel.ts EventType 'calendar-entry',
+ * user-facing "Event"). Spec §3: entries carry no record number, so `title` is the row's only
+ * search handle — no number, description or address field is ever matched.
+ */
+const CALENDAR_ENTRY_SEARCH_SELECT = {
+  id: true,
+  title: true,
+  start: true,
+} as const;
+
 const INVOICE_SELECT = {
   id: true,
   invoice_number: true,
@@ -226,7 +267,7 @@ const INVOICE_SELECT = {
 export async function search(req: Request, res: Response) {
   try {
     const q = (req.query.q as string || '').trim();
-    const empty = { results: { jobs: [], customers: [], leads: [], estimates: [], invoices: [], servicePlans: [] } };
+    const empty = { results: { jobs: [], customers: [], leads: [], estimates: [], invoices: [], servicePlans: [], calendarEntries: [] } };
 
     if (q.length < 2) {
       res.json(empty);
@@ -266,23 +307,42 @@ export async function search(req: Request, res: Response) {
       { customer: { OR: nameFieldsOr(q) } },
       { service_location: { OR: addressOr } },
     ]);
-    // Spec B1 (Task 5): this used to admit only UNASSIGNED/SCHEDULED/IN_PROGRESS, so a job
+    // Spec B1 (Task 5): this used to admit only UNSCHEDULED/SCHEDULED/IN_PROGRESS, so a job
     // visibly on the schedule board (EN_ROUTE/ON_SITE/COMPLETED/CANCELLED all render there) was
     // unfindable by the board's own search. All seven statuses is every value JobStatus has --
     // a filter that admits everything is noise, so the status filter is removed rather than
     // widened. isScheduleScope still matters for jobOrderBy below.
 
-    const jobOrderBy = isScheduleScope ? { scheduled_start: 'asc' as const } : { created_at: 'desc' as const };
+    // S8 repoint (D14), FINISHED — see the JOB_SELECT comment above.
+    const jobOrderBy = isScheduleScope ? { first_visit_start: 'asc' as const } : { created_at: 'desc' as const };
     const jobQueries: ReturnType<typeof safeQuery>[] = [];
 
     // Tier 1 — in-range jobs (priority slots)
     if (hasDateRange) {
-      const inRangeWhere: Record<string, unknown> = {
-        ...jobBaseWhere,
-        scheduled_start: { gte: rangeStartDate!, lte: rangeEndDate! },
-      };
+      const inRangeWhere: Record<string, unknown> = { ...jobBaseWhere };
+      // S8 repoint (D14): backward-looking — the visit SET, not the (to-be-dropped)
+      // `scheduled_start` mirror (the 7,492-row bug this whole slice exists to fix: a COMPLETED
+      // job's mirror NULLs once its last live visit leaves the live set (D16), so this range
+      // filter has been silently dropping completed work from schedule-scope search results).
+      // Composed under AND via `addAndWords` (never assigned onto `where.visits`): jobBaseWhere
+      // already carries jobScope's row-scope OR (TECHNICIAN's OWN_JOB is
+      // `visits.some.assignees.some.user_id: <self>`) plus the search-term OR from `addOrFilter`
+      // above, and a bare `inRangeWhere.visits = ...` here would silently overwrite either — an
+      // RBAC bypass for the scope case. Both OR arms of the reference pattern are reachable here
+      // (unlike the dashboard's status-narrowed tiles): this file admits every JobStatus (the
+      // status filter was deliberately removed, see the comment above), so a CANCELLED job with a
+      // cancelled trip in range must still surface (D19 keeps the rows).
+      addAndWords(inRangeWhere, [
+        {
+          OR: [
+            { visits: { some: { scheduled_at: { gte: rangeStartDate!, lte: rangeEndDate! }, status: { not: 'CANCELLED' } } } },
+            { status: 'CANCELLED' as const, visits: { some: { scheduled_at: { gte: rangeStartDate!, lte: rangeEndDate! } } } },
+          ],
+        },
+      ]);
       jobQueries.push(
-        safeQuery(() => prisma.job.findMany({ where: inRangeWhere, take: LIMIT, orderBy: { scheduled_start: 'asc' }, select: JOB_SELECT })),
+        // S8 repoint (D14), FINISHED — see the JOB_SELECT comment above.
+        safeQuery(() => prisma.job.findMany({ where: inRangeWhere, take: LIMIT, orderBy: { first_visit_start: 'asc' }, select: JOB_SELECT })),
       );
     }
 
@@ -362,7 +422,12 @@ export async function search(req: Request, res: Response) {
     // walkthrough_scheduled_at column onto the Walkthrough relation's own status - "is on
     // the board" is a walkthroughs-relation state, not "the legacy column happens to be
     // non-null" (which dual-write never clears on completion).
-    if (isScheduleScope) leadBaseWhere.walkthroughs = { some: { status: BOARD_WALKTHROUGH_STATUSES } };
+    //
+    // AND-COMPOSED, never assigned. TECHNICIAN's `read Lead` scope is OWN_WALKTHROUGH, whose only
+    // top-level key is `visits` - the same key this filter wants - so `where.visits = ...` deletes
+    // the row-scope instead of narrowing it and the handler answers with every crew's leads in the
+    // org. Every other entity in this handler composes clobber-safely for exactly this reason.
+    if (isScheduleScope) addBoardVisitFilter(leadBaseWhere);
 
     const leadOrderBy = { created_at: 'desc' as const };
     const leadQueries: ReturnType<typeof safeQuery>[] = [];
@@ -370,10 +435,12 @@ export async function search(req: Request, res: Response) {
     if (!skipLeads) {
       // Tier 1 — in-range walkthroughs (priority slots)
       if (hasDateRange) {
-        const inRangeWhere: Record<string, unknown> = {
-          ...leadBaseWhere,
-          walkthroughs: { some: { status: 'SCHEDULED', scheduled_at: { gte: rangeStartDate!, lte: rangeEndDate! } } },
-        };
+        const inRangeWhere: Record<string, unknown> = { ...leadBaseWhere };
+        // Composed for the same reason, and it matters twice over here: this clause narrows the
+        // board filter AND sits on top of the caller's scope.
+        addAndWords(inRangeWhere, [
+          { visits: { some: { status: 'SCHEDULED', scheduled_at: { gte: rangeStartDate!, lte: rangeEndDate! } } } },
+        ]);
         leadQueries.push(safeQuery(() => findScheduleLeads(inRangeWhere, LIMIT)));
       }
 
@@ -387,7 +454,7 @@ export async function search(req: Request, res: Response) {
       if (isMultiWord) {
         const splitWhere: Record<string, unknown> = { ...orgWhere, ...leadScope };
         addAndWords(splitWhere, words.map((w) => ({ customer: { OR: nameFieldsOr(w) } })));
-        if (isScheduleScope) splitWhere.walkthroughs = { some: { status: BOARD_WALKTHROUGH_STATUSES } };
+        if (isScheduleScope) addBoardVisitFilter(splitWhere);
         leadQueries.push(
           isScheduleScope
             ? safeQuery(() => findScheduleLeads(splitWhere, LIMIT))
@@ -473,8 +540,34 @@ export async function search(req: Request, res: Response) {
     ]);
     const planQueries = skipServicePlans ? [] : [safeQuery(() => findSchedulePlans(planBaseWhere, LIMIT))];
 
+    // ─── Calendar Entries (Slice 09) ─────────────────────
+    // Schedule-scope ONLY — Events are a scheduler concept (slice-09's "out of scope" list
+    // explicitly excludes the global header search). Gated the same way ServicePlan is above,
+    // via `req.ability!.can('read', 'CalendarEntry')`, rather than `scopeWhereForReq`: CalendarEntry
+    // visibility is ORG-WIDE by construction (spec §4 — "no private flag"; the default grant,
+    // ADMIN + DISPATCHER, carries no condition), so there is no row-scope to express, and adding
+    // 'CalendarEntry' to the `ScopeResource` union would force an update to every EXHAUSTIVE
+    // Record<ScopeResource, …> keyed on it elsewhere (e.g. notifications/filterByAccess.ts's
+    // delegateMap) for a resource with nothing conditional to add. Still fail-closed: no `read
+    // CalendarEntry` grant → ability.can() is false → the bucket is skipped → `[]`, and the table
+    // is never queried for that caller — never a leak.
+    const skipCalendarEntries = !isScheduleScope || !req.ability!.can('read', 'CalendarEntry' as Subject);
+    const entryBaseWhere: Record<string, unknown> = { ...orgWhere, title: contains(q) };
+    if (hasDateRange) {
+      // Same overlap test calendar-entry.controller.ts's `list` uses: an entry is in-window
+      // when `start <= rangeEnd AND end >= rangeStart`, so a multi-day entry surfaces in every
+      // window it spans, not only the one containing its own start.
+      addAndWords(entryBaseWhere, [
+        { start: { lte: rangeEndDate! } },
+        { end: { gte: rangeStartDate! } },
+      ]);
+    }
+    const entryQueries = skipCalendarEntries
+      ? []
+      : [safeQuery(() => prisma.calendarEntry.findMany({ where: entryBaseWhere, take: LIMIT, orderBy: { start: 'asc' }, select: CALENDAR_ENTRY_SEARCH_SELECT }))];
+
     // ─── Run all queries in parallel ────────────────────
-    const allQueries = [...jobQueries, ...customerQueries, ...leadQueries, ...estQueries, ...invQueries, ...planQueries];
+    const allQueries = [...jobQueries, ...customerQueries, ...leadQueries, ...estQueries, ...invQueries, ...planQueries, ...entryQueries];
     const allResults = await Promise.all(allQueries);
 
     // Split results back into entity groups
@@ -485,6 +578,7 @@ export async function search(req: Request, res: Response) {
     const estResults = allResults.slice(idx, idx += estQueries.length);
     const invResults = allResults.slice(idx, idx += invQueries.length);
     const planResults = allResults.slice(idx, idx += planQueries.length);
+    const entryResults = allResults.slice(idx, idx += entryQueries.length);
 
     // Merge and deduplicate
     const jobs = mergeById(jobResults as { id: string }[][], LIMIT);
@@ -493,6 +587,7 @@ export async function search(req: Request, res: Response) {
     const estimates = mergeById(estResults as { id: string }[][], LIMIT);
     const invoices = mergeById(invResults as { id: string }[][], LIMIT);
     const servicePlans = mergeById(planResults as { id: string }[][], LIMIT);
+    const calendarEntries = mergeById(entryResults as { id: string }[][], LIMIT);
 
     // ─── Transform (null-safe) ─────────────────────────
     const results = {
@@ -505,7 +600,8 @@ export async function search(req: Request, res: Response) {
           entity_type: 'job' as const,
           title: j.job_number,
           subtitle: name,
-          date: j.scheduled_start?.toISOString() ?? null,
+          // S8 repoint (D14), FINISHED — see the JOB_SELECT comment above.
+          date: j.first_visit_start?.toISOString() ?? null,
           address: loc ? `${loc.address_line1}, ${loc.city}, ${loc.state}` : null,
           phone: cust?.phone ?? null,
           status: j.status,
@@ -593,6 +689,17 @@ export async function search(req: Request, res: Response) {
           status: p.status,
         };
       }),
+      calendarEntries: (calendarEntries as typeof allResults[0]).map((e: any) => ({
+        id: e.id,
+        entity_type: 'calendar-entry' as const,
+        // Spec §3 — entries carry no record number, so the row is titled by its own title,
+        // unlike every other bucket above (which titles off a J-/L-/SP-number).
+        title: e.title,
+        // A true instant (search-shared.tsx's formatInstant reads it in the ORG's zone, not
+        // the viewer's, exactly like every other bucket's `date`) — never a status, total or
+        // address; an Event has none of those (spec §3).
+        date: e.start?.toISOString() ?? null,
+      })),
     };
 
     res.json({ results });

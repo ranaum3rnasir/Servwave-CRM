@@ -3,9 +3,11 @@ import type { PrismaClient } from '@prisma/client';
 import { matchByPhone, normalizeNAPhone } from '../comms-identity';
 import { findBlockedNumber } from '../communication/blockedNumbers';
 import { findOrCreateSmsThreadByNumber } from './smsThread';
+import { lookupReceivingNumber } from './receivingNumbers';
 import { resolveInboundSmsJob } from '../sms-reply-router';
 import { emit } from '../../services/notifications/notificationService';
 import { logger } from '../logger';
+import { recordLeadOutboundContact } from '../../services/lead-contact.service';
 
 /**
  * Pure-ish ingestion of CTM webhook activities into the Communication module.
@@ -34,6 +36,13 @@ export interface IngestOptions {
    * thread unread increments. The live webhook path never sets it.
    */
   suppressNotifications?: boolean;
+  /**
+   * The org's CTM sub-account id, used ONLY to resolve which phone a forwarded
+   * call rang (see resolveExternalAnswerer). Optional on purpose: every caller
+   * that omits it simply ingests forwarded answers unattributed, exactly as
+   * before, and no caller has to acquire it to keep working.
+   */
+  ctmAccountId?: string;
 }
 
 // CTM sometimes wraps the activity under a `call` key.
@@ -266,6 +275,143 @@ function answeredByOf(
   return { kind: 'none', ctm_agent_id: null, name: null, email: null };
 }
 
+/**
+ * Name whoever picked up a forwarded call.
+ *
+ * An 'external' answer is the common case at a contractor that forwards its
+ * campaign numbers to staff mobiles and to the office, and it used to be a
+ * dead end: the payload carries only `receiving_number_id`, so the row knew
+ * that a human answered and never which one. That id is CTM's numeric
+ * `filter_id`, and the receiving-numbers roster maps it to the E.164 that
+ * actually rang - which is enough to find the ServWave user who owns it.
+ *
+ * `kind` deliberately stays 'external': answering a forwarded call on a mobile
+ * is a different operational event from answering in the app, and the Calls
+ * view labels them differently. What changes is that the answer now carries an
+ * identity.
+ *
+ * The E.164 itself is NOT persisted. `answered_by` is serialised straight to
+ * the API and rendered in the Calls list, so storing it would publish a staff
+ * member's personal mobile to everyone in the org; `user_id` already carries
+ * the identity, and the number was only ever the lookup key.
+ */
+export async function resolveExternalAnswerer(
+  db: Db,
+  orgId: string,
+  answeredBy: Prisma.InputJsonObject,
+  ctmAccountId: string,
+): Promise<{ answeredBy: Prisma.InputJsonObject; agentId: string | null } | null> {
+  const filterId = answeredBy.receiving_number_id;
+  if (typeof filterId !== 'string' || !filterId) return null;
+
+  // Cache-only, and never awaited on the network: this runs inside the
+  // webhook's prisma.$transaction. See lib/ctm/receivingNumbers.ts.
+  const receiving = lookupReceivingNumber(ctmAccountId, filterId);
+  if (!receiving) return null;
+
+  // `users.phone` is free text (bare 10 digits on the live rows, punctuated on
+  // others) while CTM returns E.164, so both sides are normalised rather than
+  // compared as stored. Staff lists are small - see the Roles section of
+  // CLAUDE.md - so this is a handful of rows, not a scan.
+  const staff = await db.user.findMany({
+    where: { organization_id: orgId, phone: { not: null } },
+    select: { id: true, first_name: true, last_name: true, email: true, phone: true },
+  });
+  const answerer = staff.find(
+    (u) => u.phone && normalizeNAPhone(u.phone) === receiving.e164,
+  );
+
+  if (answerer) {
+    const fullName = [answerer.first_name, answerer.last_name].filter(Boolean).join(' ').trim();
+    return {
+      answeredBy: {
+        kind: 'external',
+        receiving_number_id: filterId,
+        user_id: answerer.id,
+        // ServWave is the system of record for staff names; CTM's copy of the
+        // same person is hand-typed there and drifts.
+        name: fullName || receiving.name,
+        email: answerer.email ?? null,
+      },
+      agentId: answerer.id,
+    };
+  }
+
+  // No user owns that number. A named one is still worth surfacing (the office
+  // line is a place, not a person), but agent_id stays null rather than
+  // inventing an owner. An unnamed, unmatched number adds nothing at all.
+  if (receiving.name) {
+    return {
+      answeredBy: { kind: 'external', receiving_number_id: filterId, name: receiving.name },
+      agentId: null,
+    };
+  }
+  return null;
+}
+
+/**
+ * Attribute a forwarded call to the person the dialed number is assigned to.
+ *
+ * `resolveExternalAnswerer` above observes who picked up, by mapping the
+ * payload's `receiving_number_id` to an E.164 and matching it against
+ * `users.phone`. That is the better signal when it fires - and on the live
+ * account it fires for nobody: every user has `phone: null`, the receiving
+ * number is unnamed, and five of the forwarded calls in staging carry no
+ * `receiving_number_id` at all (#1387).
+ *
+ * Assignment answers the same question without any of those dependencies. A
+ * number is bought with a forward destination and assigned to whoever is
+ * responsible for the calls it takes; that person is who answered. The dialed
+ * number is on the payload itself, so this needs no roster, no staff phone
+ * number, and no `receiving_number_id`.
+ *
+ * Resolved HERE, at ingest, and stored on the row - never derived at read time
+ * from the current assignment, or reassigning a number in October would
+ * silently rewrite who answered in September.
+ *
+ * A number with several assignees resolves to nobody: "the assigned user
+ * answered" stops being a fact the moment there are two of them, and naming one
+ * at random is worse than leaving the call unattributed.
+ */
+export async function resolveAssignedAnswerer(
+  db: Db,
+  orgId: string,
+  dialedE164: string,
+): Promise<{ answeredBy: Prisma.InputJsonObject; agentId: string } | null> {
+  const e164 = normalizeNAPhone(dialedE164) ?? dialedE164;
+  if (!e164) return null;
+
+  const number = await db.phoneNumber.findFirst({
+    where: { organization_id: orgId, e164 },
+    select: {
+      user_links: {
+        select: {
+          user_id: true,
+          user: { select: { id: true, first_name: true, last_name: true, email: true } },
+        },
+      },
+    },
+  });
+  if (!number || number.user_links.length !== 1) return null;
+
+  const assignee = number.user_links[0].user;
+  if (!assignee) return null;
+  const fullName = [assignee.first_name, assignee.last_name].filter(Boolean).join(' ').trim();
+
+  return {
+    answeredBy: {
+      kind: 'external',
+      user_id: assignee.id,
+      name: fullName || null,
+      email: assignee.email ?? null,
+      // Distinguishes "we assumed the person responsible for this number" from
+      // the observed case, where CTM told us which destination answered.
+      resolved_from: 'assignment',
+    },
+    agentId: assignee.id,
+  };
+}
+
 // Voicemail disposition (Phase C, Task C4 — resolves plan open item #3).
 // RESEARCHED (Supabase MCP, 2026-07-16): the live ctm_events table holds 15
 // stored `end` events for Alpha Doors (596375) and NOT ONE is a voicemail —
@@ -420,6 +566,13 @@ export async function ingestCall(
   const recUrl = recordingUrlOf(a);
   const durationRaw = Number(a.talk_time ?? a.duration);
   const durationSec = Number.isFinite(durationRaw) ? Math.round(durationRaw) : null;
+  // Two different clocks, and they are NOT interchangeable. `talk_time` is the
+  // conversation and belongs in the Calls list; `duration` is the connected
+  // time CTM actually invoices, and is what the plan allowance meters (see
+  // lib/comm-usage.ts billableSecondsOf). Storing only talk_time under-counted
+  // billed minutes by 13.6% and missed rang-unanswered calls entirely.
+  const connectedRaw = Number(a.duration);
+  const connectedSec = Number.isFinite(connectedRaw) ? Math.round(connectedRaw) : null;
   const transcript = transcriptOf(a);
   const summary = summaryOf(a);
   const turns = transcriptTurnsOf(a);
@@ -443,6 +596,27 @@ export async function ingestCall(
         name: [requester.first_name, requester.last_name].filter(Boolean).join(' ') || null,
         email: requester.email ?? null,
       };
+    }
+  }
+
+  // Who picked up a forwarded call. Runs only for an agent-less external
+  // answer, so a CTM agent payload is never second-guessed.
+  if (answeredBy.kind === 'external' && opts.ctmAccountId) {
+    const resolved = await resolveExternalAnswerer(db, orgId, answeredBy, opts.ctmAccountId);
+    if (resolved) {
+      answeredBy = resolved.answeredBy;
+      if (resolved.agentId) agentId = resolved.agentId;
+    }
+  }
+
+  // Still nobody: fall back to whoever the dialed number is assigned to. This
+  // is the path that actually resolves on the live account, where no user has
+  // a phone number on file for the observation above to match against.
+  if (answeredBy.kind === 'external' && !answeredBy.user_id && toNumber) {
+    const assigned = await resolveAssignedAnswerer(db, orgId, toNumber);
+    if (assigned) {
+      answeredBy = assigned.answeredBy;
+      agentId = assigned.agentId;
     }
   }
 
@@ -473,6 +647,7 @@ export async function ingestCall(
     agent_id: agentId,
     started_at: activityTime(a),
     duration_sec: durationSec,
+    connected_sec: connectedSec,
     // Phone-match resolver WINS; the pending stash fills the nulls.
     customer_id: match?.customerId ?? pending?.customer_id ?? null,
     lead_id: match?.leadId ?? pending?.lead_id ?? null,
@@ -494,6 +669,7 @@ export async function ingestCall(
   if (position !== 'starts') {
     updateData.status = status;
     if (durationSec !== null) updateData.duration_sec = durationSec;
+    if (connectedSec !== null) updateData.connected_sec = connectedSec;
     if (recUrl) updateData.has_recording = true;
     // An agent-answered end always wins; an external-forward answer, a
     // voicemail disposition, or a claimed requested_by fallback upgrades a
@@ -530,6 +706,23 @@ export async function ingestCall(
     where: { ctm_call_id: sid },
     create: createData,
     update: updateData,
+  });
+
+  // Spec #1751 D5: this is where a call PLACED through the product actually lands. Click-to-call
+  // and the softphone answer 202 with no local row (comm-calls.controller.ts) - the row is created
+  // here, off the webhook, with the lead the dialer stashed. Stamping only at the manual call-log
+  // door would therefore miss every call the product itself placed.
+  //
+  // Fires on both `starts` and `end` for one call; first-touch-wins makes the second a no-op, and
+  // taking `started_at` off the row rather than `new Date()` means the late `end` webhook cannot
+  // record a contact time minutes after the phone actually rang.
+  await recordLeadOutboundContact(db, {
+    leadId: row.lead_id,
+    orgId: row.organization_id,
+    channel: 'call',
+    direction: row.direction,
+    automated: false,
+    at: row.started_at,
   });
 
   // Bell notifications (verbs registered by the parity pack; emit() silently
@@ -741,6 +934,25 @@ export async function ingestSms(
       },
       select: { id: true, thread_id: true },
     });
+
+    // Spec #1751 D5: an outbound text ingested from the phone system - one a rep sent from the
+    // vendor console or from their own handset - counts exactly as one composed in the app does.
+    // Only on the CREATE branch: the update branch above is a delivery-status delta on a row whose
+    // send was already accounted for, and the shell-reconcile branch returns early because the
+    // composer door (comm-threads.controller.ts) already stamped that one.
+    //
+    // `automated: false` mirrors what the create above writes literally two statements up, rather
+    // than re-reading the row: this path has no automated sender behind it at all - CTM does not
+    // originate messages on its own - and the two must not be able to drift.
+    await recordLeadOutboundContact(db, {
+      leadId: match?.leadId ?? null,
+      orgId,
+      channel: 'text',
+      direction,
+      automated: false,
+      at: activityTime(a),
+    });
+
     // A blocked sender never marks the thread unread (blockedNumbers.ts).
     if (direction === 'in' && !opts.suppressNotifications && !blockedCaller) {
       await db.messageThread.update({

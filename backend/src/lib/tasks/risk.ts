@@ -1,5 +1,7 @@
+import { isTerminalTaskStatus, type TaskStatusValue } from './status';
+
 type Priority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
-type Status = 'TODO' | 'IN_PROGRESS' | 'BLOCKED' | 'DONE';
+type Status = TaskStatusValue;
 
 export interface TaskRisk { score: number; reason: string | null; }
 
@@ -9,7 +11,9 @@ export function computeTaskRisk(
   task: { status: Status; priority: Priority; due_at: Date | string | null; completed_at: Date | string | null },
   now: Date,
 ): TaskRisk {
-  if (task.status === 'DONE' || task.completed_at) return { score: 0, reason: null };
+  // A finished task carries no risk, whichever way it finished. CANCELLED reaches this with
+  // completed_at still null, which is why the status test cannot be dropped in favour of it.
+  if (isTerminalTaskStatus(task.status) || task.completed_at) return { score: 0, reason: null };
 
   let score = PRIORITY_WEIGHT[task.priority] ?? 0;
   const reasons: string[] = [];

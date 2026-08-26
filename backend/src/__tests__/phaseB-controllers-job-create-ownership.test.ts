@@ -99,7 +99,7 @@ beforeEach(() => {
 // DEFAULT here, with no override in sight, because that is the path every technician now takes; the
 // granted-override path is the describe that follows.
 describe('POST /api/jobs - technician on the role default (no per-user grant)', () => {
-  it('CAN create a standalone job, and is AUTO-ASSIGNED to it', async () => {
+  it('CAN create a standalone job, with no crew row of their own', async () => {
     mockAuthAs('technician');
 
     const res = await request(app)
@@ -108,15 +108,16 @@ describe('POST /api/jobs - technician on the role default (no per-user grant)', 
       .send({ customer_id: CUSTOMER_FIXTURE.id, service_location_id: LOCATION_FIXTURE.id });
 
     expect(res.status).toBe(201);
-    expect(capturedAssigneeCreate).toEqual(
-      expect.arrayContaining([expect.objectContaining({ user_id: TEST_USERS.technician.id })]),
-    );
+    // S8 (D6): no self-assign crew row - the table is gone and a create path that booked no
+    // visit has no trip to put the creator on. The creator's access comes from
+    // OWN_OR_CREATED_JOB's created_by_id arm instead, which is why nothing is lost.
+    expect(capturedAssigneeCreate).toHaveLength(0);
   });
 
   // The auto-assign branch keys on the requester having ANY Job row-scope, so widening `read Job`
   // to assigned-OR-created had to leave it firing. If this ever goes quiet, a technician creates a
   // job and immediately cannot work it.
-  it('CAN create a job from an estimate on a lead they own, and is AUTO-ASSIGNED to it', async () => {
+  it('CAN create a job from an estimate on a lead they own, with no crew row of their own', async () => {
     mockAuthAs('technician');
     mockPrisma.estimate.findUnique.mockResolvedValue(ESTIMATE_OWNED_BY_TECH);
 
@@ -126,14 +127,15 @@ describe('POST /api/jobs - technician on the role default (no per-user grant)', 
       .send({ estimate_id: ESTIMATE_APPROVED_FIXTURE.id });
 
     expect(res.status).toBe(201);
-    expect(capturedAssigneeCreate).toEqual(
-      expect.arrayContaining([expect.objectContaining({ user_id: TEST_USERS.technician.id })]),
-    );
+    // S8 (D6): no self-assign crew row - the table is gone and a create path that booked no
+    // visit has no trip to put the creator on. The creator's access comes from
+    // OWN_OR_CREATED_JOB's created_by_id arm instead, which is why nothing is lost.
+    expect(capturedAssigneeCreate).toHaveLength(0);
   });
 });
 
 describe('POST /api/jobs — granted OWN-scoped technician', () => {
-  it('CAN create a job from an estimate on a lead they OWN, and is AUTO-ASSIGNED (owns the job)', async () => {
+  it('CAN create a job from an estimate on a lead they OWN, and reaches it as its creator', async () => {
     mockAuthAs('technician');
     grantTechCreateJob();
     mockPrisma.estimate.findUnique.mockResolvedValue(ESTIMATE_OWNED_BY_TECH);
@@ -144,10 +146,10 @@ describe('POST /api/jobs — granted OWN-scoped technician', () => {
       .send({ estimate_id: ESTIMATE_APPROVED_FIXTURE.id });
 
     expect(res.status).toBe(201);
-    // #232 — the creator must end up owning the job (assignee), else they can't read it afterwards.
-    expect(capturedAssigneeCreate).toContainEqual(
-      expect.objectContaining({ user_id: TEST_USERS.technician.id, job_id: CREATED_JOB.id }),
-    );
+    // #232 / S8 (D6): the creator still ends up able to read the job, but not through a crew
+    // row - `job_assignees` is gone and no visit was booked. OWN_OR_CREATED_JOB's created_by_id
+    // arm is what carries it now, so the write that must NOT happen is the assertion.
+    expect(capturedAssigneeCreate).toHaveLength(0);
   });
 
   it('CANNOT create a job from an estimate on a lead they do NOT own (403)', async () => {
@@ -163,7 +165,7 @@ describe('POST /api/jobs — granted OWN-scoped technician', () => {
     expect(res.status).toBe(403);
   });
 
-  it('CAN create a standalone job and is AUTO-ASSIGNED (closes the urgent-job #232 lockout)', async () => {
+  it('CAN create a standalone job and reaches it as its creator (the urgent-job #232 lockout stays closed)', async () => {
     mockAuthAs('technician');
     grantTechCreateJob();
 
@@ -173,9 +175,8 @@ describe('POST /api/jobs — granted OWN-scoped technician', () => {
       .send({ customer_id: CUSTOMER_FIXTURE.id, service_location_id: LOCATION_FIXTURE.id });
 
     expect(res.status).toBe(201);
-    expect(capturedAssigneeCreate).toContainEqual(
-      expect.objectContaining({ user_id: TEST_USERS.technician.id, job_id: CREATED_JOB.id }),
-    );
+    // S8 (D6): see above - the creator's access is created_by_id, not a crew row.
+    expect(capturedAssigneeCreate).toHaveLength(0);
   });
 });
 

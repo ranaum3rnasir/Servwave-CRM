@@ -60,6 +60,7 @@ import { useAuthStore } from "@/stores/auth.store";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
 /* ─────────────────────────── Owner identity ─────────────────────────── */
 
@@ -205,6 +206,7 @@ export function CallFlowsView({
 }) {
   const ability = useAppAbility();
   const canManage = ability.can("manage", "Communication");
+  const tz = useScheduleTimezone();
   const user = useAuthStore((s) => s.user);
 
   // Signed-in user, shaped like the prototype's `currentUser`. Falls back
@@ -359,7 +361,7 @@ export function CallFlowsView({
                       )}
                     </td>
                     <td className="px-4 py-3 text-[12px] text-text-secondary">
-                      {new Date(f.updatedAt).toLocaleDateString('en-US', { month: "short", day: "numeric" })}
+                      {formatInstant(f.updatedAt, tz, { month: "short", day: "numeric" })}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <span className="inline-flex items-center gap-1">

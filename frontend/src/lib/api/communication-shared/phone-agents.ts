@@ -9,6 +9,11 @@ export type PhoneAgent = {
   kind: AgentKind;
   name: string;
   role: string;
+  /** The ServWave user this agent row represents, when it is linked to one.
+   *  A real call's `answeredBy.id` is a USER id, so this - not `id` - is what
+   *  matches an answered call to its answerer (see `agentMatchesId`). */
+  userId?: string;
+  linkedUser?: { id: string; name: string; email: string };
   calls: number;
   answerRatePct: number; // % of offered calls answered
   bookingRatePct: number; // booked / eligible

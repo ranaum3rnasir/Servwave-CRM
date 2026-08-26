@@ -48,6 +48,7 @@
 import { Workflow } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
+import { LIVE_VISIT_STATUSES } from '../../lib/visit-status';
 import { createEnrollment, advanceEnrollment } from './enrollment';
 import { anchorWindow, candidatesForAnchor } from './dateAnchorSweep';
 import type { AnchorKey, WaitDirection } from './anchors';
@@ -84,28 +85,41 @@ interface Candidate {
 async function candidatesFor(workflow: Workflow, offsetMs: number, now: Date): Promise<Candidate[]> {
   switch (workflow.trigger_type) {
     case 'BEFORE_JOB_START': {
-      // Jobs whose start falls within the next `offset` — i.e. the fire moment
-      // (start − offset) has arrived. Late window entry (job booked for
-      // tomorrow while the 24h workflow is live) fires immediately.
+      // S8 §2 (A4, RATIFIED): PER-VISIT, not per-job. Spec user story 43 ("a rule that texts
+      // the customer the morning of the appointment fires on all three mornings") means a
+      // 3-visit job must emit three candidates, one per visit, not one for the job — the same
+      // shape the LEAD arm of candidatesForAnchor already has (dateAnchorSweep.ts). Selects
+      // every LIVE, TIMED visit whose start falls within the next `offset` — i.e. the fire
+      // moment (start − offset) has arrived. Late window entry (a visit booked for tomorrow
+      // while the 24h workflow is live) fires immediately.
       // Spec B1 (B-6): a technician marking themselves en-route/on-site early must not kill
-      // the customer's appointment reminder — widen past SCHEDULED alone. terminalStaleReason's
-      // ON_SITE/IN_PROGRESS check (above) is what stops the reminder once work has actually
-      // started; this scan just has to keep the candidate alive long enough to reach that check.
-      const jobs = await prisma.job.findMany({
+      // the customer's appointment reminder — LIVE_VISIT_STATUSES widens past SCHEDULED alone,
+      // reading the VISIT's own status directly now instead of inferring it from the retired
+      // job-level EN_ROUTE/ON_SITE-via-SCHEDULED/IN_PROGRESS proxy. terminalStaleReason's
+      // ON_SITE/IN_PROGRESS check is what stops the reminder once work has actually started;
+      // this scan just has to keep the candidate alive long enough to reach that check.
+      // `job_id: { not: null }` is the same belt-and-braces guard the LEAD arm applies with
+      // `lead_id: { not: null }` — the `visits` table holds both jobs' and leads' trips.
+      // Occurrence stays a bare ISO date (the winning visit's own scheduled_at) — no visit id
+      // is embedded in it (dedupe.ts's stopIf/terminalStale occurrence_key comparison would
+      // silently go stale on anything wider); entityId is the parent JOB so the anchored WAIT's
+      // dedupe scope is unaffected by this change.
+      const visits = await prisma.visit.findMany({
         where: {
           organization_id: workflow.organization_id,
-          status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] },
-          scheduled_start: { gte: now, lte: new Date(now.getTime() + offsetMs) },
+          job_id: { not: null },
+          status: { in: [...LIVE_VISIT_STATUSES] },
+          scheduled_at: { gte: now, lte: new Date(now.getTime() + offsetMs) },
         },
-        select: { id: true, job_number: true, scheduled_start: true },
+        select: { scheduled_at: true, job: { select: { id: true, job_number: true } } },
       });
-      return jobs.flatMap((j: { id: string; job_number: string; scheduled_start: Date | null }) =>
-        j.scheduled_start
+      return visits.flatMap((v) =>
+        v.scheduled_at && v.job
           ? [{
               entityType: 'job' as const,
-              entityId: j.id,
-              entityLabel: j.job_number,
-              occurrence: j.scheduled_start.toISOString(),
+              entityId: v.job.id,
+              entityLabel: v.job.job_number,
+              occurrence: v.scheduled_at.toISOString(),
             }]
           : [],
       );

@@ -389,8 +389,18 @@ describe('POST /api/service-plans/:id/schedule-visit', () => {
     const visitCreate = vi.fn().mockResolvedValue({ id: 'pv1', visit_number: 1 });
     const visitCount = vi.fn().mockResolvedValue(0);
     const timelineCreate = vi.fn().mockResolvedValue({});
+    // S8 (D6): the plan's technician rides on a real job VISIT, so the tx client needs those
+    // delegates - a write to one a hand-listed fake omits throws inside the transaction.
+    const jobVisitCreate = vi.fn().mockResolvedValue({ id: 'jv1', job_id: 'job1', visit_seq: 1 });
+    const visitCrewCreateMany = vi.fn().mockResolvedValue({ count: 1 });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ job: { create: jobCreate }, planVisit: { count: visitCount, create: visitCreate }, timelineEvent: { create: timelineCreate } }),
+      fn({
+        job: { create: jobCreate },
+        planVisit: { count: visitCount, create: visitCreate },
+        timelineEvent: { create: timelineCreate },
+        visit: { create: jobVisitCreate, aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }) },
+        visitAssignee: { findMany: vi.fn().mockResolvedValue([]), createMany: visitCrewCreateMany, deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      }),
     );
 
     const res = await request(app).post(`/api/service-plans/${PLAN_ID}/schedule-visit`).set(authHeader('admin')).send({
@@ -398,23 +408,53 @@ describe('POST /api/service-plans/:id/schedule-visit', () => {
     });
 
     expect(res.status).toBe(201);
-    expect(jobCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ source_plan_id: PLAN_ID, status: 'SCHEDULED', assignees: { create: expect.objectContaining({ user_id: TECH_ID }) } }) }),
-    );
+    // S8 (D6): the job carries no crew relation any more - the technician goes onto a real VISIT.
+    const jobData = jobCreate.mock.calls[0][0].data;
+    expect(jobData).toMatchObject({ source_plan_id: PLAN_ID, status: 'SCHEDULED' });
+    expect(jobData).not.toHaveProperty('assignees');
+
     expect(visitCreate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ job_id: 'job1', status: 'SCHEDULED', visit_number: 1 }) }),
     );
+
+    // The trip itself. Without it the plan-assigned technician is neither creator nor on any
+    // visit, and the S8 row scope silently 403s them on a job they are genuinely on - the second
+    // orphan class the migration header names. This closes it by construction.
+    expect(jobVisitCreate).toHaveBeenCalledTimes(1);
+    const visitData = jobVisitCreate.mock.calls[0][0].data;
+    expect(visitData.job_id).toBe('job1');
+    expect(visitData.purpose).toBe('WORK');
+    expect(new Date(visitData.scheduled_at).toISOString()).toBe('2026-04-01T15:00:00.000Z');
+    // D5's CHECK `visits_exactly_one_parent` is invisible to a mocked Prisma: a write that also
+    // stamped lead_id typechecks, passes green, and fails only against real Postgres.
+    expect(visitData.lead_id).toBeUndefined();
+
+    // ...and the technician lands on THAT trip.
+    const crewRows = visitCrewCreateMany.mock.calls.flatMap((c: any[]) => c[0].data);
+    expect(crewRows).toEqual([expect.objectContaining({ visit_id: 'jv1', user_id: TECH_ID })]);
   });
 
   it('spawns the visit-job SCHEDULED with no crew (state-4) when no tech is picked', async () => {
     mockAuthAs('admin');
     mockPrisma.servicePlan.findFirst.mockResolvedValue(planRow({ status: 'ACTIVE', visits: [] }));
     const jobCreate = vi.fn().mockResolvedValue({ id: 'job1', job_number: 'J00001' });
+    // S8 (D6): the trip is booked whether or not a technician was picked - the plan's visit is a
+    // real occurrence, and the crew is the independent fact layered on it.
+    const jobVisitCreate = vi.fn().mockResolvedValue({ id: 'jv1', job_id: 'job1', visit_seq: 1 });
+    const visitCrewCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ job: { create: jobCreate }, planVisit: { count: vi.fn().mockResolvedValue(0), create: vi.fn().mockResolvedValue({ id: 'pv1' }) }, timelineEvent: { create: vi.fn() } }),
+      fn({
+        job: { create: jobCreate },
+        planVisit: { count: vi.fn().mockResolvedValue(0), create: vi.fn().mockResolvedValue({ id: 'pv1' }) },
+        timelineEvent: { create: vi.fn() },
+        visit: { create: jobVisitCreate, aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }) },
+        visitAssignee: { findMany: vi.fn().mockResolvedValue([]), createMany: visitCrewCreateMany, deleteMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      }),
     );
     const res = await request(app).post(`/api/service-plans/${PLAN_ID}/schedule-visit`).set(authHeader('admin')).send({ scheduled_start: '2026-04-01T15:00:00.000Z' });
     expect(res.status).toBe(201);
+    expect(jobVisitCreate).toHaveBeenCalledTimes(1);
+    expect(visitCrewCreateMany).not.toHaveBeenCalled();
     // Scheduler-redesign: status is time-based — a visit with a time is SCHEDULED even with
     // no crew (state 4, "needs assignment"); crew is the independent M2M, so no assignees here.
     expect(jobCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'SCHEDULED' }) }));

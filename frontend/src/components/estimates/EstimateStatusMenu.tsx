@@ -1,28 +1,40 @@
 /**
  * EstimateStatusMenu - the estimate workspace's status pill, as a dropdown.
  *
- * Lists all six product statuses so the lifecycle is legible at a glance, but only offers the ones
- * legally reachable from where the estimate is now. Every option routes to the endpoint that
- * ALREADY owns that transition - this component adds no new way to change a status, it just puts
- * the existing ones behind the pill instead of only inside the Actions menu:
+ * Estimate status is UNORDERED (Spec B1, the same rule Job status follows): every one of the six
+ * product statuses is reachable from every other, forward or backward, matching what Workiz lets
+ * users do. This component lists all six and offers all six; what it does NOT do is decide which
+ * are legal - the page passes that in via `targets`, and the backend is the authority.
  *
- *   DRAFT     PATCH /:id/status {backtodraft}   (SENT/PENDING only)
- *   SENT      MarkSentDialog (from DRAFT) · PATCH /:id/status {backtosent} (from PENDING)
- *   PENDING   nothing - see below
- *   WON       POST /:id/approve-internal
- *   DECLINED  DeclineEstimateInternalDialog -> POST /:id/decline-internal
- *   ARCHIVED  CancelEstimateDialog -> POST /:id/cancel
+ * Every option routes through the free status setter (PATCH /:id/status {status}), except two that
+ * first need a reason the setter cannot invent:
  *
- * PENDING is never selectable, by design and not by omission. It means "customer approved AND
- * signed, deposit outstanding" (D6), and `approvePublic` is the only path that captures a
- * signature. A staff-set SENT->PENDING would manufacture that state with `signature_data` null,
- * and approvePublic's `isPaymentRetry` branch treats PENDING as already-signed and never
- * re-prompts - so the estimate could reach WON with no signature on file. The backend enforces
- * this too (`STATUS_TRANSITIONS` has no such entry); the disabled row exists to explain the
- * absence rather than leave a hole the reader has to infer.
+ *   DRAFT     PATCH /:id/status {status:'DRAFT'}    (invalidates the customer link, voids signature)
+ *   SENT      PATCH /:id/status {status:'SENT'}     (a label - see below)
+ *   PENDING   PATCH /:id/status {status:'PENDING'}  (honestly unsigned - see below)
+ *   WON       PATCH /:id/status {status:'WON'}      (stamps approved_at, wins the lead, reserves)
+ *   DECLINED  DeclineEstimateInternalDialog         (lost_reason is required)
+ *   ARCHIVED  CancelEstimateDialog                  (cancellation reason, optional)
  *
- * Unwinding a WON estimate is deliberately NOT here: that is `void-approval`, a guarded admin-only
- * destructive action that keeps its explicit home in the Actions menu.
+ * SENT is a LABEL, not a delivery receipt. It says where the estimate sits in the pipeline; it does
+ * not assert that a customer link exists, and picking it mints none. Sent-ness is its own axis,
+ * owned by Send / Resend / Mark as sent in the Actions menu. This row used to open MarkSentDialog
+ * whenever `public_token` was null, which sent every token-less WON/DECLINED/ARCHIVED estimate into
+ * an endpoint that accepts DRAFT only - offered, then refused.
+ *
+ * PENDING used to be permanently disabled here, and the reason was real: it means "customer
+ * approved AND signed, deposit outstanding" (D6), `approvePublic` is the only path that captures a
+ * signature, and that route decided "already signed, skip capture" from `status === 'PENDING'`
+ * alone - so a staff-set PENDING could have reached WON with no signature on file. That check is
+ * now keyed on `signature_data != null`, so a hand-set PENDING is still asked to sign and the
+ * transition is safe to offer.
+ *
+ * Only ONE rule still disables a row: the money trail. A won estimate whose job is already
+ * invoiced, or whose deposit carries payments, cannot be unwound - the page computes that and
+ * passes the explanation as `reason`. Ordering is never a reason any more.
+ *
+ * `void-approval` still keeps its own explicit home in the Actions menu: it is the guarded,
+ * audited admin unwind with its own notification verb, not merely a status change.
  */
 import { ChevronDown } from 'lucide-react';
 import {
@@ -48,7 +60,7 @@ export interface EstimateStatusTarget {
   enabled: boolean;
   /** Shown as the disabled row's tooltip - why this status is not reachable right now. */
   reason?: string;
-  /** Omitted for a target that is never selectable (PENDING). */
+  /** Optional only so a disabled row need not carry a handler; the page supplies one for all six. */
   onSelect?: () => void;
 }
 
@@ -95,7 +107,11 @@ export function EstimateStatusMenu({ status, readOnly, targets }: EstimateStatus
             <DropdownMenuItem
               key={target}
               disabled={!enabled}
-              title={isCurrent ? 'Current status' : entry.reason}
+              // `reason` explains a refusal, so only a refusing row shows it. The page hands a
+              // reason to every target (it computes one alongside `enabled` for all six), so
+              // rendering it unconditionally told users they lacked permission for moves they were
+              // about to successfully make.
+              title={isCurrent ? 'Current status' : enabled ? undefined : entry.reason}
               onClick={enabled ? entry.onSelect : undefined}
             >
               <StatusBadge domain="estimate" status={target} />

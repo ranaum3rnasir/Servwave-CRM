@@ -14,16 +14,27 @@
 // OWN_* condition templates — same shapes as defaultGrants.ts (re-declared so this module is
 // self-contained). `{{userId}}` is substituted to the requester's id by substituteConditions.
 const OWN_LEAD = { lead_assignees: { some: { user_id: '{{userId}}' } } } as const;
-const OWN_JOB = { assignees: { some: { user_id: '{{userId}}' } } } as const;
+// Multi-visit S8 (D6): the visits path, kept byte-identical to defaultGrants.ts's OWN_JOB.
+// These are never persisted (a UserPermissionOverride row is bare), so this file has no data
+// component - but it builds live Prisma `where`s and breaks identically if left behind.
+const OWN_JOB = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } as const;
 // An Estimate row is owned via its parent Lead (its read-scope and its create/update both bind
 // through the lead's assignees). Same shape powers the conditional write `can` and the paired read.
 const OWN_ESTIMATE_VIA_LEAD = { lead: { lead_assignees: { some: { user_id: '{{userId}}' } } } } as const;
-const OWN_INVOICE_VIA_JOB = { job: { assignees: { some: { user_id: '{{userId}}' } } } } as const;
+const OWN_INVOICE_VIA_JOB = { job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } } as const;
 // Creation confers control (technician-ownership spec, Part B) - same shape as defaultGrants.ts's
 // CREATED_BY_ME. A capability scoped this way reaches the rows the grantee MADE, which is a
 // different set from the OWN_* shapes above (those are assignment/lead chains) and, for the money
 // surface, deliberately so.
 const CREATED_BY_ME = { created_by_id: '{{userId}}' } as const;
+// Multi-visit S8 (D6): the READ a `create Job` grant has to imply. Same shape as
+// defaultGrants.ts's OWN_OR_CREATED_JOB, and it exists for the same reason the role default does:
+// with `job_assignees` dropped there is no self-assign row at create time any more, and a
+// standalone (urgent) job has no visit either - so `visits.some.assignees.some` matches nothing
+// and a granted creator would 403 on the job they just made. Before S8 the self-assign row
+// carried this; now the created_by_id arm does. The arm is additive, so it widens nobody past
+// their own rows.
+const OWN_OR_CREATED_JOB = { OR: [OWN_JOB, CREATED_BY_ME] } as const;
 // (A LogisticOrder anchored by job_id would be owned via that job — structurally identical to the
 // invoice-via-job shape above, `LogisticOrder.job` being the `LogisticOrderJob` relation. No LO
 // capability needs it in v1; see the LogisticOrder note at the bottom of USER_CAPABILITIES.)
@@ -103,7 +114,10 @@ export const USER_CAPABILITIES: UserCapability[] = [
     subject: 'Job',
     label: 'Create jobs',
     description: 'Create jobs from estimates on leads they own.',
-    ownCondition: OWN_JOB,
+    // OWN_OR_CREATED_JOB, not the bare OWN_JOB: the paired read this emits is the ONLY thing
+    // standing between a granted salesperson and a 403 on the job they just created. See the
+    // const's comment - S8 removed the self-assign crew row that used to answer for it.
+    ownCondition: OWN_OR_CREATED_JOB,
     impliesRead: true,
   },
   {
@@ -279,6 +293,31 @@ export const USER_CAPABILITIES: UserCapability[] = [
   // TECHNICIAN it would silently confer stock-deducting power the moment LO-3 mounts its route —
   // authority granted through a toggle whose surface did not exist when it was flipped. Add it in
   // LO-3, alongside the route it gates, where its blast radius can actually be reviewed.
+
+  // ─── Calendar Entries (Slice 01, spec §4) ─────────────────────────────
+  // Org-wide, exactly like PriceBook above: CalendarEntry has no ownership chain (ADR 0002 - no
+  // per-row owner, visibility is org-wide by design), so these carry NO ownCondition. Per
+  // defineAbility.ts's per-user-override loop, an omitted ownCondition emits an UNCONDITIONAL
+  // `can` (not an own-scoped one) - confirmed by driving defineAbilityFor directly rather than
+  // assumed, per the slice's own instruction. This is what lets a SALES user granted one of
+  // these actually reach §4's "a SALES user who needs it gets it through UserPermissionOverride"
+  // — an own-scoped grant would be meaningless for a subject with no owner column to scope on.
+  // `delete` is deliberately NOT a per-user capability - the slice names only create+update as
+  // individually grantable; a SALES user who needs to remove an event goes through DISPATCHER/ADMIN.
+  {
+    action: 'create',
+    subject: 'CalendarEntry',
+    label: 'Create events',
+    description: 'Create calendar events (org-wide - an event has no owner to scope this to).',
+    impliesRead: true,
+  },
+  {
+    action: 'update',
+    subject: 'CalendarEntry',
+    label: 'Edit events',
+    description: 'Edit calendar events (org-wide - an event has no owner to scope this to).',
+    impliesRead: true,
+  },
 ];
 
 const CAPABILITY_KEYS = new Set(USER_CAPABILITIES.map((c) => `${c.action}:${c.subject}`));

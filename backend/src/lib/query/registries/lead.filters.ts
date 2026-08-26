@@ -1,6 +1,6 @@
 import { LeadStatus } from '@prisma/client';
 import { equalsOrIn, relationSome, FacetDef } from '../filterEngine';
-import { mergeWalkthroughsSome } from '../../../services/walkthrough.service';
+import { LIVE_VISIT_STATUSES } from '../../../services/walkthrough.service';
 
 /**
  * Lead list facet registry (Task 4 — first entity wired to the shared filter
@@ -46,23 +46,26 @@ export function leadFacets(scopeWhere: Record<string, unknown>): FacetDef[] {
     // 'needs_scheduling' (confirmed via grep of both this controller and the frontend's
     // WALKTHROUGH_FILTERS list).
     //
-    // Walkthrough-as-entity redesign, PR-B2: the bucket is now `Walkthrough.status = REQUESTED`
-    // — no lead status involved at all, which is what structurally deletes the reported bug (the
-    // three previously-divergent "needs scheduling" definitions collapse to this one). The old
-    // array-order dependency on `status` running first (so this facet could DEFAULT it) is gone
-    // with it — this facet no longer touches `where.status`.
+    // Multi-visit D22a: the bucket is the ABSENCE of a live visit, not the presence of a
+    // REQUESTED placeholder. REQUESTED described a lead that NEEDS a visit, which is not a state
+    // of a visit at all, and it cannot survive multi-visit - with several live visits per lead
+    // there is no single row for the placeholder to be. No lead status is involved either way,
+    // which is what structurally deletes the originally-reported bug (the three previously
+    // divergent "needs scheduling" definitions collapse to this one).
     //
-    // SECURITY: same clobber-guard as `assigned_to` below and the hand-rolled walkthrough_after/
-    // before filter in lead.controller.ts's buildLeadListWhere — `where.walkthroughs` may
-    // already carry a TECHNICIAN's OWN_WALKTHROUGH row-scope (defaultGrants.ts), so
-    // mergeWalkthroughsSome merges into the SAME `some` clause instead of overwriting the key.
+    // SECURITY: `where.visits` may ALREADY carry a TECHNICIAN's OWN_WALKTHROUGH row-scope
+    // (defaultGrants.ts) as a `some` clause. The `none` condition is spread ALONGSIDE whatever is
+    // there rather than replacing the key: Prisma ANDs `some` and `none` on the same relation, so
+    // the row-scope survives. Overwriting `where.visits` outright would drop it - an RBAC bypass,
+    // which is the same hazard the old mergeWalkthroughsSome guard existed to prevent.
     {
       key: 'walkthrough_status',
       kind: 'multi',
       param: 'walkthrough_status',
       apply: (where, values) => {
         if (!values.includes('needs_scheduling')) return;
-        where.walkthroughs = mergeWalkthroughsSome(where, { status: 'REQUESTED' });
+        const existing = (where.visits as Record<string, unknown> | undefined) ?? {};
+        where.visits = { ...existing, none: { status: { in: [...LIVE_VISIT_STATUSES] } } };
       },
     },
     // SECURITY-CRITICAL: `scopeWhereForReq(req, 'Lead')` already narrows

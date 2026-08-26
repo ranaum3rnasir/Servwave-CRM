@@ -42,7 +42,6 @@ function orgRow(email_sender_local_part: string | null) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  (prisma.organizationDomain.findUnique as Mock).mockResolvedValue(null);
   resendSend.mockResolvedValue({ data: { id: 're_1' }, error: null });
 });
 

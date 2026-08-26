@@ -227,7 +227,7 @@ export function AddLocationDialog({
       subtitle={
         isEdit
           ? "Change tech assignment, vehicle, branch, or rename. Stock at this location is preserved."
-          : "Org → Branch → Warehouse/Truck/Counter/Bin (per PRD §5.2.1)"
+          : "Organize stock as Branch → Warehouse, Truck, Counter, or Bin."
       }
       size="lg"
       footer={

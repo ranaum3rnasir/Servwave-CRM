@@ -40,6 +40,7 @@ let sendClockOverrideDecisionEmail: typeof import('../lib/email')['sendClockOver
 let sendMfaCodeEmail: typeof import('../lib/email')['sendMfaCodeEmail'];
 let sendUserInviteEmail: typeof import('../lib/email')['sendUserInviteEmail'];
 let sendAutomationEmail: typeof import('../lib/email')['sendAutomationEmail'];
+let sendSalesContactEmail: typeof import('../lib/email')['sendSalesContactEmail'];
 
 beforeAll(async () => {
   const real = await vi.importActual<typeof import('../lib/email')>('../lib/email');
@@ -48,6 +49,7 @@ beforeAll(async () => {
   sendMfaCodeEmail = real.sendMfaCodeEmail;
   sendUserInviteEmail = real.sendUserInviteEmail;
   sendAutomationEmail = real.sendAutomationEmail;
+  sendSalesContactEmail = real.sendSalesContactEmail;
 });
 
 beforeEach(() => {
@@ -204,5 +206,58 @@ describe('Org-level email_sending_enabled toggle', () => {
     });
 
     expect(resendSend).toHaveBeenCalledTimes(1);
+  });
+  // "Reach sales" is a contractor writing TO ServWave, in the platform's own
+  // voice, to an address this file owns. The kill switch exists so an org can
+  // stop speaking to ITS OWN CUSTOMERS under its own name - it has no business
+  // silencing a message addressed to us. Gating it locked the orgs most likely
+  // to need sales out of the one channel for reaching sales: email is OFF BY
+  // DEFAULT for every org since migration 20260809031000, so on staging 8 of 9
+  // orgs, and in prod 3 of 5, could not send this at all.
+  //
+  // Same rule the AI Agentic Farm booking sender already follows: an internal
+  // sales lead is not customer-facing business correspondence.
+  it('does NOT gate sendSalesContactEmail - an internal sales lead is not customer-facing business email', async () => {
+    (prisma.organization.findUnique as Mock).mockResolvedValue({
+      email_sending_enabled: false,
+      name: 'Kill Switch Contracting',
+      plan: 'SCALE',
+      is_demo: false,
+      city: 'Richmond',
+      state: 'VA',
+      phone: null,
+      ctm_account_id: '596375',
+      _count: { users: 10 },
+    });
+
+    const result = await sendSalesContactEmail({
+      organizationId: ORG_ID,
+      to: 'info@servwave.com',
+      subject: 'Raise call / text limits',
+      message: 'We are close to our included allowance.',
+      replyTo: 'owner@example.com',
+      topic: 'limits',
+      sender: { id: 'user-1', name: 'Owner', email: 'owner@example.com', role: 'ADMIN' },
+    });
+
+    expect(resendSend).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('sent');
+  });
+
+  // The bypass must be exactly one sender wide. If it ever widened to every
+  // platform-voice send, an org that killed its email would still be mailing
+  // out under a header it did not choose.
+  it('still gates ordinary business email when the sales bypass is in place', async () => {
+    (prisma.organization.findUnique as Mock).mockResolvedValue({ email_sending_enabled: false });
+
+    await sendAutomationEmail({
+      organizationId: ORG_ID,
+      to: 'customer@example.com',
+      subject: 'Your appointment is tomorrow',
+      text: 'See you then.',
+      html: '<p>See you then.</p>',
+    });
+
+    expect(resendSend).not.toHaveBeenCalled();
   });
 });

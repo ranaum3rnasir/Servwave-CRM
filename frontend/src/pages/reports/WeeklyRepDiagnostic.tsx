@@ -31,7 +31,7 @@ import { KpiStrip } from '@/components/data/KpiStrip';
 import { EmptyState } from '@/components/ui/empty-state';
 import { SelectField } from '@/components/form/SelectField';
 import { chartPalette, token } from '@/design-system';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { ReportToolbar } from './_shared';
 

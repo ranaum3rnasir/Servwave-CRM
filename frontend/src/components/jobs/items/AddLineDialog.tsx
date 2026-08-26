@@ -84,6 +84,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { LINE_DESCRIPTION_MAX, combineDescription } from '@/lib/lineItems';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -172,6 +173,18 @@ function deriveCostFromMarkup(unitPrice: number, markupPercent: number): number 
 function splitDescription(description: string): { name: string; detail: string } {
   const parts = description.split('\n');
   return { name: parts[0] || '', detail: parts.slice(1).join('\n') };
+}
+
+/**
+ * Name and Description share ONE stored field (`name\ndetail`), so the budget has to be measured
+ * on the combined string the API will actually receive - a counter on the textarea alone would
+ * disagree with the server by the length of the name (#1604). Returns a friendly message, or
+ * null when the description fits.
+ */
+function validateDescriptionLength(name: string, detail: string): string | null {
+  const length = combineDescription(name, detail).length;
+  if (length <= LINE_DESCRIPTION_MAX) return null;
+  return `Description is too long: ${length.toLocaleString()} of ${LINE_DESCRIPTION_MAX.toLocaleString()} characters. The item name counts toward this limit.`;
 }
 
 /**
@@ -313,6 +326,12 @@ export function AddLineDialog({
   const costIsDerived = markupNum != null && !Number.isNaN(markupNum) && markupNum > -100;
   const derivedCost = costIsDerived ? deriveCostFromMarkup(parseFloat(newPrice) || 0, markupNum as number) : null;
 
+  // Name and Description share one stored field, so the live count is taken on the combined
+  // string the API will receive. Kept quiet until the description is genuinely long - a counter
+  // on a two-line note is noise, and 50,000 characters is only ever reached by a pasted document.
+  const descriptionLength = combineDescription(newName.trim(), newDescription).length;
+  const showDescriptionCount = descriptionLength > LINE_DESCRIPTION_MAX * 0.8;
+
   // Live totalbar (v12 SECTION 04) — shared by both forms. Line total only needs qty/price (no
   // pricing gate). Margin needs an "effective" unit cost — the live-derived one while Markup %
   // holds a usable value, otherwise whatever's directly typed into Unit cost — mirroring
@@ -446,6 +465,11 @@ export function AddLineDialog({
         setError(pricingError);
         return;
       }
+      const descriptionError = validateDescriptionLength(name, newDescription);
+      if (descriptionError) {
+        setError(descriptionError);
+        return;
+      }
 
       const prevMarkup = editingLine.markup_percent != null ? toNum(editingLine.markup_percent) : null;
       const prevCost = editingLine.unit_cost != null ? toNum(editingLine.unit_cost) : null;
@@ -460,7 +484,7 @@ export function AddLineDialog({
           : parseFloat(newCost);
       // Name + Description recombine into the single stored `description` string the same way
       // splitDescription() reads them back apart (name\ndetail).
-      const nextDescription = newDescription.trim() ? `${name}\n${newDescription.trim()}` : name;
+      const nextDescription = combineDescription(name, newDescription);
 
       const patch: LineUpdatePatch = {};
       if (qty !== toNum(editingLine.quantity)) patch.quantity = qty;
@@ -530,8 +554,13 @@ export function AddLineDialog({
         setError(pricingError);
         return;
       }
+      const descriptionError = validateDescriptionLength(name, newDescription);
+      if (descriptionError) {
+        setError(descriptionError);
+        return;
+      }
       payload = {
-        description: newDescription.trim() ? `${name}\n${newDescription.trim()}` : name,
+        description: combineDescription(name, newDescription),
         item_type: newType,
         quantity: qty,
         unit_price: price,
@@ -627,7 +656,13 @@ export function AddLineDialog({
                 rows={2}
                 size="sm"
                 className="resize-none"
+                maxLength={LINE_DESCRIPTION_MAX}
               />
+              {showDescriptionCount && (
+                <p className={cn('text-xs', descriptionLength > LINE_DESCRIPTION_MAX ? 'text-danger' : 'text-text-secondary')}>
+                  {descriptionLength.toLocaleString()} / {LINE_DESCRIPTION_MAX.toLocaleString()} characters
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-4 gap-3">
               <div className="space-y-1">
@@ -837,7 +872,13 @@ export function AddLineDialog({
                 rows={2}
                 size="sm"
                 className="resize-none"
+                maxLength={LINE_DESCRIPTION_MAX}
               />
+              {showDescriptionCount && (
+                <p className={cn('text-xs', descriptionLength > LINE_DESCRIPTION_MAX ? 'text-danger' : 'text-text-secondary')}>
+                  {descriptionLength.toLocaleString()} / {LINE_DESCRIPTION_MAX.toLocaleString()} characters
+                </p>
+              )}
             </div>
             {extraCreateContent}
             <div className="grid grid-cols-4 gap-3">

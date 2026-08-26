@@ -159,7 +159,7 @@ async function openEstimatesTab() {
     </Routes>,
     { initialEntries: [`/customers/${CUSTOMER_ID}`] }
   );
-  await screen.findByRole('heading', { name: 'Maria Garcia' });
+  await screen.findByRole('heading', { name: /Maria Garcia/ });
   await user.click(screen.getByRole('tab', { name: /estimates/i }));
   return screen.findByRole('tabpanel');
 }
@@ -186,7 +186,7 @@ describe('CustomerDetailPage tab strip - TabStrip rendered contract', () => {
       </Routes>,
       { initialEntries: [`/customers/${CUSTOMER_ID}`] }
     );
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
 
     const list = await screen.findByRole('tablist');
     expect(cls(list)).toBe('flex items-center gap-[26px] border-b border-border');
@@ -233,7 +233,7 @@ describe('CustomerDetailPage Estimates tab data source', () => {
       </Routes>,
       { initialEntries: [`/customers/${CUSTOMER_ID}`] }
     );
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
 
     // Leads is hidden, and Estimates is selected without the user clicking anything.
     expect(screen.queryByRole('tab', { name: /leads/i })).not.toBeInTheDocument();
@@ -254,7 +254,7 @@ describe('CustomerDetailPage Estimates tab data source', () => {
       </Routes>,
       { initialEntries: [`/customers/${CUSTOMER_ID}`] }
     );
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
 
     // Leads is the landing tab, so its (402-ing) query has already fired. Hiding
     // that tab for an unentitled org is issue #1004's job; what matters here is

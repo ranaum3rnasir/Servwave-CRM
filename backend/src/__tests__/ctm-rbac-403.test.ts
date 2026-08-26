@@ -27,7 +27,7 @@ beforeEach(() => {
 });
 
 describe('POST /api/communication/numbers/buy — behavioral 403', () => {
-  const body = { phone_number: '+12015550123', forward_to_e164: '+15555550215' };
+  const body = { phone_number: '+12015550123', forward_to_e164: '+16462023002' };
 
   it('403s DISPATCHER before any CTM call or DB write', async () => {
     mockAuthAs('dispatcher');

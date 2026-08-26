@@ -15,15 +15,32 @@
  */
 import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils';
+import { formatInstant } from '@/lib/schedule-tz';
 import type { CommItem } from '@/lib/api/jobCommunications';
 import { ChannelIcon, LeadBadge, StateChip } from './atoms';
 import { CommRowJobControl } from './CommRowJobControl';
 import { EmailDeliveryPill } from './EmailDeliveryPill';
 
+/** The hover tooltip behind the short timestamp — the exact moment, spelled out.
+ *  Matches what `new Date(at).toLocaleString('en-US')` used to render, minus the
+ *  viewer's zone. */
+const FULL_TIMESTAMP: Intl.DateTimeFormatOptions = {
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+};
+
 interface CommRowProps {
   item: CommItem;
   /** The hosting tab's timestamp formatter (relative on the job tab, absolute elsewhere). */
   formatTimestamp: (at: string) => string;
+  /** Org zone for the exact-moment hover tooltip. Passed down rather than read
+   *  here: a timeline renders one of these per message, and the tab that owns
+   *  `formatTimestamp` has already resolved the zone. */
+  tz: string;
   /** Job page id — its own rows show a plain job pill (no self-link). */
   currentJobId?: string;
   /** Lead page id — its own rows show a plain lead chip (no self-link). */
@@ -40,6 +57,7 @@ interface CommRowProps {
 export function CommRow({
   item,
   formatTimestamp,
+  tz,
   currentJobId,
   currentLeadId,
   customerId,
@@ -101,7 +119,7 @@ export function CommRow({
           )}
           <span
             className="ml-auto shrink-0 text-xs text-text-soft"
-            title={new Date(item.at).toLocaleString('en-US')}
+            title={formatInstant(item.at, tz, FULL_TIMESTAMP)}
           >
             {formatTimestamp(item.at)}
           </span>

@@ -7,10 +7,15 @@ import { purgeOrganization } from '../lib/purge';
 const ORG = 'org1';
 
 /**
- * The workflow + copilot models added for #869. Both families carry `organization_id` but have
- * NO relation to Organization, so nothing at the DB level cleans them up - a successful purge
- * used to leave every row behind, orphaned and unreachable (RLS ENABLE+FORCE makes an orphan
- * invisible to the app connection, so not even the tenant-scoped delete route can reach it).
+ * The workflow + copilot models added for #869, plus calendarEntry (Slice 02, same defect
+ * class). All of these carry `organization_id` but have NO relation to Organization, so
+ * nothing at the DB level cleans them up - a successful purge used to leave every row behind,
+ * orphaned and unreachable (RLS ENABLE+FORCE makes an orphan invisible to the app connection,
+ * so not even the tenant-scoped delete route can reach it).
+ *
+ * calendarEntryParticipant is deliberately NOT in this list: its FK to calendar_entries is a
+ * REQUIRED `onDelete: Cascade` relation, so it needs no deleteMany of its own - purge-tenant-
+ * coverage.test.ts's cascade closure covers it once calendarEntry is deleted here.
  */
 const ORPHAN_MODELS = [
   'workflowStepRun',
@@ -21,6 +26,7 @@ const ORPHAN_MODELS = [
   'copilotMessage',
   'copilotConversation',
   'copilotAuditEvent',
+  'calendarEntry',
 ] as const;
 
 function fakeTx(orgName: string) {
@@ -43,6 +49,8 @@ function fakeTx(orgName: string) {
     timelineEvent: { deleteMany: del('timelineEvent') },
     priceBookItem: { deleteMany: del('priceBookItem') },
     priceBookCategory: { deleteMany: del('priceBookCategory') },
+    finish: { deleteMany: del('finish') },
+    uomOption: { deleteMany: del('uomOption') },
     // Email slice 6 - its org FK is ON DELETE RESTRICT, so a leftover row does
     // not merely orphan: it makes the Organization delete itself fail.
     replyToken: { deleteMany: del('replyToken') },

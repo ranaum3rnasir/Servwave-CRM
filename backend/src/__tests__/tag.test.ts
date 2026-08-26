@@ -124,16 +124,24 @@ describe('POST /api/invoices/:id/tags', () => {
 // existing existence check and before the tag mutation. CUSTOMER is excluded - it has no
 // ScopeResource / row-scoping concept anywhere in the codebase to be inconsistent with.
 
+// JOB_FIXTURE.id is the suite-wide `j0000000-…` sentinel, and `j` is not a hex digit, so it is
+// not a valid UUID at all (estimates.test.ts and logistic-orders.test.ts each note the same thing
+// and work around it locally). Against the mocked client that never mattered; against Postgres a
+// `jobs.id = 'j0000000-…'` lookup is the very P2023 the new route guard exists to prevent. These
+// row-scope tests are about CASL, not id syntax, so they use a well-formed id - the job row is
+// mocked either way, the value only has to parse.
+const SCOPED_JOB_ID = 'ab000000-0000-0000-0000-000000000001';
+
 describe('POST /api/jobs/:id/tags - row-scope gate', () => {
   it('403s a TECHNICIAN neither assigned to nor the creator of the job', async () => {
     mockAuthAs('technician');
     // entityExistsInOrg's tenant-only probe finds the row; canAccessRow's SCOPED probe (its
     // `where` carries the OWN_OR_CREATED_JOB `OR`) finds nothing - the technician has no claim.
     mockPrisma.job.findFirst.mockImplementation((args: { where: Record<string, unknown> }) =>
-      Promise.resolve(args.where.OR ? null : { id: JOB_FIXTURE.id }));
+      Promise.resolve(args.where.OR ? null : { id: SCOPED_JOB_ID }));
 
     const res = await request(app)
-      .post(`/api/jobs/${JOB_FIXTURE.id}/tags`)
+      .post(`/api/jobs/${SCOPED_JOB_ID}/tags`)
       .set(authHeader('technician'))
       .send({ tag_id: TAG_FIXTURE.id });
 
@@ -143,10 +151,10 @@ describe('POST /api/jobs/:id/tags - row-scope gate', () => {
 
   it('allows a TECHNICIAN whose scope matches the job (201)', async () => {
     mockAuthAs('technician');
-    mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
+    mockPrisma.job.findFirst.mockResolvedValue({ id: SCOPED_JOB_ID });
 
     const res = await request(app)
-      .post(`/api/jobs/${JOB_FIXTURE.id}/tags`)
+      .post(`/api/jobs/${SCOPED_JOB_ID}/tags`)
       .set(authHeader('technician'))
       .send({ tag_id: TAG_FIXTURE.id });
 
@@ -158,11 +166,11 @@ describe('DELETE /api/jobs/:id/tags/:tagId - row-scope gate', () => {
   it('403s a TECHNICIAN neither assigned to nor the creator of the job', async () => {
     mockAuthAs('technician');
     mockPrisma.job.findFirst.mockImplementation((args: { where: Record<string, unknown> }) =>
-      Promise.resolve(args.where.OR ? null : { id: JOB_FIXTURE.id }));
+      Promise.resolve(args.where.OR ? null : { id: SCOPED_JOB_ID }));
     mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_FIXTURE.id });
 
     const res = await request(app)
-      .delete(`/api/jobs/${JOB_FIXTURE.id}/tags/${TAG_FIXTURE.id}`)
+      .delete(`/api/jobs/${SCOPED_JOB_ID}/tags/${TAG_FIXTURE.id}`)
       .set(authHeader('technician'));
 
     expect(res.status).toBe(403);
@@ -341,5 +349,185 @@ describe('POST /api/customers/bulk-tag', () => {
       .send({ ids, tag_id: TAG_FIXTURE.id });
 
     expect(res.status).toBe(400);
+  });
+});
+// ─── Tag-name normalisation on the entity-tag routes ────
+//
+// `addTagToEntitySchema` and `bulkTagEntitySchema` carried the same operator
+// order as createTagSchema/updateTagSchema did: `.min(1).max(50).transform(trim)`.
+// Zod applies a ZodString's checks in the order they are chained, so both length
+// checks read the RAW string and the trim only happened on the way out.
+//
+// These two schemas could never mint a BLANK tag - a post-trim '' is falsy, so
+// `resolveTagId` skips the find-or-create and the `.refine()` answers 400 - but
+// they kept the other half of the bug: a legal 50-character name typed with
+// surrounding whitespace was rejected here while the same name succeeded on
+// POST /api/tags. These lock the whole tag-name surface to one behaviour.
+describe('tag-name trimming on the entity-tag routes', () => {
+  const NAME_50 = 'x'.repeat(50);
+
+  it('accepts a padded 50-character name on POST /api/customers/:id/tags', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+    mockPrisma.tag.create.mockResolvedValue({ id: TAG_FIXTURE.id, name: NAME_50, color: '#6B7280' });
+
+    const res = await request(app)
+      .post(`/api/customers/${CUSTOMER_FIXTURE.id}/tags`)
+      .set(authHeader('admin'))
+      .send({ name: `  ${NAME_50}  ` });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.tag.create.mock.calls[0][0].data.name).toBe(NAME_50);
+  });
+
+  it('still 400s a whitespace-only name on POST /api/customers/:id/tags', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post(`/api/customers/${CUSTOMER_FIXTURE.id}/tags`)
+      .set(authHeader('admin'))
+      .send({ name: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.tag.create).not.toHaveBeenCalled();
+  });
+
+  it('still rejects a name longer than 50 characters once trimmed', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post(`/api/customers/${CUSTOMER_FIXTURE.id}/tags`)
+      .set(authHeader('admin'))
+      .send({ name: 'x'.repeat(51) });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.tag.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts a padded 50-character name on POST /api/customers/bulk-tag', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+    mockPrisma.tag.create.mockResolvedValue({ id: TAG_FIXTURE.id, name: NAME_50, color: '#6B7280' });
+    mockPrisma.tagAssignment.findUnique.mockResolvedValue(null);
+    mockPrisma.tagAssignment.create.mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/api/customers/bulk-tag')
+      .set(authHeader('admin'))
+      .send({ ids: [CUSTOMER_FIXTURE.id], name: `  ${NAME_50}  ` });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.tag.create.mock.calls[0][0].data.name).toBe(NAME_50);
+  });
+
+  it('still 400s a whitespace-only name on POST /api/customers/bulk-tag', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tag.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/api/customers/bulk-tag')
+      .set(authHeader('admin'))
+      .send({ ids: [CUSTOMER_FIXTURE.id], name: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.tag.create).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Malformed path ids on the per-record tag routes.
+ *
+ * Same root cause as the `PATCH/DELETE /api/tags/:id` guard: `:id` and `:tagId`
+ * go straight into `where` clauses over Postgres `uuid` columns
+ * (`entityExistsInOrg`, and `tagAssignment.findUnique` on the
+ * `tag_id_entity_type_entity_id` composite key), so a stray path segment makes
+ * the driver throw P2023 and the controller's catch dresses a client typo up as
+ * a 500 — plus a Sentry page for a URL nobody could have resolved anyway.
+ *
+ * These assert that Prisma is never HANDED the malformed value, not merely that
+ * the response is a 404. Against the mocked client a 404 comes back either way
+ * (`tagAssignment.findUnique` is stubbed to null in `beforeEach`, so the handler
+ * falls through to its own "not attached" 404), which would be a false green —
+ * the mock never reproduces P2023. The not-called assertions are what actually
+ * fail without the route guard.
+ */
+describe('per-record tag routes - malformed path ids', () => {
+  it('404s a malformed :tagId on a customer without reaching Prisma', async () => {
+    mockAuthAs('admin');
+    mockPrisma.customer.findFirst.mockResolvedValue({ id: CUSTOMER_FIXTURE.id });
+    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_FIXTURE.id });
+
+    const res = await request(app)
+      .delete(`/api/customers/${CUSTOMER_FIXTURE.id}/tags/not-a-uuid`)
+      .set(authHeader('admin'));
+
+    expect(res.status).toBe(404);
+    expect(mockPrisma.customer.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.delete).not.toHaveBeenCalled();
+  });
+
+  it('404s a malformed :tagId on a job without reaching Prisma', async () => {
+    mockAuthAs('admin');
+    // SCOPED_JOB_ID, not JOB_FIXTURE.id: the latter is not a valid uuid, so it would trip the
+    // `:id` guard and this case would pass without ever exercising the `:tagId` one.
+    mockPrisma.job.findFirst.mockResolvedValue({ id: SCOPED_JOB_ID });
+    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_FIXTURE.id });
+
+    const res = await request(app)
+      .delete(`/api/jobs/${SCOPED_JOB_ID}/tags/not-a-uuid`)
+      .set(authHeader('admin'));
+
+    expect(res.status).toBe(404);
+    expect(mockPrisma.job.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.delete).not.toHaveBeenCalled();
+  });
+
+  it('404s a malformed record :id on the detach route without reaching Prisma', async () => {
+    mockAuthAs('admin');
+
+    const res = await request(app)
+      .delete(`/api/estimates/not-a-uuid/tags/${TAG_FIXTURE.id}`)
+      .set(authHeader('admin'));
+
+    expect(res.status).toBe(404);
+    expect(mockPrisma.estimate.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.delete).not.toHaveBeenCalled();
+  });
+
+  // The attach route carries the same defect on `:id` - its `tag_id` comes from the
+  // body, where addTagToEntitySchema already validates it as a uuid, but the record
+  // id is a raw path segment reaching ensureEntityInOrg exactly as the detach route's is.
+  it('404s a malformed record :id on the attach route without reaching Prisma', async () => {
+    mockAuthAs('admin');
+
+    const res = await request(app)
+      .post('/api/customers/not-a-uuid/tags')
+      .set(authHeader('admin'))
+      .send({ tag_id: TAG_FIXTURE.id });
+
+    expect(res.status).toBe(404);
+    expect(mockPrisma.customer.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.tagAssignment.create).not.toHaveBeenCalled();
+  });
+
+  // The guard sits AFTER canDo, matching tag.routes.ts and inv-po.routes.ts: a caller
+  // who may not touch the subject at all must not learn whether the id was well-formed.
+  it('still 403s a role without the grant, rather than leaking that the id is malformed', async () => {
+    mockAuthAs('technician');
+
+    const res = await request(app)
+      .delete(`/api/customers/${CUSTOMER_FIXTURE.id}/tags/not-a-uuid`)
+      .set(authHeader('technician'));
+
+    expect(res.status).toBe(403);
   });
 });

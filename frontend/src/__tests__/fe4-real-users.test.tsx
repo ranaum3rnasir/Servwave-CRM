@@ -1,5 +1,5 @@
 /**
- * FE-4: real users in filter bar / useFilteredTasks / drawer-owner / command bar / MyDay
+ * FE-4: real users in filter bar / useFilteredTasks / drawer-assignees / command bar / MyDay
  *
  * Tests:
  * 1. TaskFilterBar — member list comes from useAssignableUsers, not MOCK_PEOPLE
@@ -166,7 +166,10 @@ describe('useFilteredTasks — department mapping from useAssignableUsers', () =
   it('user with department maps to department?.id (dept-ops)', () => {
     const taskAlice: Task = {
       id: 't2', task_number: 'T00002', title: 'Task A', description: '',
-      status: 'TODO', priority: 'MEDIUM', owner_id: 'user-uuid-alice', watcher_ids: [],
+      status: 'TODO', priority: 'MEDIUM',
+      assignee_ids: ['user-uuid-alice'],
+      assignees: [{ id: 'user-uuid-alice', name: 'Alice Anderson' }],
+      watcher_ids: [],
       due_at: null, linked_entity: null, tags: [], subtasks: [],
       created_by: 'user-uuid-alice', created_at: '2026-06-01T00:00:00Z',
       updated_at: '2026-06-01T00:00:00Z', completed_at: null,
@@ -186,13 +189,16 @@ describe('useFilteredTasks — department mapping from useAssignableUsers', () =
       people,
     );
     expect(result).toHaveLength(1);
-    expect(result[0]?.owner_id).toBe('user-uuid-alice');
+    expect(result[0]?.assignee_ids).toEqual(['user-uuid-alice']);
   });
 
   it('user with null department maps to "" — excluded from any concrete dept filter', () => {
     const taskBob: Task = {
       id: 't1', task_number: 'T00001', title: 'Task B', description: '',
-      status: 'TODO', priority: 'MEDIUM', owner_id: 'user-uuid-bob', watcher_ids: [],
+      status: 'TODO', priority: 'MEDIUM',
+      assignee_ids: ['user-uuid-bob'],
+      assignees: [{ id: 'user-uuid-bob', name: 'Bob Baker' }],
+      watcher_ids: [],
       due_at: null, linked_entity: null, tags: [], subtasks: [],
       created_by: 'user-uuid-bob', created_at: '2026-06-01T00:00:00Z',
       updated_at: '2026-06-01T00:00:00Z', completed_at: null,
@@ -218,14 +224,19 @@ describe('useFilteredTasks — department mapping from useAssignableUsers', () =
   it('department filter "all" passes tasks for both users (with and without dept)', () => {
     const taskAlice: Task = {
       id: 't2', task_number: 'T00002', title: 'Task A', description: '',
-      status: 'TODO', priority: 'MEDIUM', owner_id: 'user-uuid-alice', watcher_ids: [],
+      status: 'TODO', priority: 'MEDIUM',
+      assignee_ids: ['user-uuid-alice'],
+      assignees: [{ id: 'user-uuid-alice', name: 'Alice Anderson' }],
+      watcher_ids: [],
       due_at: null, linked_entity: null, tags: [], subtasks: [],
       created_by: 'user-uuid-alice', created_at: '2026-06-01T00:00:00Z',
       updated_at: '2026-06-01T00:00:00Z', completed_at: null,
       activity: [], comments: [],
       ai: { risk_score: 0, risk_reason: null, suggested_by: null, source: 'manual' },
     };
-    const taskBob: Task = { ...taskAlice, id: 't1', task_number: 'T00001', title: 'Task B', owner_id: 'user-uuid-bob' };
+    const taskBob: Task = { ...taskAlice, id: 't1', task_number: 'T00001', title: 'Task B',
+      assignee_ids: ['user-uuid-bob'],
+      assignees: [{ id: 'user-uuid-bob', name: 'Bob Baker' }] };
 
     const people = REAL_USERS.map((u) => ({
       id: u.id,
@@ -252,8 +263,8 @@ const taskWithActivity: Task = {
   description: '',
   status: 'TODO',
   priority: 'MEDIUM',
-  owner_id: 'user-uuid-alice',
-  owner_name: 'Alice Anderson',
+  assignee_ids: ['user-uuid-alice'],
+  assignees: [{ id: 'user-uuid-alice', name: 'Alice Anderson' }],
   watcher_ids: ['user-uuid-bob'],
   watchers: [{ id: 'user-uuid-bob', name: 'Bob Baker' }],
   due_at: null,

@@ -62,6 +62,8 @@ import { cn } from "@/lib/utils";
 import {
   NO_MAILBOX_LABEL,
   PRIMARY_ACCOUNT,
+  senderAddress,
+  senderLabel,
   useAttachSources,
   useTextTemplates,
 } from "@/lib/api/communication";
@@ -812,7 +814,7 @@ export function InlineComposer({
         placeholder={
           reply.mode === "forward"
             ? "Add a message…"
-            : `Reply to ${original.from.name}…`
+            : `Reply to ${senderLabel(original.from)}…`
         }
         className="min-h-[140px] w-full resize-none px-4 py-3 text-[14px] leading-relaxed text-text-primary outline-none placeholder:text-text-secondary"
       />
@@ -830,7 +832,13 @@ export function InlineComposer({
         {showQuote && (
           <div className="mt-2 border-l-2 border-border pl-3 text-[12px] leading-relaxed text-text-secondary">
             <p className="mb-1">
-              On {original.at}, {original.from.name} &lt;{original.from.email}&gt;
+              {/* Label plus address only when the row carries both, so a
+                  nameless or addressless sender does not quote as
+                  "null <undefined>". */}
+              On {original.at}, {senderLabel(original.from)}
+              {original.from.name?.trim() && senderAddress(original.from) ? (
+                <> &lt;{senderAddress(original.from)}&gt;</>
+              ) : null}{" "}
               wrote:
             </p>
             {original.body.map((p, i) => (

@@ -14,8 +14,11 @@ const TYPE_SWATCH: Record<EventType, string> = {
   job: "bg-info",
   walkthrough: "bg-warning",
   "service-plan": "bg-ai",
+  // Dead v1 fork (no importer outside its own test) - added only to satisfy
+  // Record<EventType, ...> after slice 03 widened EventType. Not wired into any live surface.
+  "calendar-entry": "bg-event",
 };
-const EVENT_TYPES: EventType[] = ["job", "walkthrough", "service-plan"];
+const EVENT_TYPES: EventType[] = ["job", "walkthrough", "service-plan", "calendar-entry"];
 
 const STAFF_FILTERS = [
   { label: "All Staff", value: "all" },

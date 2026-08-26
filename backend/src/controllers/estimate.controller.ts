@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { LostReason, Prisma, PaymentMethod } from '@prisma/client';
+import { LostReason, Prisma, PaymentMethod, LeadStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { prisma } from '../lib/prisma';
 // Creator tracking (audit only) - stamped at every create, never read for authorization here.
@@ -23,17 +23,22 @@ import { emit } from '../services/notifications/notificationService';
 import { dispatchAutomationEvent } from '../services/automations/dispatch';
 import { addOrFilter } from '../lib/permissions/whereCompose';
 import { logAudit } from '../lib/audit';
+import { computeRenumber, applyRenumber, type RenumberComputation } from '../lib/record-renumber';
 import { generateReply, isBrainNotConfigured } from '../services/copilot/brain';
 import { asScopeArray, toScopeForTotals, stripDocumentCost } from '../lib/scopes';
 import { recomputeInvoiceTotals, type ScopeForTotals, type LineForTotals } from '../lib/invoice-totals';
-import { ESTIMATE_STATUS } from '../constants/estimateStatus';
+import { ESTIMATE_STATUS, type EstimateStatusValue } from '../constants/estimateStatus';
+import { TARGETABLE_ESTIMATE_STATUSES, buildStatusChangeData, blockedByMoneyTrail } from '../lib/estimates/status-transitions';
 import { resolveTaxRateForState } from '../lib/tax/resolveTaxRate';
 import { remainingDepositCredit, applyDepositCredit } from '../lib/deposit-credit';
+import { LINE_DESCRIPTION_MAX } from '../lib/line-items';
 // Copy-to-invoice (R5e) reuses invoice.controller.ts's exact conventions verbatim rather than
 // redefining them: the standalone-invoice permission gate's message, the detail select, the
 // deposit-credit reference tag, and the payment-terms due-date resolver.
 import { invoiceDetailSelect, DEPOSIT_CREDIT_REFERENCE, calculateDueDate, resolveAvailablePaymentMethods } from './invoice.controller';
-import { walkthroughSnapshotSelect, projectLeadWalkthroughFields, hasCompletedWalkthrough } from '../services/walkthrough.service';
+import { walkthroughSnapshotSelect, projectLeadWalkthroughFields, projectLeadVisitCrew, hasCompletedWalkthrough } from '../services/walkthrough.service';
+import { transitionLeadStatus, stampLeadClock } from '../services/lead-stage.service';
+import { isOnJobCrew } from '../lib/job-crew';
 
 // ─── Select Objects ────────────────────────────────────
 
@@ -85,6 +90,12 @@ export const estimateDetailSelect = {
   customer_id: true,
   job_id: true,
   estimate_number: true,
+  // Editable record IDs (2026-08-19 plan) - RecordNumberEditor's `isDerivedAndLocked` gate
+  // needs both: container_kind set + number_is_custom false means this estimate's number was
+  // derived from its container parent and never hand-edited, so the workspace renders it
+  // read-only behind an explicit "Use a custom number" unlock (see RecordNumberEditor.tsx).
+  number_is_custom: true,
+  container_kind: true,
   status: true,
   sent_at: true,
   approved_at: true,
@@ -173,8 +184,8 @@ export const estimateDetailSelect = {
       // estimateDetailSelect response site) sources them from this relation instead, resolving
       // D15's "current visit" so the estimate workspace's walkthrough badge stays coherent
       // under multiple visits.
-      walkthroughs: { select: walkthroughSnapshotSelect },
-      walkthrough_performers: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+      // S8 (D6): the crew rides on the trips - `visit_assignees.lead_id` is dropped.
+      visits: { select: { ...walkthroughSnapshotSelect, assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } } } },
       customer: {
         select: {
           id: true,
@@ -354,7 +365,7 @@ const estimatePublicSelect = {
 // revise — and is reused by estimate-lines.controller.ts for the new granular endpoints.
 export const stripEstimateCost = stripDocumentCost;
 
-// Walkthrough-as-entity redesign, PR-B2: estimateDetailSelect's nested `lead.walkthroughs`
+// Walkthrough-as-entity redesign, PR-B2: estimateDetailSelect's nested `lead.visits`
 // relation (see the select above) needs projecting onto the legacy walkthrough_* field NAMES
 // the estimate workspace already reads off `estimate.lead`, exactly like stripEstimateCost /
 // resolveEstimatePhotoUrls above - called at every one of estimateDetailSelect's response call
@@ -362,7 +373,8 @@ export const stripEstimateCost = stripDocumentCost;
 // lead-less (customer-anchored) estimate, whose `lead` is null.
 export function projectEstimateLeadWalkthrough<T extends { lead?: unknown } | null>(estimate: T): T {
   if (!estimate || !estimate.lead) return estimate;
-  return { ...estimate, lead: projectLeadWalkthroughFields(estimate.lead as never, { full: true }) } as T;
+  // S8: the crew flatten runs FIRST - projectLeadWalkthroughFields strips `visits`.
+  return { ...estimate, lead: projectLeadWalkthroughFields(projectLeadVisitCrew(estimate.lead as never), { full: true }) } as T;
 }
 
 // R5f (2026-07-22) — line-item + scope photos: same Storage bucket/TTL as inv-stages.controller.ts
@@ -487,7 +499,7 @@ const singleAnchorGuard = (
 // object — exported alongside the refined `lineItemSchema` so estimate-lines.controller.ts can
 // derive its own update schema (.omit/.partial) from the SAME field set rather than redefining it.
 export const lineItemObjectSchema = z.object({
-  description: z.string().min(1, 'Description is required').max(5000),
+  description: z.string().min(1, 'Description is required').max(LINE_DESCRIPTION_MAX),
   quantity: z.number().positive('Quantity must be positive'),
   unit_price: z.number().min(0, 'Unit price must be non-negative'),
   is_taxable: z.boolean().default(true),
@@ -625,6 +637,14 @@ export const createEstimateNoteSchema = z.object({
 export const duplicateEstimateSchema = z.object({
   target_lead_id: z.string().uuid().optional(),
 });
+
+// Editable record ids (Workiz dual-run, SERV10X record-renumber) - shared by both the preview and
+// the rename endpoint below. Deliberately thin: the charset/length/numeric-cap rules live in
+// validateNumberFormat inside record-renumber.ts (called by computeRenumber), not here - this
+// schema only guarantees `number` is present and a string.
+export const estimateNumberSchema = z.object({
+  number: z.string(),
+}).strict();
 
 // List-level bulk delete (Estimates list page). Same DRAFT-only guard as single delete —
 // see deleteEstimateInternal/bulkRemove below.
@@ -1161,14 +1181,14 @@ export async function create(req: Request, res: Response) {
         where: { id: job_id, ...tenantWhere(req) },
         select: {
           id: true, customer_id: true, service_location_id: true,
-          assignees: { select: { user_id: true } },
+          visits: { select: { assignees: { select: { user_id: true } } } },
           service_location: { select: { state: true } },
           customer: { select: { tax_exempt: true } },
         },
       });
       if (!job) { res.status(404).json({ error: 'Job not found' }); return; }
       // F-004 - a row-scoped creator may only create on a job they are ASSIGNED to.
-      if (isRowScopedEstimateCreator && !job.assignees.some((a) => a.user_id === req.user!.id)) {
+      if (isRowScopedEstimateCreator && !isOnJobCrew(job, req.user!.id)) {
         res.status(403).json({ error: 'Insufficient permissions' });
         return;
       }
@@ -1300,7 +1320,7 @@ const jobItemsSourceSelect = {
   customer_id: true,
   service_location_id: true,
   customer: { select: { tax_exempt: true } },
-  assignees: { select: { user_id: true } },
+  visits: { select: { assignees: { select: { user_id: true } } } },
   job_line_items: {
     select: {
       description: true, quantity: true, unit_price: true, is_taxable: true, line_total: true,
@@ -1350,7 +1370,7 @@ export async function createFromJobItems(req: Request, res: Response) {
     // only create on a job they are assigned to.
     const estCreateScope = await scopeWhereForReq(req, 'Estimate');
     const isRowScopedEstimateCreator = Object.keys(estCreateScope).length > 0;
-    if (isRowScopedEstimateCreator && !job.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (isRowScopedEstimateCreator && !isOnJobCrew(job, req.user!.id)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
@@ -1487,7 +1507,7 @@ export async function attachToJob(req: Request, res: Response) {
 
     const job = await prisma.job.findUnique({
       where: { id: job_id, ...tenantWhere(req) },
-      select: { id: true, customer_id: true, source_plan_id: true, assignees: { select: { user_id: true } } },
+      select: { id: true, customer_id: true, source_plan_id: true, visits: { select: { assignees: { select: { user_id: true } } } } },
     });
     if (!job) { res.status(404).json({ error: 'Job not found' }); return; }
     if (job.source_plan_id) {
@@ -1503,7 +1523,7 @@ export async function attachToJob(req: Request, res: Response) {
     // job they are assigned to.
     const estUpdateScope = await scopeWhereForReq(req, 'Estimate');
     const isRowScopedUpdater = Object.keys(estUpdateScope).length > 0;
-    if (isRowScopedUpdater && !job.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (isRowScopedUpdater && !isOnJobCrew(job, req.user!.id)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
@@ -1995,7 +2015,7 @@ async function commitFirstSend(
   req: Request,
   existing: {
     id: string; estimate_number: string; lead_id: string | null; customer_id: string;
-    lead?: { status?: string | null; customer?: { id: string } | null } | null;
+    lead?: { status?: LeadStatus | null; customer?: { id: string } | null } | null;
   },
   org: { estimate_terms: string | null; estimate_notes: string | null; estimate_payment_terms: string | null },
   body: { deposit_required: boolean; payment_methods: string[]; message_body?: string },
@@ -2021,6 +2041,18 @@ async function commitFirstSend(
     },
     select: estimateDetailSelect,
   });
+
+  // Spec #1751 D2: the headline metric's closing edge - "the walkthrough is done, how long before
+  // the salesperson sent the estimate". First touch wins, so the SECOND estimate on the same lead
+  // leaves it alone; the owner asks this question once per lead, not once per document.
+  //
+  // Only here, never on the resend path. A resend of an estimate that went out before this column
+  // existed would otherwise stamp it with today's date and report an instant turnaround on a lead
+  // that in fact waited months. Historical rows are D10's backfill to fill, from the estimate's
+  // own sent_at.
+  if (existing.lead_id) {
+    await stampLeadClock(tx, existing.lead_id, req.user!.organization_id, 'first_estimate_sent_at', new Date());
+  }
 
   // Upsert send config — keyed on the @unique estimate_id so a resend after revise()
   // (which recalls to DRAFT but LEAVES the row) is idempotent and re-snapshots the
@@ -2159,23 +2191,27 @@ async function commitFirstSend(
   });
 
   // Auto-transition lead to ESTIMATED if applicable (only when the estimate has a lead).
+  // Spec #1751 D6 — through the one writer, which now supplies the ledger entry this used to
+  // hand-roll. The entry gains `from` and `to`, which the hand-rolled one did not carry, so the
+  // "how long was this lead in CONTACTED" question becomes answerable from it.
+  //
+  // `onlyFrom` reproduces the ['NEW', 'CONTACTED'] guard verbatim rather than relaxing it: an
+  // estimate sent on a lead already ESTIMATED (a second document) must not restate the status,
+  // and one sent on a WON lead must certainly not pull it backward.
   if (updated.lead_id) {
     const leadStatus = existing.lead?.status;
-    const shouldTransitionLead = ['NEW', 'CONTACTED'].includes(leadStatus as string);
+    const shouldTransitionLead = leadStatus === 'NEW' || leadStatus === 'CONTACTED';
     if (shouldTransitionLead) {
-      await tx.lead.update({
-        where: { id: updated.lead_id },
-        data: { status: 'ESTIMATED' },
-      });
-      await tx.timelineEvent.create({
-        data: {
-          organization_id: req.user!.organization_id,
-          entity_type: 'LEAD',
-          entity_id: updated.lead_id,
-          event_type: 'STATUS_CHANGE',
-          description: `Lead transitioned to ESTIMATED — estimate ${existing.estimate_number} sent`,
-          created_by: req.user!.id,
-        },
+      await transitionLeadStatus(tx, {
+        leadId: updated.lead_id,
+        orgId: req.user!.organization_id,
+        to: 'ESTIMATED',
+        from: leadStatus,
+        actorId: req.user!.id,
+        notFrom: [],
+        onlyFrom: ['NEW', 'CONTACTED'],
+        description: `Lead transitioned to ESTIMATED — estimate ${existing.estimate_number} sent`,
+        metadata: { estimate_id: updated.id, estimate_number: existing.estimate_number, via: 'estimate_sent' },
       });
     }
   }
@@ -2335,7 +2371,12 @@ async function sendEstimateInternal(
         depositPercentage: dType === 'FIXED' ? 0 : depositPercent,
         publicUrl,
         // Attach-by-origin: estimate-time sends have no job yet — customer/lead only.
-        record: { organizationId: req.user!.organization_id, customerId: customer.id, leadId: existing.lead_id },
+        record: {
+          organizationId: req.user!.organization_id, customerId: customer.id, leadId: existing.lead_id,
+          // The reply anchor: every send about THIS estimate, and the customer's
+          // reply to any of them, resolve to one address and one conversation.
+          entityType: 'estimate', entityId: existing.id,
+        },
       })
     : await sendEstimateEmail({
         estimateId: existing.id,
@@ -2347,7 +2388,12 @@ async function sendEstimateInternal(
         estimateNumber: existing.estimate_number,
         total: fmt(Number(existing.total_amount)),
         publicUrl,
-        record: { organizationId: req.user!.organization_id, customerId: customer.id, leadId: existing.lead_id },
+        record: {
+          organizationId: req.user!.organization_id, customerId: customer.id, leadId: existing.lead_id,
+          // The reply anchor: every send about THIS estimate, and the customer's
+          // reply to any of them, resolve to one address and one conversation.
+          entityType: 'estimate', entityId: existing.id,
+        },
       });
 
   if (emailResult.status !== 'sent') {
@@ -2372,10 +2418,16 @@ async function sendEstimateInternal(
       // §A3 — a material edit since the last send nulls public_token + flags
       // modified_after_send (see update()). Re-sending clears the flag and, if the old link was
       // invalidated, mints a fresh one — this IS the "force re-send" the guardrail requires.
+      //
+      // #1522: persist the SAME `publicToken` that went into the email above, not a second
+      // randomUUID(). Only the isFirstSend branch writes the token up-front, so on this path a
+      // freshly minted UUID here was never the one the customer received and their link 404'd.
+      // `publicToken` already equals existing.public_token when there is one, so the guard is
+      // still what decides whether the column is written at all.
       const resent = await tx.estimate.update({
         where: { id: existing.id },
         data: {
-          ...(existing.public_token == null ? { public_token: randomUUID() } : {}),
+          ...(existing.public_token == null ? { public_token: publicToken } : {}),
           modified_after_send: false,
         },
         select: estimateDetailSelect,
@@ -2559,6 +2611,9 @@ export async function recordEstimatePayment(req: Request, res: Response) {
           lead_assignees: { select: { user_id: true } },
           customer: { select: { id: true } },
           commission_owner_id: true,
+          // Spec #1751 D6: the transition writer records `from` on the ledger entry, and the
+          // door is the only place that already has the lead loaded.
+          status: true,
         } },
         send_config: { select: { id: true } },
       },
@@ -2727,10 +2782,17 @@ export async function recordEstimatePayment(req: Request, res: Response) {
       }
 
       // 4. Lead → WON only when fully paid (idempotent — skip terminal states).
+      // Spec #1751 D6: through the one status writer, which also stamps won_at and records the
+      // from/to ledger entry. The `notIn` guard this replaces is the helper's own default.
       if (isFullyPaid && existing.lead_id) {
-        await tx.lead.updateMany({
-          where: { id: existing.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] } },
-          data: { status: 'WON' },
+        await transitionLeadStatus(tx, {
+          leadId: existing.lead_id,
+          orgId: req.user!.organization_id,
+          to: 'WON',
+          from: existing.lead!.status,
+          actorId: req.user!.id,
+          description: 'Lead won — estimate deposit paid in full',
+          metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'deposit_paid' },
         });
       }
 
@@ -3024,23 +3086,45 @@ export async function markSent(req: Request, res: Response) {
   }
 }
 
-// PATCH /:id/status — a NARROW whitelist of administrative status corrections, not a free setter.
+// PATCH /:id/status — a FREE setter over the six exposed statuses (Spec B1, applied to Estimate):
+// any status is reachable from any other, forward or backward, matching the Job model and what
+// Workiz lets users do. Only integrity rules block a move; ordering rules are gone.
+//
+// `status` is the setter. `transition` ('backtodraft' | 'backtosent') is the retained legacy alias
+// for the two administrative corrections that predate the free setter — same behaviour, including
+// their original source-status gate, so in-flight clients and the Estimates-list bulk action keep
+// working unchanged. Exactly one of the two must be supplied.
+//
 // `backtodraft` is the SAME-ROW recall §14.4 distinguishes from revise()'s clone-supersede: it
 // nulls public_token (the customer's old link must stop working) and keeps the same estimate
-// number — no SUPERSEDED sibling. `backtosent` reverts a LEGITIMATELY-pending estimate (i.e. one
-// that actually went through approvePublic's signature capture) back to SENT for a correction —
-// safe because it never fabricates the PENDING state itself, only reverts an already-real one.
-// There is deliberately NO manual "mark pending" transition: PENDING means "customer approved AND
-// SIGNED, deposit outstanding" (D6) — approvePublic is the ONLY path that captures a signature, so
-// a staff-triggered SENT→PENDING would manufacture that state with signature_data left null, and
-// approvePublic's `isPaymentRetry` branch (existing.status === 'PENDING') treats PENDING as
-// "already signed" and never re-prompts for one — the estimate could then reach WON unsigned.
-// R4b (2026-07-21) — both transitions emit `estimate.status_corrected` (Admin FEED + owner FEED,
-// grouped with cancelled/deposit_waived/approval_voided): a recall/correction changes the state of
+// number — no SUPERSEDED sibling. Those stamp changes now live in buildStatusChangeData() as the
+// "entering DRAFT" effect, so the free setter applies them too.
+//
+// A staff-set PENDING is deliberately UNSIGNED (this engine never fabricates signature_data —
+// only approvePublic captures a signature). That used to be the reason no manual PENDING existed:
+// approvePublic's `isPaymentRetry` branch keyed off `status === 'PENDING'` alone and would skip
+// signature capture, letting an unsigned estimate reach WON. That check is now keyed on
+// `signature_data != null`, so an unsigned PENDING is still asked to sign.
+//
+// R4b (2026-07-21) — every status change emits `estimate.status_corrected` (Admin FEED + owner
+// FEED, grouped with cancelled/deposit_waived/approval_voided): a correction changes the state of
 // a rep's estimate without their action, the same consequence level as a waived deposit.
-export const setEstimateStatusSchema = z.object({
-  transition: z.enum(['backtodraft', 'backtosent']),
-});
+export const setEstimateStatusSchema = z
+  .object({
+    transition: z.enum(['backtodraft', 'backtosent']).optional(),
+    status: z.enum(TARGETABLE_ESTIMATE_STATUSES).optional(),
+    // Required when moving to DECLINED (see the refine below) — declineInternal's rule, kept: a
+    // staff-recorded loss must capture why, because S1 reporting depends on that signal.
+    lost_reason: z.nativeEnum(LostReason).optional(),
+    cancelled_reason: z.string().max(500).optional(),
+  })
+  .refine((d) => (d.transition ? 1 : 0) + (d.status ? 1 : 0) === 1, {
+    message: 'Provide exactly one of "status" or "transition"',
+  })
+  .refine((d) => d.status !== ESTIMATE_STATUS.DECLINED || !!d.lost_reason, {
+    message: 'lost_reason is required when declining an estimate',
+    path: ['lost_reason'],
+  });
 
 const STATUS_TRANSITIONS: Record<
   'backtodraft' | 'backtosent',
@@ -3051,22 +3135,40 @@ const STATUS_TRANSITIONS: Record<
 };
 
 // Extracted from setStatus() so bulkSetStatus() (list-level bulk status change, Estimates list
-// page) can share the EXACT same from-state guard + transaction/timeline/emit logic without
-// duplicating it. Returns a result instead of writing to `res` directly - setStatus() and
-// bulkSetStatus() each translate that result into their own response shape. Same pattern as
+// page) can share the EXACT same guards + transaction/timeline/emit logic without duplicating it.
+// Returns a result instead of writing to `res` directly - setStatus() and bulkSetStatus() each
+// translate that result into their own response shape. Same pattern as
 // deleteEstimateInternal/bulkRemove above.
+//
+// Takes a TARGET STATUS, not a transition: under Spec B1 the pair (from, to) carries no ordering
+// meaning, only stamp meaning, which buildStatusChangeData() owns. `legacyTransition` is passed
+// only when the caller used the retained alias, and exists solely to keep that alias's original
+// source-status gate and wording intact.
 async function setStatusInternal(
   req: Request,
   id: string,
-  transition: 'backtodraft' | 'backtosent',
+  target: EstimateStatusValue,
+  legacyTransition?: 'backtodraft' | 'backtosent',
+  reason: { lost_reason?: string; cancelled_reason?: string } = {},
 ): Promise<{ ok: true; estimate: unknown } | { ok: false; status: number; error: string }> {
-  const rule = STATUS_TRANSITIONS[transition];
-
   const existing = await prisma.estimate.findUnique({
     where: { id, ...tenantWhere(req) },
     select: {
-      id: true, status: true, estimate_number: true, created_by: true,
-      lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true } },
+      id: true, status: true, estimate_number: true, created_by: true, lead_id: true, public_token: true,
+      lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true, status: true } },
+      job: {
+        select: {
+          id: true, job_number: true,
+          invoices: { select: { id: true, status: true, payments: { select: { id: true }, take: 1 } } },
+        },
+      },
+      // The kind=DEPOSIT Invoice is estimate_id-linked only (job_id: null — see commitFirstSend),
+      // so it is invisible to the job.invoices check above and must be loaded separately.
+      invoices: {
+        where: { kind: 'DEPOSIT' as const },
+        select: { id: true, status: true, payments: { select: { id: true }, take: 1 } },
+        take: 1,
+      },
     },
   });
 
@@ -3074,37 +3176,88 @@ async function setStatusInternal(
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
 
-  if (!rule.from.includes(existing.status)) {
-    return { ok: false, status: 400, error: `Cannot apply "${transition}" to a ${existing.status.toLowerCase()} estimate` };
+  if (legacyTransition && !STATUS_TRANSITIONS[legacyTransition].from.includes(existing.status)) {
+    return { ok: false, status: 400, error: `Cannot apply "${legacyTransition}" to a ${existing.status.toLowerCase()} estimate` };
+  }
+
+  // No send-ceremony gate here, deliberately. SENT is a label like every other status; minting a
+  // customer link is the job of send/resend/mark-sent alone. The 409 SEND_CEREMONY_REQUIRED that
+  // used to sit here redirected the client to POST /:id/mark-sent, which gates on DRAFT - so a
+  // token-less WON/DECLINED/ARCHIVED estimate was refused by both ends with no path between them.
+
+  const moneyTrailRefusal = blockedByMoneyTrail(existing, target);
+  if (moneyTrailRefusal) {
+    return { ok: false, status: 400, error: moneyTrailRefusal };
   }
 
   if (!(await canAccessEstimate(existing, req))) {
     return { ok: false, status: 403, error: 'Insufficient permissions' };
   }
 
+  // The legacy alias keeps its original wording in the timeline/feed ("recalled to draft"); a
+  // free-setter move reads as what it is.
+  const label = legacyTransition
+    ? STATUS_TRANSITIONS[legacyTransition].label
+    : `moved to ${target.toLowerCase()}`;
+
   const estimate = await prisma.$transaction(async (tx) => {
     const est = await tx.estimate.update({
       where: { id: existing.id },
-      data: {
-        status: rule.to,
-        // backtodraft only: invalidate the customer's existing link — a DRAFT estimate has
-        // nothing valid to view at the old token, and re-sending mints a fresh one. Also void
-        // any signature/T&C-acceptance captured while PENDING (same reasoning as D12's
-        // pendingRevertOnMaterialChange — a document going back for edits can't keep the old
-        // approval attached to it) and clear modified_after_send, which has no meaning once the
-        // estimate is no longer sent.
-        ...(transition === 'backtodraft' ? {
-          public_token: null,
-          signature_data: null,
-          signature_ip: null,
-          signature_at: null,
-          terms_accepted: false,
-          terms_accepted_at: null,
-          modified_after_send: false,
-        } : {}),
-      },
+      data: buildStatusChangeData(existing.status, target, reason),
       select: estimateDetailSelect,
     });
+
+    // Entering WON propagates the win to the lead, idempotently — same rule as approveInternal:
+    // a lead already WON/LOST/CANCELLED is left alone.
+    if (target === ESTIMATE_STATUS.WON && existing.lead_id) {
+      await transitionLeadStatus(tx, {
+        leadId: existing.lead_id,
+        orgId: req.user!.organization_id,
+        to: 'WON',
+        from: existing.lead!.status,
+        actorId: req.user!.id,
+        description: 'Lead won — estimate status corrected to won',
+        metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'status_correction' },
+      });
+    }
+
+    // Winning also reserves the estimate's materials — the same call approveInternal makes, so
+    // which control the user pressed never decides whether stock gets held.
+    if (target === ESTIMATE_STATUS.WON) {
+      await autoCreateReservation(tx, existing.id, req.user!.organization_id);
+    }
+
+    // Leaving WON hands the lead back — voidApproval's rule, verbatim. A job existing means the
+    // win already propagated further downstream than the lead, so the lead stays WON. And a lead
+    // can hold several WON estimates at once, so demote only once this was the LAST one still
+    // won, or the lead would contradict a sibling. Counted on `tx` so it sees the write above.
+    if (
+      existing.status === ESTIMATE_STATUS.WON &&
+      target !== ESTIMATE_STATUS.WON &&
+      !existing.job &&
+      existing.lead_id &&
+      existing.lead?.status === 'WON'
+    ) {
+      const siblingsStillWon = await tx.estimate.count({
+        where: { ...tenantWhere(req), lead_id: existing.lead_id, status: ESTIMATE_STATUS.WON, id: { not: existing.id } },
+      });
+      if (siblingsStillWon === 0) {
+        // `onlyFrom: ['WON']` reproduces the `where: { status: 'WON' }` guard this replaces. The
+        // demotion is the one transition that runs BACKWARD, so it must not be expressed as
+        // "anything but the terminal three" — that would demote a LOST lead to ESTIMATED.
+        await transitionLeadStatus(tx, {
+          leadId: existing.lead_id,
+          orgId: req.user!.organization_id,
+          to: 'ESTIMATED',
+          from: existing.lead!.status,
+          actorId: req.user!.id,
+          notFrom: [],
+          onlyFrom: ['WON'],
+          description: 'Lead returned to estimated — the last won estimate was corrected',
+          metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'status_correction' },
+        });
+      }
+    }
 
     await tx.timelineEvent.create({
       data: {
@@ -3112,8 +3265,8 @@ async function setStatusInternal(
         entity_type: 'ESTIMATE',
         entity_id: existing.id,
         event_type: 'STATUS_CORRECTED',
-        description: `Estimate ${existing.estimate_number} ${rule.label}`,
-        metadata: { transition },
+        description: `Estimate ${existing.estimate_number} ${label}`,
+        metadata: { from: existing.status, to: target, ...(legacyTransition ? { transition: legacyTransition } : {}) },
         created_by: req.user!.id,
       },
     });
@@ -3121,23 +3274,55 @@ async function setStatusInternal(
     return est;
   });
 
+  // Reaching WON/DECLINED/ARCHIVED through the setter is the SAME business event as reaching it
+  // through approve-internal/decline-internal/cancel, so it emits the same verb. Without this the
+  // notification feed would report which control the user happened to press: an estimate declined
+  // from the status pill would surface as a bland "status corrected" while the identical decline
+  // from the Actions menu raised `estimate.declined`. Everything else is a plain correction.
+  const VERB_BY_TARGET: Partial<Record<EstimateStatusValue, string>> = {
+    [ESTIMATE_STATUS.WON]: 'estimate.approved',
+    [ESTIMATE_STATUS.DECLINED]: 'estimate.declined',
+    [ESTIMATE_STATUS.ARCHIVED]: 'estimate.cancelled',
+  };
+  const verb = VERB_BY_TARGET[target] ?? 'estimate.status_corrected';
+
   await emit({
-    verb: 'estimate.status_corrected',
+    verb,
     organizationId: req.user!.organization_id,
     actorId: req.user?.id ?? null,
     object: { type: 'ESTIMATE', id: existing.id, label: existing.estimate_number },
     entity: { commission_owner_id: existing.lead?.commission_owner_id ?? null },
-    data: { object_label: existing.estimate_number, transition, transition_label: rule.label },
+    data: { object_label: existing.estimate_number, from: existing.status, to: target, transition: legacyTransition, transition_label: label },
+    ...(target === ESTIMATE_STATUS.WON ? { dedupKey: `estimate.approved:${existing.id}` } : {}),
   });
-  void logAudit({ req, action: 'estimate.status_corrected', resourceType: 'Estimate', resourceId: existing.id, metadata: { transition } });
+
+  // Same reasoning for the automation triggers — a workflow watching "estimate approved" must fire
+  // whichever control produced the approval.
+  const AUTOMATION_BY_TARGET: Partial<Record<EstimateStatusValue, 'ESTIMATE_APPROVED' | 'ESTIMATE_DECLINED'>> = {
+    [ESTIMATE_STATUS.WON]: 'ESTIMATE_APPROVED',
+    [ESTIMATE_STATUS.DECLINED]: 'ESTIMATE_DECLINED',
+  };
+  const automationType = AUTOMATION_BY_TARGET[target];
+  if (automationType) {
+    dispatchAutomationEvent({
+      type: automationType,
+      organizationId: req.user!.organization_id,
+      entity: { type: 'estimate', id: existing.id, label: existing.estimate_number },
+      actorId: req.user?.id ?? null,
+    });
+  }
+
+  void logAudit({ req, action: 'estimate.status_corrected', resourceType: 'Estimate', resourceId: existing.id, metadata: { from: existing.status, to: target } });
 
   return { ok: true, estimate };
 }
 
 export async function setStatus(req: Request, res: Response) {
   try {
-    const { transition } = req.body as z.infer<typeof setEstimateStatusSchema>;
-    const result = await setStatusInternal(req, param(req, 'id'), transition);
+    const { transition, status, lost_reason, cancelled_reason } = req.body as z.infer<typeof setEstimateStatusSchema>;
+    // The schema guarantees exactly one of the two is present.
+    const target = status ?? STATUS_TRANSITIONS[transition!].to;
+    const result = await setStatusInternal(req, param(req, 'id'), target, transition, { lost_reason, cancelled_reason });
     if (!result.ok) {
       res.status(result.status).json({ error: result.error });
       return;
@@ -3160,7 +3345,7 @@ export async function bulkSetStatus(req: Request, res: Response) {
 
     for (const id of ids) {
       try {
-        const result = await setStatusInternal(req, id, transition);
+        const result = await setStatusInternal(req, id, STATUS_TRANSITIONS[transition].to, transition);
         if (result.ok) {
           updated.push(id);
         } else {
@@ -3190,7 +3375,7 @@ export async function approveInternal(req: Request, res: Response) {
       where: { id: param(req, 'id'), ...tenantWhere(req) },
       select: {
         id: true, status: true, estimate_number: true, lead_id: true, created_by: true,
-        lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true } },
+        lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true, status: true } },
       },
     });
 
@@ -3217,9 +3402,14 @@ export async function approveInternal(req: Request, res: Response) {
       });
 
       if (existing.lead_id) {
-        await tx.lead.updateMany({
-          where: { id: existing.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] } },
-          data: { status: 'WON' },
+        await transitionLeadStatus(tx, {
+          leadId: existing.lead_id,
+          orgId: req.user!.organization_id,
+          to: 'WON',
+          from: existing.lead!.status,
+          actorId: req.user!.id,
+          description: 'Lead won — estimate approved internally',
+          metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'internal_approval' },
         });
       }
 
@@ -3462,9 +3652,17 @@ export async function voidApproval(req: Request, res: Response) {
           },
         });
         if (siblingsStillWon === 0) {
-          await tx.lead.updateMany({
-            where: { id: existing.lead_id, status: 'WON' },
-            data: { status: 'ESTIMATED' },
+          // onlyFrom — see the sibling demotion in the status-correction door.
+          await transitionLeadStatus(tx, {
+            leadId: existing.lead_id,
+            orgId: req.user!.organization_id,
+            to: 'ESTIMATED',
+            from: existing.lead!.status,
+            actorId: req.user!.id,
+            notFrom: [],
+            onlyFrom: ['WON'],
+            description: 'Lead returned to estimated — the last won estimate had its approval voided',
+            metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'void_approval' },
           });
         }
       }
@@ -4379,7 +4577,7 @@ export async function approvePublic(req: Request, res: Response) {
         send_config: { select: { deposit_required: true, payment_methods: true } },
         organization: { select: { id: true, stripe_account_id: true, accepted_payment_methods: true, stripe_charges_enabled: true } },
         // Notification: commission_owner_id needed for entity routing.
-        lead: { select: { commission_owner_id: true } },
+        lead: { select: { commission_owner_id: true, status: true } },
       },
     });
 
@@ -4397,7 +4595,13 @@ export async function approvePublic(req: Request, res: Response) {
       res.status(400).json({ error: `Cannot approve a ${existing.status.toLowerCase()} estimate` });
       return;
     }
-    const isPaymentRetry = existing.status === 'PENDING';
+    // Keyed on the signature ON FILE, not on the status alone. Under Spec B1 staff can set PENDING
+    // by hand (PATCH /:id/status), and such a row is honestly unsigned — this route is still the
+    // only thing that ever captures a signature. Keying off `status === 'PENDING'` alone would
+    // treat a hand-set PENDING as "already signed", skip capture, and let the estimate reach WON
+    // with no consent record at all. A genuine retry (customer signed, then abandoned checkout)
+    // has signature_data set and still skips re-capture, keeping the original consent immutable.
+    const isPaymentRetry = existing.status === 'PENDING' && existing.signature_data != null;
 
     // Signature is mandatory for a first-time approval. On a retry the estimate is already
     // signed, so re-sending it is neither required nor honoured (the stored consent wins).
@@ -4478,10 +4682,18 @@ export async function approvePublic(req: Request, res: Response) {
         });
 
         // Auto-transition lead to WON (idempotent) — only when a lead exists.
+        // actorId null: this is the PUBLIC door, so there is no signed-in user to attribute the
+        // transition to. The customer approved it, and the ledger says so by naming no ServWave
+        // actor rather than by borrowing one.
         if (existing.lead_id) {
-          await tx.lead.updateMany({
-            where: { id: existing.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] } },
-            data: { status: 'WON' },
+          await transitionLeadStatus(tx, {
+            leadId: existing.lead_id,
+            orgId: existing.organization_id,
+            to: 'WON',
+            from: existing.lead!.status,
+            actorId: null,
+            description: 'Lead won — estimate approved by the customer',
+            metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'customer_approval' },
           });
         }
 
@@ -4867,7 +5079,7 @@ export async function waiveDeposit(req: Request, res: Response) {
           take: 1,
         },
         // Notification: commission_owner_id needed for entity routing.
-        lead: { select: { commission_owner_id: true } },
+        lead: { select: { commission_owner_id: true, status: true } },
       },
     });
 
@@ -4931,9 +5143,14 @@ export async function waiveDeposit(req: Request, res: Response) {
 
         // Lead → WON (idempotent) — only when a lead exists.
         if (existing.lead_id) {
-          await tx.lead.updateMany({
-            where: { id: existing.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] } },
-            data: { status: 'WON' },
+          await transitionLeadStatus(tx, {
+            leadId: existing.lead_id,
+            orgId: req.user!.organization_id,
+            to: 'WON',
+            from: existing.lead!.status,
+            actorId: req.user?.id ?? null,
+            description: 'Lead won — estimate accepted',
+            metadata: { estimate_id: existing.id, estimate_number: existing.estimate_number, via: 'accept' },
           });
         }
 
@@ -5436,5 +5653,160 @@ export async function listCreators(req: Request, res: Response) {
   } catch (err) {
     logger.error('List estimate creators error:', err);
     res.status(500).json({ error: 'Failed to list creators' });
+  }
+}
+
+// ─── Editable record ids (Workiz dual-run, SERV10X record-renumber) ──────
+
+/**
+ * Thrown INSIDE the rename transaction when a fresh, lock-protected `computeRenumber` finds
+ * conflicts, so the controller can respond 409 with the structured computation instead of
+ * guessing at the shape of `applyRenumber`'s own (plain-message) conflict error. Carrying the
+ * computation on the error also means `applyRenumber` - which re-derives and would throw for the
+ * identical reason - is never even called on the conflict path, so nothing is written.
+ */
+class RenumberConflictError extends Error {
+  constructor(public readonly computation: RenumberComputation) {
+    super(`Cannot rename estimate ${computation.parentId}: number "${computation.newNumber}" has conflicts`);
+  }
+}
+
+/** True for the `Invalid record number: ...` Error validateNumberFormat/computeRenumber throw. */
+function isInvalidNumberError(err: unknown): err is Error {
+  return err instanceof Error && err.message.startsWith('Invalid record number');
+}
+
+/**
+ * POST /:id/number/preview - read-only, no lock, no writes. Mirrors computeRenumber's own
+ * contract (advisory only): drives the (later-PR) confirmation dialog before the real rename.
+ */
+export async function previewNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.estimate.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Estimate not found' });
+      return;
+    }
+
+    // #106 - per-instance ownership (the route guard canDo('renumber') is subject-level only).
+    // Same canAccessRow gate update()/delete()/waiveDeposit()/recordEstimatePayment() already use.
+    if (!(await canAccessRow(req, 'Estimate', prisma.estimate, existing.id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    const computation = await computeRenumber(prisma, 'estimate', id, orgId, req.body.number);
+    res.json(computation);
+  } catch (err) {
+    if (isInvalidNumberError(err)) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error('Preview estimate number error:', err);
+    res.status(500).json({ error: 'Failed to preview estimate number change' });
+  }
+}
+
+/**
+ * PATCH /:id/number - the real rename. Cheap existence/ownership check OUTSIDE the transaction
+ * first (mirrors update()/waiveDeposit()'s permission -> 404 -> ownership ordering, so a request
+ * that's going to 404/403 anyway never opens a transaction); estimate has no entity-specific
+ * rename precondition (unlike invoice's isInvoiceRenumberLocked). The transaction then locks the
+ * parent row `FOR NO KEY UPDATE` - the SAME lock strength allocateAnchoredNumber already takes on
+ * the estimates table when estimate is the LogisticOrder anchor (numbering.ts), so the two code
+ * paths serialize against each other instead of deadlocking or racing - before computing/applying.
+ */
+export async function renameNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.estimate.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Estimate not found' });
+      return;
+    }
+
+    if (!(await canAccessRow(req, 'Estimate', prisma.estimate, existing.id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    let computation: RenumberComputation;
+    try {
+      computation = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT id FROM estimates WHERE id = ${id}::uuid AND organization_id = ${orgId}::uuid FOR NO KEY UPDATE`;
+
+        // Compute fresh, under the lock, BEFORE calling applyRenumber - so a conflict can be
+        // reported with the full structured computation. applyRenumber re-derives this exact
+        // same computation internally and would throw for the identical reason, so skip it
+        // entirely on the conflict path rather than calling it twice.
+        const preview = await computeRenumber(tx, 'estimate', id, orgId, req.body.number);
+        if (preview.hasConflicts) {
+          throw new RenumberConflictError(preview);
+        }
+
+        return applyRenumber(tx, 'estimate', id, orgId, req.body.number);
+      });
+    } catch (err) {
+      if (err instanceof RenumberConflictError) {
+        res.status(409).json({ error: err.message, computation: err.computation });
+        return;
+      }
+      if (isInvalidNumberError(err)) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    // Timeline + audit AFTER the transaction commits - never inside it (a rolled-back attempt
+    // must leave no trace of either).
+    await prisma.timelineEvent.create({
+      data: {
+        organization_id: orgId,
+        entity_type: 'ESTIMATE',
+        entity_id: id,
+        event_type: 'ESTIMATE_RENUMBERED',
+        description: `Estimate number changed from ${computation.oldNumber} to ${computation.newNumber}`
+          + ` (${computation.derived.length + computation.labelRefreshes.length} related record(s) updated)`,
+        metadata: {
+          old_number: computation.oldNumber,
+          new_number: computation.newNumber,
+          derived_count: computation.derived.length + computation.labelRefreshes.length,
+        },
+        created_by: req.user!.id,
+      },
+    });
+
+    void logAudit({
+      req,
+      action: 'estimate.renumbered',
+      resourceType: 'Estimate',
+      resourceId: id,
+      metadata: { old_number: computation.oldNumber, new_number: computation.newNumber },
+    });
+
+    // Built from the computation, not a re-SELECT - everything the (later-PR) frontend
+    // confirmation dialog needs, in one round trip.
+    res.json({
+      estimate: { id, estimate_number: computation.newNumber },
+      old_number: computation.oldNumber,
+      new_number: computation.newNumber,
+      derived: computation.derived,
+      label_refreshes: computation.labelRefreshes,
+    });
+  } catch (err) {
+    logger.error('Rename estimate number error:', err);
+    res.status(500).json({ error: 'Failed to change estimate number' });
   }
 }

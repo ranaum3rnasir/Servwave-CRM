@@ -11,8 +11,13 @@ import type { Task, TaskStatus } from '@/lib/tasks/types';
  * call site: it cannot see whether this file still composes the class string it
  * used to. This test closes that gap for the one component whose ink the
  * status-registry migration changed, by rendering the real component in jsdom
- * and asserting the COMPOSED className (post twMerge) for all four TaskStatus
+ * and asserting the COMPOSED className (post twMerge) for the four TaskStatus
  * values against what origin/staging rendered.
+ *
+ * PARTIAL, not total, over TaskStatus. CANCELLED did not exist when this
+ * baseline was frozen, so there is nothing it could be compared against and it
+ * is deliberately absent from both maps and from `STATUSES` below - filling one
+ * in would be inventing a baseline rather than recording one.
  *
  * Static: no browser, no dev server, no network.
  */
@@ -21,14 +26,14 @@ import type { Task, TaskStatus } from '@/lib/tasks/types';
 // git show origin/staging:frontend/src/pages/tasks/views/CalendarView.tsx
 // lines 24-29 (chip) and 17-22 (dot). Do not "tidy" these strings: they are
 // the baseline this test exists to compare against.
-const STAGING_STATUS_CHIP: Record<TaskStatus, string> = {
+const STAGING_STATUS_CHIP: Partial<Record<TaskStatus, string>> = {
   TODO: 'bg-neutral-surface text-text-primary hover:bg-neutral-strong/15',
   IN_PROGRESS: 'bg-info-surface text-info-text hover:bg-info/15',
   BLOCKED: 'bg-warning-surface text-warning-text hover:bg-warning/15',
   DONE: 'bg-success-surface text-success-text hover:bg-success/15',
 };
 
-const STAGING_STATUS_DOT: Record<TaskStatus, string> = {
+const STAGING_STATUS_DOT: Partial<Record<TaskStatus, string>> = {
   TODO: 'bg-neutral-strong',
   IN_PROGRESS: 'bg-info-strong',
   BLOCKED: 'bg-warning-strong',
@@ -83,8 +88,8 @@ function makeTask(status: TaskStatus, dueAt: string): Task {
     description: '',
     status,
     priority: 'MEDIUM',
-    owner_id: 'u1',
-    owner_name: 'Owner One',
+    assignee_ids: ['u1'],
+    assignees: [{ id: 'u1', name: 'Owner One' }],
     watcher_ids: [],
     due_at: dueAt,
     linked_entity: null,

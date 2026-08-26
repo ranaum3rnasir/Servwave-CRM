@@ -88,9 +88,20 @@ vi.mock('../lib/supabase', () => {
 // Mock CTM client — every suite sees CTM unconfigured unless it re-mocks.
 // ctm-client.test.ts vi.unmock()s this to exercise the real module.
 vi.mock('../lib/ctm/client', () => ({
+  // Mirrors the real constructor. It previously ignored its arguments and left
+  // httpStatus at 0 / reason at '', which silently disarmed every branch that
+  // discriminates on them - buy's 409 "someone else took it", release's 404
+  // "not on the account any more". A test naming such a branch passed without
+  // ever reaching it.
   CtmApiError: class CtmApiError extends Error {
-    httpStatus = 0;
-    reason = '';
+    httpStatus: number;
+    reason: string;
+    constructor(httpStatus: number, reason: string) {
+      super(`Phone system API error ${httpStatus}: ${reason}`);
+      this.name = 'CtmApiError';
+      this.httpStatus = httpStatus;
+      this.reason = reason;
+    }
   },
   isCtmConfigured: vi.fn().mockReturnValue(false),
   // Phase-0 outbound guard — defaults to "allowed" (mirrors an unset allowlist),
@@ -103,7 +114,11 @@ vi.mock('../lib/ctm/client', () => ({
   searchNumbers: vi.fn().mockResolvedValue([]),
   buyNumber: vi.fn(),
   updateNumberRouting: vi.fn(),
+  releaseNumber: vi.fn(),
   createReceivingNumber: vi.fn(),
+  // Default empty: an un-warmed roster resolves nothing, so every suite that
+  // does not opt in keeps ingesting forwarded calls exactly as it did before.
+  listReceivingNumbers: vi.fn().mockResolvedValue([]),
   addReceivingToTracking: vi.fn(),
   createVoiceMenu: vi.fn(),
   enableSms: vi.fn().mockResolvedValue('ok'),
@@ -222,11 +237,10 @@ vi.mock('../lib/email', () => ({
     fromName: null,
   }),
   // GET /api/communication/sending-identity - the same From a send would use,
-  // reported without sending. Defaults to the shared-domain shape.
+  // reported without sending. There is one shared sending domain for every org.
   orgSendingIdentity: vi.fn().mockResolvedValue({
     address: 'acmeplumbing@mail.test.com',
     name: 'Acme Plumbing',
-    customDomain: false,
     sendingEnabled: true,
     localPart: 'acmeplumbing',
     localPartIsCustom: false,
@@ -242,6 +256,10 @@ vi.mock('../lib/email', () => ({
     (name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40) ||
     'no-reply',
   senderDomainOf: () => 'mail.test.com',
+  // "Reach sales" composer (POST /api/support/sales-request). The recipient is
+  // server-owned, so the constant is exported alongside the sender.
+  SALES_CONTACT_EMAIL: 'info@servwave.com',
+  sendSalesContactEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
   sendEstimateEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
   sendEstimateWithDepositEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
   sendEstimateApprovedNotification: vi.fn().mockResolvedValue(undefined),
@@ -252,6 +270,21 @@ vi.mock('../lib/email', () => ({
   sendDepositPaidAlert: vi.fn().mockResolvedValue(undefined),
   sendPaymentMethodSelectedAlert: vi.fn().mockResolvedValue(undefined),
   sendInvoiceEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  // SRVW-243 - the customer "your visit is booked / has moved" senders, restored
+  // as a DIRECT action behind notify_customer. They resolve to an
+  // EmailDispatchResult (the pre-#1003 versions were Promise<void> with a
+  // swallowing catch) because the controller reports the outcome to the caller.
+  sendJobScheduledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendJobRescheduledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  // Multi-visit S7 (D19) - "that TRIP is off", which has no pre-S7 equivalent on either parent.
+  sendJobVisitCancelledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendWalkthroughScheduledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendWalkthroughRescheduledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  // Calendar Entries (slice 07) - the three-outcome family for customer participants.
+  // calendar-entry-notifications.test.ts re-mocks per case to prove template selection.
+  sendCalendarEntryScheduledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendCalendarEntryMovedEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
+  sendCalendarEntryCancelledEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
   sendPaymentReceivedEmail: vi.fn().mockResolvedValue(undefined),
   // Task 1.9 — co-branded action-needed email (billing.payments_action_needed /
   // billing.payments_paused), sent from handleAccountLifecycle.
@@ -261,9 +294,6 @@ vi.mock('../lib/email', () => ({
   sendPaymentsRateChangeNotice: vi.fn().mockResolvedValue(undefined),
   sendClockOverrideRequestedEmail: vi.fn().mockResolvedValue(undefined),
   sendClockOverrideDecisionEmail: vi.fn().mockResolvedValue(undefined),
-  // Email slice 10 (guided domain verification) — one-time success notice,
-  // sent to every active org ADMIN the first time a custom domain verifies.
-  sendDomainVerifiedEmail: vi.fn().mockResolvedValue(undefined),
   sendMfaCodeEmail: vi.fn().mockResolvedValue(undefined),
   sendAutomationEmail: vi.fn().mockResolvedValue({ status: 'sent' }),
   // P2 item 6: the PO sender resolves with the transmitted content so the
@@ -368,6 +398,10 @@ vi.mock('../lib/prisma', () => ({
       deleteMany: vi.fn(),
     },
     // ─── Scheduler redesign: crew/assignment M2M join tables ───
+    // `jobAssignee` OUTLIVES its Prisma model on purpose. Multi-visit S8 dropped the table, and
+    // several suites now assert that nothing writes it any more - `expect(mockPrisma.jobAssignee
+    // .createMany).not.toHaveBeenCalled()`. That assertion needs a spy to exist. Delete this
+    // block and those pins go quiet instead of failing, which is the one thing they are for.
     jobAssignee: {
       findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
@@ -414,7 +448,7 @@ vi.mock('../lib/prisma', () => ({
       deleteMany: vi.fn(),
       count: vi.fn(),
     },
-    leadWalkthroughPerformer: {
+    visitAssignee: {
       findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
       create: vi.fn(),
@@ -423,15 +457,27 @@ vi.mock('../lib/prisma', () => ({
       deleteMany: vi.fn(),
       count: vi.fn(),
     },
-    // Walkthrough-as-entity redesign, PR-B2: safe "nothing here" default so tests that don't
-    // exercise walkthrough state (most of the suite) don't need to know it exists.
-    walkthrough: {
+    // Multi-visit S1: safe "nothing here" default so tests that don't exercise visit state
+    // (most of the suite) don't need to know it exists.
+    //
+    // S3: `create` needs a ROW back, not just a resolved promise. POST /assign books a visit
+    // whenever the body carries a time and the job has none, and from S3 it reads the created
+    // row's id to land the crew on it - so an unconfigured `vi.fn()` returns undefined and 500s
+    // any suite that assigns a job without caring about visits at all (job-sub-status did).
+    visit: {
       findMany: vi.fn().mockResolvedValue([]),
+      aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
       findFirst: vi.fn(),
       findUnique: vi.fn(),
-      create: vi.fn(),
+      create: vi.fn().mockResolvedValue({ id: 'v0000000-0000-0000-0000-00000000dead', visit_seq: 1 }),
       update: vi.fn(),
-      updateMany: vi.fn(),
+      // Defaulted to "the write landed" because the visit lifecycle writers are CONDITIONAL —
+      // completeWalkthroughRow re-tests the status in its WHERE and reads `count` to answer
+      // "was I the one that landed the transition". Bare `vi.fn()` returns undefined, which
+      // would make every door that completes a visit blow up on the destructure rather than
+      // exercise the guard. A suite that wants to test the guard overrides this with an
+      // implementation that emulates Postgres — see walkthrough-completion-race.test.ts.
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       delete: vi.fn(),
       deleteMany: vi.fn(),
       count: vi.fn(),
@@ -441,6 +487,8 @@ vi.mock('../lib/prisma', () => ({
       findUnique: vi.fn(),
       findFirst: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
     },
     leadTag: {
       findUnique: vi.fn(),
@@ -539,6 +587,7 @@ vi.mock('../lib/prisma', () => ({
     },
     timelineEvent: {
       create: vi.fn(),
+      createMany: vi.fn(),
       findMany: vi.fn(),
       findFirst: vi.fn(),
       deleteMany: vi.fn(),
@@ -772,6 +821,7 @@ vi.mock('../lib/prisma', () => ({
       update: vi.fn(),
       // Task 1.5 — race-safe stripe_account_id claim (connectStripe).
       updateMany: vi.fn(),
+      count: vi.fn(),
     },
     userTablePreference: {
       findFirst: vi.fn(),
@@ -803,21 +853,27 @@ vi.mock('../lib/prisma', () => ({
     },
     // ─── Inventory models (Phase 1 OWNS these — later phases reference, never re-add) ───
     brand: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    // findMany defaults to [] so suites that never touch the new catalog dropdowns
+    // are unaffected — the item dialog's option lists simply come back empty.
+    finish: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    uomOption: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     vendor: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     vendorContact: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
     branch: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     inventoryLocation: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
-    stockBalance: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+    stockBalance: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn(), count: vi.fn(), deleteMany: vi.fn() },
     stockMovement: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), count: vi.fn() },
     purchaseOrder: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn() },
     purchaseOrderLine: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
-    rfq: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), deleteMany: vi.fn() },
+    // updateMany added for the editable-record-ids job-rename label cascade
+    // (record-renumber.ts refreshes rfqs.job_number in one batched write).
+    rfq: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     rfqLine: { create: vi.fn(), deleteMany: vi.fn() },
     rfqQuote: { create: vi.fn(), deleteMany: vi.fn() },
     estimateReservation: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     reservationLine: { create: vi.fn(), deleteMany: vi.fn() },
     inventoryEmail: { create: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
-    jobStage: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
+    jobStage: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     jobStageLine: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
     jobStageAttachment: { findFirst: vi.fn(), create: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
     stageAuditEntry: { create: vi.fn(), deleteMany: vi.fn() },
@@ -852,15 +908,6 @@ vi.mock('../lib/prisma', () => ({
     emailSuppression: {
       findFirst: vi.fn().mockResolvedValue(null), upsert: vi.fn(),
     },
-    // Email slice 10 (guided domain verification) — an org's own verified
-    // sending domain. findUnique defaults to undefined-resolved ("no custom
-    // domain configured for this org") so every OTHER suite that reaches the
-    // real dispatchEmail via vi.importActual (email-dispatch.test.ts,
-    // resend-webhook.test.ts, …) keeps using the shared EMAIL_FROM_BUSINESS
-    // address unless it explicitly opts in.
-    organizationDomain: {
-      findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn(),
-    },
     phoneNumber: {
       findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(), count: vi.fn().mockResolvedValue(0),
     },
@@ -868,7 +915,9 @@ vi.mock('../lib/prisma', () => ({
       findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), createMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), delete: vi.fn(), deleteMany: vi.fn(), count: vi.fn().mockResolvedValue(0),
     },
     pendingCallAttribution: {
-      findFirst: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
+      // findMany added for the editable-record-ids job-rename label cascade
+      // (record-renumber.ts reads every FK-linked/orphaned row before refreshing job_label).
+      findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
     },
     contact: {
       findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), deleteMany: vi.fn(),
@@ -1025,13 +1074,44 @@ vi.mock('../lib/prisma', () => ({
     },
     // ─── Tasks (B1 model, B2 API) ───
     task: {
-      findMany: vi.fn(),
+      // Defaults to "this org has no tasks". Every user-deactivation route now sweeps the task
+      // people-arrays (lib/tasks/deactivation.ts), so an unstubbed findMany would otherwise hand
+      // `undefined` to suites that have nothing to do with tasks.
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
+    },
+    // ─── Calendar Entries (Slice 02) ───
+    calendarEntry: {
+      // Slice 09 (schedule search) added a calendarEntry bucket to `scope=schedule` search,
+      // reached by several pre-existing search-*.test.ts suites that run as an admin (passes
+      // `can('read','CalendarEntry')` via `manage all`) but never mock this delegate. Without a
+      // default, those calls resolve `undefined` and 500 — `safeQuery`'s own `?? []` hardening
+      // is correct production defence, but a `[]` default here keeps that hardening PRODUCTION
+      // -only: a future bucket with a forgotten mock elsewhere fails LOUDLY (undefined does not
+      // shape-match), not silently as an empty list nobody notices. Matches the ~35 other
+      // `findMany: vi.fn().mockResolvedValue([])` delegates already in this file.
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
       count: vi.fn(),
+    },
+    calendarEntryParticipant: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
+      // Slice 07 - notified_at stamping on a successful customer email send.
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     taskSubtask: {
       findMany: vi.fn(),

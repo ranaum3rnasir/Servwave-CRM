@@ -1,4 +1,4 @@
-import type { LinkedEntity, TaskPerson, TaskPriority, Task } from './types';
+import { isTerminalTaskStatus, type LinkedEntity, type TaskPerson, type TaskPriority, type Task } from './types';
 import { assessRisk, rankMyDay, computeStats } from './tasks-logic';
 
 export interface ParseContext {
@@ -9,7 +9,13 @@ export interface ParseContext {
 
 export interface ParsedTask {
   title: string;
-  owner_id?: string;
+  /**
+   * The single person the NL parser recognised in the sentence ("remind Oved
+   * to..."), NOT a Task field - the create dialogs seed their assignee
+   * multi-select from it. Left single-valued deliberately: the parser matches
+   * one first name and multi-assignee parsing is out of scope for this change.
+   */
+  assignee_id?: string;
   due_at: string | null;
   linked_entity: LinkedEntity | null;
   priority: TaskPriority;
@@ -102,7 +108,7 @@ function parse(text: string, ctx: ParseContext): ParsedTask {
     title = text.trim();
   }
 
-  return { title, owner_id: person?.id, due_at: due, linked_entity: entity, priority };
+  return { title, assignee_id: person?.id, due_at: due, linked_entity: entity, priority };
 }
 
 function rollup(tasks: Task[], now: Date): string {
@@ -110,10 +116,12 @@ function rollup(tasks: Task[], now: Date): string {
   const parts: string[] = [];
   const lastTrend = s.trend[s.trend.length - 1];
   const doneThisWeek = lastTrend?.done ?? 0;
-  parts.push(`${doneThisWeek} task${doneThisWeek === 1 ? '' : 's'} closed this week`);
+  // "completed", not "closed": the trend line counts completions only, and now that a task can
+  // close by being cancelled the looser word would over-claim what the number describes.
+  parts.push(`${doneThisWeek} task${doneThisWeek === 1 ? '' : 's'} completed this week`);
   if (s.blocked > 0) parts.push(`${s.blocked} blocked on parts/customer`);
   const overloaded = s.byAssignee.find((a) => a.open >= 8);
-  if (overloaded) parts.push(`owner ${overloaded.userId} is overloaded (${overloaded.open} open)`);
+  if (overloaded) parts.push(`assignee ${overloaded.userId} is overloaded (${overloaded.open} open)`);
   if (s.atRisk > 0) parts.push(`${s.atRisk} at risk of slipping`);
   return parts.join('. ') + '.';
 }
@@ -135,7 +143,8 @@ function suggestTasks(jobType: string): { title: string }[] {
 }
 
 function suggestAssignee(tasks: Task[], candidateIds: string[]): { userId: string; reason: string } {
-  const openCount = (uid: string) => tasks.filter((t) => t.owner_id === uid && t.status !== 'DONE').length;
+  const openCount = (uid: string) =>
+    tasks.filter((t) => t.assignee_ids.includes(uid) && !isTerminalTaskStatus(t.status)).length;
   const ranked = [...candidateIds].sort((a, b) => openCount(a) - openCount(b));
   const pick = ranked[0] ?? '';
   return { userId: pick, reason: `lightest load (${openCount(pick)} open tasks)` };

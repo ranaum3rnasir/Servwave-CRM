@@ -80,6 +80,7 @@ import {
 } from "@/components/communication/phone/shared";
 import { getInitials } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 /* ── Minimal Web Speech API surface ──────────────────────────────
  * The browser SpeechRecognition API is not in the standard DOM lib types.
@@ -406,6 +407,7 @@ const TRAINING_OUTCOME_TONE: Record<TrainingOutcome, string> = {
 /* Training → History: who trained, on what, the score, when — filterable, with
  * a retained recording for review (PHONE-SYSTEM-PRD §14.9). */
 function TrainingHistory({ onToast }: { onToast: (m: string) => void }) {
+  const tz = useScheduleTimezone();
   const [trainee, setTrainee] = useState<string>("all");
   const [role, setRole] = useState<string>("all");
   const [outcome, setOutcome] = useState<string>("all");
@@ -741,9 +743,9 @@ function TrainingHistory({ onToast }: { onToast: (m: string) => void }) {
                       </span>
                     </td>
                     <td className="px-3 py-2.5 text-text-secondary">
-                      <p>{dayLabel(s.completedAt)}</p>
+                      <p>{dayLabel(s.completedAt, tz)}</p>
                       <p className="text-[11px] text-text-secondary">
-                        {shortTime(s.completedAt)}
+                        {shortTime(s.completedAt, tz)}
                       </p>
                     </td>
                     <td className="px-3 py-2.5 font-mono text-text-secondary">
@@ -803,6 +805,7 @@ function TrainingSessionDrawer({
   onClose: () => void;
   onToast: (m: string) => void;
 }) {
+  const tz = useScheduleTimezone();
   const trainer = s.trainerName.replace(" (AI trainer)", "");
 
   return (
@@ -855,7 +858,7 @@ function TrainingSessionDrawer({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <InfoRow label="AI trainer" value={trainer} />
               <InfoRow label="Role" value={s.traineeRole} />
-              <InfoRow label="When" value={`${dayLabel(s.completedAt)}, ${shortTime(s.completedAt)}`} />
+              <InfoRow label="When" value={`${dayLabel(s.completedAt, tz)}, ${shortTime(s.completedAt, tz)}`} />
               <InfoRow label="Length" value={clock(s.durationSec)} />
             </div>
 

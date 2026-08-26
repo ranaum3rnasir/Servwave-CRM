@@ -25,14 +25,13 @@ export interface StatusSlice {
   count: number;
 }
 
+// S4 (D17): EN_ROUTE / ON_SITE retired from JobStatus.
 const JOB_STATUS_ORDER = [
-  'UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED',
+  'UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED',
 ];
 const JOB_STATUS_LABEL: Record<string, string> = {
-  UNASSIGNED: 'Unassigned',
+  UNSCHEDULED: 'Unassigned',
   SCHEDULED: 'Scheduled',
-  EN_ROUTE: 'En route',
-  ON_SITE: 'On site',
   IN_PROGRESS: 'In progress',
   COMPLETED: 'Completed',
   CANCELLED: 'Cancelled',
@@ -216,7 +215,8 @@ export interface ScheduleJobIn {
   scope_notes: string | null;
   scheduled_start: Date | null;
   scheduled_end: Date | null;
-  assignees: { user: SchedulePerson }[];
+  // S8 (D6): the job's crew is the union across its trips; the lane shaper flattens it.
+  visits: { assignees: { user: SchedulePerson }[] }[];
   customer: ScheduleCustomer;
   service_location: ScheduleLocation | null;
 }
@@ -273,7 +273,7 @@ function scheduleAddress(loc: ScheduleLocation | null): string | null {
  *  arrives pre-sorted from Prisma. */
 export function buildScheduleLanes(
   jobs: ScheduleJobIn[],
-  walkthroughs: ScheduleWalkthroughIn[],
+  visits: ScheduleWalkthroughIn[],
 ): ScheduleLane[] {
   const techMap = new Map<string | null, ScheduleLane>();
 
@@ -296,7 +296,10 @@ export function buildScheduleLanes(
   for (const job of jobs) {
     // Crew fan-out: a multi-tech job lands in every assignee's lane (consistent
     // with the dispatch board). An empty crew falls into the Unassigned lane.
-    push(job.assignees.map((a) => a.user), {
+    // S8 (D6): the union across the job's trips, deduped so a person on two trips does not get
+    // the same card twice in their lane.
+    const crew = [...new Map(job.visits.flatMap((v) => v.assignees).map((a) => [a.user.id, a.user])).values()];
+    push(crew, {
       id: job.id,
       job_number: job.job_number,
       status: job.status,
@@ -309,7 +312,7 @@ export function buildScheduleLanes(
     });
   }
 
-  for (const wt of walkthroughs) {
+  for (const wt of visits) {
     const start = wt.walkthrough_scheduled_at;
     const end = new Date(start.getTime() + (wt.walkthrough_duration_minutes || 60) * 60_000);
     push(wt.performers, {

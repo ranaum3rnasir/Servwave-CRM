@@ -14,10 +14,10 @@ import { formatCurrency } from '@/lib/utils';
 import { KpiStrip } from '@/components/data/KpiStrip';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
-import { useActivityReport } from './activity-data';
+import { useActivityReport } from '@/lib/reports/activity-data';
 import { ActivityFilterBar } from './ActivityFilterBar';
 import { MetricDetailPanel } from './MetricDetailPanel';
 import { PersonMetricPanel } from './PersonMetricPanel';
@@ -42,7 +42,7 @@ import {
   companyRows,
   leaderboard,
   findDivision,
-} from './activity-logic';
+} from '@/lib/reports/activity-logic';
 
 /**
  * Activity — deep-dive performance surface. One engine, three zoom levels

@@ -78,7 +78,7 @@ describe('resolveDeposit', () => {
 
 describe('percent/amount conversion', () => {
   it('rounds the derived amount to cents', () => {
-    // 106.63 * 0.7 = 74.64095555550224 in float - the raw value that reached the input and the
+    // 106.63 * 0.7 = 74.64099999999999 in float - the raw value that reached the input and the
     // POST body before this helper existed.
     expect(amountFromPercent(106.63, 70)).toBe(74.64);
   });
@@ -101,7 +101,7 @@ describe('percent/amount conversion', () => {
   });
 
   it('round2 handles float noise in both directions', () => {
-    expect(round2(74.64095555550224)).toBe(74.64);
+    expect(round2(74.64099999999999)).toBe(74.64);
     expect(round2(0.1 + 0.2)).toBe(0.3);
   });
 });

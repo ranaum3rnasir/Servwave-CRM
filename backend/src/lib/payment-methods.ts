@@ -20,40 +20,30 @@ export const acceptedPaymentMethodsSchema = z
     message: 'accepted_payment_methods must not contain duplicates',
   });
 
-export class PaymentMethodsError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-    this.name = 'PaymentMethodsError';
-  }
-}
-
-export function assertAcceptedPaymentMethodsValid(
+/**
+ * CARD is SERVER-OWNED: its presence in accepted_payment_methods is derived from the org's
+ * card-payments connection (stripe_charges_enabled, mirrored from Stripe by the
+ * account.updated webhook), never from a client payload.
+ *
+ * This used to be a validator that 400'd a submission which added CARD without charges, or
+ * dropped CARD with charges live. Both rules were unenforceable in practice on the surface
+ * that submits this field: Settings -> Payments & Lists renders NO CARD toggle at all (it is
+ * filtered out of the checkbox list), yet it PATCHes the WHOLE array from the org snapshot it
+ * loaded. Any snapshot taken before charges went live - a tab left open across the webhook, a
+ * concurrent admin, a 5-minute-stale query cache - carries no CARD, so an unrelated edit
+ * (turning Venmo on) read as "disable Credit Card" and 400'd a save the user never asked for,
+ * naming a control they cannot see. Resolving instead of validating makes that class
+ * impossible: a stale array can no longer express an intent about CARD either way.
+ *
+ * Order: submitted order is preserved for everything else, CARD appended last, matching what
+ * the webhook writes ([...methods, 'CARD']).
+ */
+export function resolveAcceptedPaymentMethods(
   submitted: PaymentMethod[],
   chargesEnabled: boolean,
-  previous: PaymentMethod[],
-): void {
-  // `hasStripe` keeps the processor's name because that is what this flag actually means -
-  // Stripe Connect charges being enabled on the org's account. The MESSAGES below deliberately
-  // do not: they are returned to the API and rendered verbatim as UI toasts, and the org is
-  // never shown which processor sits behind card payments (Ran, 2026-08-04). Internal naming
-  // stays honest, user-facing copy stays about the capability.
-  const hasStripe = chargesEnabled;
-  const submittedHasCard = submitted.includes('CARD');
-  const previousHasCard = previous.includes('CARD');
-
-  if (submittedHasCard && !hasStripe) {
-    throw new PaymentMethodsError(
-      400,
-      'Cannot enable Credit Card - card payments are not connected for this organization.',
-    );
-  }
-
-  if (hasStripe && previousHasCard && !submittedHasCard) {
-    throw new PaymentMethodsError(
-      400,
-      'Credit Card cannot be disabled once card payments are connected.',
-    );
-  }
+): PaymentMethod[] {
+  const withoutCard = submitted.filter((m) => m !== 'CARD');
+  return chargesEnabled ? [...withoutCard, 'CARD'] : withoutCard;
 }
 
 export function publicCardRoute(

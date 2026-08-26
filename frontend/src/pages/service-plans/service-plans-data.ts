@@ -3,7 +3,7 @@
 // pure derive/filter/aggregate/lifecycle functions. Shapes mirror an eventual
 // GET /api/service-plans so backend wiring is a drop-in. No React here.
 // ───────────────────────────────────────────────────────────────────────────
-import { hashStr, mulberry32 } from '../reports/_shared';
+import { hashStr, mulberry32 } from '@/lib/reports/random';
 
 export type PlanStatus =
   | 'Pending approval' | 'Active' | 'Expires soon'

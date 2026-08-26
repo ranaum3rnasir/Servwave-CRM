@@ -74,3 +74,42 @@ describe('EstimateNameTitle — copy estimate number', () => {
     });
   });
 });
+
+// The pencil is the app's word for "edit this record's id" - it sits beside the number on
+// customers, leads, jobs and invoices. The estimate header used to spend it on the NAME, and
+// because an unnamed estimate displays as "Estimate <number>", the pencil appeared to belong
+// to the number while editing something else entirely. The title stays click-to-edit; only
+// the icon goes, so the pencil means one thing everywhere.
+describe('EstimateNameTitle — the pencil belongs to the number, not the name', () => {
+  it('renders no pencil icon beside the title', () => {
+    const { container } = renderWithProviders(<EstimateNameTitle {...defaultProps} />);
+    expect(container.querySelector('.lucide-pencil')).toBeNull();
+  });
+
+  it('still renames from a click on the title itself', () => {
+    renderWithProviders(<EstimateNameTitle {...defaultProps} name="Roof replacement" />);
+
+    fireEvent.click(screen.getByText('Roof replacement'));
+
+    expect(screen.getByDisplayValue('Roof replacement')).toBeInTheDocument();
+  });
+
+  it('renders the number slot the page hands it, in place of the bare number', () => {
+    renderWithProviders(
+      <EstimateNameTitle
+        {...defaultProps}
+        numberSlot={<button type="button" aria-label="Edit number">E00123</button>}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Edit number' })).toBeInTheDocument();
+  });
+
+  it('keeps the copy affordance beside the number slot', () => {
+    renderWithProviders(
+      <EstimateNameTitle {...defaultProps} numberSlot={<span>E00123</span>} />,
+    );
+
+    expect(screen.getByRole('button', { name: /copy estimate number/i })).toBeInTheDocument();
+  });
+});

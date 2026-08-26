@@ -63,8 +63,8 @@ describe('GET /api/communication/my-numbers', () => {
     p.phoneNumber.findFirst.mockResolvedValueOnce({
       id: PN_ORG_DEFAULT,
       ctm_number_id: 'TPN_ORGDEFAULT',
-      formatted: '(555) 555-0208',
-      e164: '+15555550208',
+      formatted: '(551) 282-7064',
+      e164: '+15512827064',
     });
 
     const res = await request(app)
@@ -84,7 +84,7 @@ describe('GET /api/communication/my-numbers', () => {
         {
           phone_number_id: PN_ORG_DEFAULT,
           ctm_number_id: 'TPN_ORGDEFAULT',
-          formatted: '(555) 555-0208',
+          formatted: '(551) 282-7064',
           is_org_default: true,
           is_user_default: false,
         },
@@ -100,8 +100,8 @@ describe('GET /api/communication/my-numbers', () => {
         phone_number: {
           id: PN_ORG_DEFAULT,
           ctm_number_id: 'TPN_ORGDEFAULT',
-          formatted: '(555) 555-0208',
-          e164: '+15555550208',
+          formatted: '(551) 282-7064',
+          e164: '+15512827064',
           is_org_default: true,
         },
       },
@@ -109,8 +109,8 @@ describe('GET /api/communication/my-numbers', () => {
     p.phoneNumber.findFirst.mockResolvedValueOnce({
       id: PN_ORG_DEFAULT,
       ctm_number_id: 'TPN_ORGDEFAULT',
-      formatted: '(555) 555-0208',
-      e164: '+15555550208',
+      formatted: '(551) 282-7064',
+      e164: '+15512827064',
     });
 
     const res = await request(app)
@@ -122,7 +122,7 @@ describe('GET /api/communication/my-numbers', () => {
     expect(res.body.numbers[0]).toEqual({
       phone_number_id: PN_ORG_DEFAULT,
       ctm_number_id: 'TPN_ORGDEFAULT',
-      formatted: '(555) 555-0208',
+      formatted: '(551) 282-7064',
       is_org_default: true,
       is_user_default: false,
     });
@@ -135,7 +135,7 @@ describe('GET /api/communication/my-numbers', () => {
       id: PN_ORG_DEFAULT,
       ctm_number_id: 'TPN_ORGDEFAULT',
       formatted: null,
-      e164: '+15555550208',
+      e164: '+15512827064',
     });
 
     const res = await request(app)
@@ -148,7 +148,7 @@ describe('GET /api/communication/my-numbers', () => {
         {
           phone_number_id: PN_ORG_DEFAULT,
           ctm_number_id: 'TPN_ORGDEFAULT',
-          formatted: '+15555550208', // falls back to e164 when unformatted
+          formatted: '+15512827064', // falls back to e164 when unformatted
           is_org_default: true,
           is_user_default: false,
         },

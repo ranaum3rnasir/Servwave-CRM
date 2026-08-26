@@ -189,6 +189,8 @@ describe('POST /api/communication/emails (attachments)', () => {
     expect(p.emailAttachment.create).not.toHaveBeenCalled();
   });
 
+  // text/plain used to be the example here. It is on the allowlist now (office-documents
+  // slice), so the case moved to an executable, which no widening should ever admit.
   it('400s a disallowed declared mime type', async () => {
     mockAuthAs('admin');
     const sendComposedEmail = await sentDispatch();
@@ -198,10 +200,25 @@ describe('POST /api/communication/emails (attachments)', () => {
       .set(authHeader('admin'))
       .field('to', 'angel@example.com')
       .field('body', JSON.stringify(['hi']))
-      .attach('files', Buffer.from('plain text'), { filename: 'notes.txt', contentType: 'text/plain' });
+      .attach('files', Buffer.from('MZ '), { filename: 'setup.exe', contentType: 'application/x-msdownload' });
 
     expect(res.status).toBe(400);
     expect(sendComposedEmail).not.toHaveBeenCalled();
+  });
+
+  it('accepts a CSV attachment now that documents are on the allowlist', async () => {
+    mockAuthAs('admin');
+    const sendComposedEmail = await sentDispatch();
+
+    const res = await request(app)
+      .post('/api/communication/emails')
+      .set(authHeader('admin'))
+      .field('to', 'angel@example.com')
+      .field('body', JSON.stringify(['hi']))
+      .attach('files', Buffer.from('name,qty\nfilter,2\n'), { filename: 'parts.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(201);
+    expect(sendComposedEmail).toHaveBeenCalled();
   });
 
   it('does not persist anything for a dispatch the org kill switch skipped, even with files attached', async () => {
@@ -343,7 +360,8 @@ describe('GET /api/communication/emails/attach-source', () => {
   // app. Same class of hole as the attachments/:index route above.
   it("403s a technician's lookup on a job they are not assigned to, and never queries Attachment", async () => {
     mockAuthAs('technician');
-    p.job.findUnique.mockResolvedValue({ assignees: [{ user_id: 'someone-else' }] });
+    // S8 (D6): checkEntityAccess asks "on one of its TRIPS" - `job_assignees` is gone.
+    p.job.findUnique.mockResolvedValue({ visits: [{ assignees: [{ user_id: 'someone-else' }] }] });
 
     const res = await request(app)
       .get('/api/communication/emails/attach-source')
@@ -356,7 +374,7 @@ describe('GET /api/communication/emails/attach-source', () => {
 
   it('200s a technician looking up a job they ARE assigned to', async () => {
     mockAuthAs('technician');
-    p.job.findUnique.mockResolvedValue({ assignees: [{ user_id: TEST_USERS.technician.id }] });
+    p.job.findUnique.mockResolvedValue({ visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }] });
     p.attachment.findMany.mockResolvedValue([]);
 
     const res = await request(app)

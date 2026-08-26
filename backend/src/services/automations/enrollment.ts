@@ -130,6 +130,7 @@ export async function enrollOnEvent(ev: AutomationEvent, now: Date = new Date())
         },
         entity: ev.entity,
         occurrenceKey: ev.occurrenceKey,
+        visitId: ev.visitId,
         eventPayload: ev.eventPayload,
         now,
       });
@@ -163,11 +164,13 @@ export async function createEnrollment(args: {
   };
   entity: { type: string; id: string; label?: string | null };
   occurrenceKey?: string;
+  /** Multi-visit D18: joins the dedupe key only - occurrence_key is written unchanged. */
+  visitId?: string;
   /** Whatever the triggering event captured that the live entity won't have later — see context.ts. */
   eventPayload?: EventPayload;
   now: Date;
 }): Promise<{ id: string } | null> {
-  const { workflow, entity, occurrenceKey, eventPayload, now } = args;
+  const { workflow, entity, occurrenceKey, visitId, eventPayload, now } = args;
   try {
     // Gate at the point of effect (docs/adr/0001): this is the ONE choke point
     // every enrollment path funnels through - enrollOnEvent's per-workflow loop
@@ -193,7 +196,7 @@ export async function createEnrollment(args: {
 
     // The trigger prefix is redundant under workflow scoping but harmless, and
     // it preserves the occurrence-required validation the helper enforces.
-    const dedupeKey = buildDedupeKey(workflow.trigger_type as AutomationTriggerType, entity.id, occurrenceKey);
+    const dedupeKey = buildDedupeKey(workflow.trigger_type as AutomationTriggerType, entity.id, occurrenceKey, visitId);
 
     // Cross-engine cutover guard: during a deploy overlap (or while another
     // service on the shared DB still runs the legacy engine), the OLD engine may
@@ -309,6 +312,14 @@ export async function advanceEnrollment(enrollmentId: string, now: Date = new Da
     const direction = DATE_ANCHORED_TRIGGER_TYPES.has(pinnedTrigger)
       ? (def.trigger_config as DateAnchorTriggerConfig | null)?.direction
       : undefined;
+    // Spec #1751 D8: LEAD_DATE_ANCHORED now covers four anchors with different staleness rules,
+    // so the anchor has to reach terminalStaleReason too. Read off the PINNED definition for the
+    // same reason `direction` is — judging an old enrollment by an edited workflow's anchor
+    // would corrupt the staleness logic — and computed once, so the two call sites below cannot
+    // disagree.
+    const anchor = DATE_ANCHORED_TRIGGER_TYPES.has(pinnedTrigger)
+      ? (def.trigger_config as DateAnchorTriggerConfig | null)?.anchor
+      : undefined;
 
     let cursor = enrollment.step_cursor;
 
@@ -360,7 +371,7 @@ export async function advanceEnrollment(enrollmentId: string, now: Date = new Da
           await finishEnrollment(enrollmentId, 'STOPPED', `The ${enrollment.entity_type} no longer exists`, now);
           return;
         }
-        const waitStale = terminalStaleReason(pinnedTrigger, enrollment.occurrence_key ?? undefined, loadedForWait.state, now, direction);
+        const waitStale = terminalStaleReason(pinnedTrigger, enrollment.occurrence_key ?? undefined, loadedForWait.state, now, direction, anchor);
         if (waitStale) {
           await finishEnrollment(enrollmentId, 'STOPPED', waitStale, now);
           return;
@@ -459,6 +470,7 @@ export async function advanceEnrollment(enrollmentId: string, now: Date = new Da
         loaded.state,
         now,
         direction,
+        anchor,
       );
       if (staleReason) {
         await prisma.workflowStepRun.update({ where: { id: stepRunId }, data: { status: 'STOPPED', detail: staleReason } });

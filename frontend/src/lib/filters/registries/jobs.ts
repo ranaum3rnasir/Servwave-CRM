@@ -7,7 +7,10 @@ import { TAGS_FACET, type FacetConfig } from '@/lib/filters/types';
  * duplicated inline) so the registry and the page share one definition,
  * mirroring how Task 9 moved `LEAD_STATUSES` out of `LeadsPage.tsx`.
  */
-export const JOB_STATUSES = ['UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+// Multi-visit S4 (D17): EN_ROUTE and ON_SITE retired from JobStatus and live on VisitStatus. The
+// API's jobs facet drops an unknown literal rather than 400ing, so leaving them here would offer a
+// filter option that silently matched nothing.
+export const JOB_STATUSES = ['UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 
 /**
  * Completed/Cancelled tiles show MONTHLY counts (by scheduled_start this
@@ -62,7 +65,7 @@ export const jobsRegistry: FacetConfig[] = [
     icon: 'M13 5H21 M13 12H21 M13 19H21 M3 17L5 19L9 15 M3 7L5 9L9 5',
     // Display labels come from the status registry (the single source of truth
     // for the `job` domain), not from a local map. The wire VALUE stays the
-    // Prisma enum literal - including `UNASSIGNED`, which the registry displays
+    // Prisma enum literal - including `UNSCHEDULED`, which the registry displays
     // as the ratified "Unscheduled" rename.
     options: JOB_STATUSES.map((s) => ({ value: s, label: STATUS_REGISTRY.job[s]?.label ?? s })),
   },
@@ -75,11 +78,11 @@ export const jobsRegistry: FacetConfig[] = [
     // Leads' single-person "Assigned To" icon); circle converted to a
     // two-arc path equivalent.
     icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M16 3.128a4 4 0 0 1 0 7.744 M22 21v-2a4 4 0 0 0-3-3.87 M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0',
-    // No `{value:'UNASSIGNED', label:'Unassigned'}` sentinel here (unlike
+    // No `{value:'UNSCHEDULED', label:'Unassigned'}` sentinel here (unlike
     // Leads): the Jobs backend crew block (job.controller.ts) has no
     // "none" special-case for this param — it's just a plain `user_id`
-    // equals/in filter. Passing 'UNASSIGNED' would look for a user with
-    // that literal id and match nothing. (The JOB_STATUSES `UNASSIGNED`
+    // equals/in filter. Passing 'UNSCHEDULED' would look for a user with
+    // that literal id and match nothing. (The JOB_STATUSES `UNSCHEDULED`
     // value is a *status* meaning "Unscheduled", filtered via the `status`
     // facet above — unrelated to this facet.)
     optionSource: 'assignableUsers',

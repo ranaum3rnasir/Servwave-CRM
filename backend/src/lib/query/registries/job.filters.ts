@@ -45,9 +45,13 @@ export const jobFacets: FacetDef[] = [
   // (unlike assigned_to/department_id, it does not touch the assignees relation), so it
   // carries none of the RBAC hazard documented above for the crew filters.
   { key: 'sub_status_id', kind: 'multi', param: 'sub_status_id', apply: equalsOrIn('sub_status_id') },
-  // CORRECTION: the live Job model's column is `scheduled_start` (schema.prisma, indexed) —
-  // NOT `scheduled_date`, which belongs to a different model entirely.
-  { key: 'scheduled', kind: 'dateRange', afterParam: 'scheduled_after', beforeParam: 'scheduled_before', column: 'scheduled_start' },
+  // Multi-visit S6: `scheduled_after`/`scheduled_before` are NOT a facet any more. They ask a
+  // question about the job's VISIT set ("does this job have a trip in this window?"), not about
+  // the `Job.scheduled_start` mirror, which by D14 only ever holds the NEXT upcoming visit - so a
+  // job whose second trip lands in the window was invisible to the board. The window is
+  // hand-rolled in `buildJobListWhere` (job.controller.ts) alongside the crew filters, for the
+  // same clobber-safety reason those are hand-rolled: it has to compose under AND, never assign
+  // `where.visits`, because S8 repoints the stored OWN_JOB row scope at that same relation path.
   // Not present in the pre-Task-10 hand-rolled code; added to match the Leads convention
   // (created_after/created_before -> created_at). The Job model has a created_at column, so
   // this is a safe, additive facet.

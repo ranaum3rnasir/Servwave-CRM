@@ -37,7 +37,7 @@ type FakeDevice = {
 const softphone = vi.hoisted(() => ({ current: null as null | FakeDevice }));
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   fmtPhone: (n: string) => n,
   usePhoneCustomers: () => ({ data: [] }),
   usePlaceCall: () => placeCall,
@@ -73,7 +73,7 @@ beforeEach(() => {
 
 describe("Softphone entity-context attribution (E2)", () => {
   it("posts job_id + customer_id (and only defined keys) when the prefill carries a job context", async () => {
-    render(<Softphone prefillNumber="5555550212" entityContext={JOB_CONTEXT} />);
+    render(<Softphone prefillNumber="5555550199" entityContext={JOB_CONTEXT} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
@@ -81,8 +81,8 @@ describe("Softphone entity-context attribution (E2)", () => {
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
     expect(body).toEqual({
       direction: "out",
-      from_number: "(555) 555-0208",
-      to_number: "+15555550212",
+      from_number: "(551) 282-7064",
+      to_number: "+15555550199",
       status: "ringing",
       job_id: JOB_CONTEXT.jobId,
       customer_id: JOB_CONTEXT.customerId,
@@ -98,7 +98,7 @@ describe("Softphone entity-context attribution (E2)", () => {
   it("posts lead_id and names the lead in the placed copy for a lead context", async () => {
     render(
       <Softphone
-        prefillNumber="5555550212"
+        prefillNumber="5555550199"
         entityContext={{
           leadId: "e0000000-0000-0000-0000-000000000001",
           leadLabel: "L00007",
@@ -121,15 +121,15 @@ describe("Softphone entity-context attribution (E2)", () => {
   });
 
   it("omits every attribution key and keeps the stock copy without a context", async () => {
-    render(<Softphone prefillNumber="5555550212" />);
+    render(<Softphone prefillNumber="5555550199" />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
     expect(body).toEqual({
       direction: "out",
-      from_number: "(555) 555-0208",
-      to_number: "+15555550212",
+      from_number: "(551) 282-7064",
+      to_number: "+15555550199",
       status: "ringing",
     });
 
@@ -139,7 +139,7 @@ describe("Softphone entity-context attribution (E2)", () => {
   });
 
   it("keeps the entity context when the number is edited after the prefill", async () => {
-    render(<Softphone prefillNumber="5555550212" entityContext={JOB_CONTEXT} />);
+    render(<Softphone prefillNumber="5555550199" entityContext={JOB_CONTEXT} />);
 
     // Hand-edit the dial field — the context follows the entity you dialed from,
     // NOT the exact number (editing to reach a cell is still about this job).
@@ -147,7 +147,7 @@ describe("Softphone entity-context attribution (E2)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
-    expect(body.to_number).toBe("+155555502129");
+    expect(body.to_number).toBe("+155555501999");
     expect(body.job_id).toBe(JOB_CONTEXT.jobId);
     expect(body.customer_id).toBe(JOB_CONTEXT.customerId);
 
@@ -171,7 +171,7 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
 
   it("stashes attribution (job_id + customer_id, defined keys only) BEFORE placing the WebRTC call — never the bridge", async () => {
     softphone.current = device();
-    render(<Softphone prefillNumber="5555550212" entityContext={JOB_CONTEXT} />);
+    render(<Softphone prefillNumber="5555550199" entityContext={JOB_CONTEXT} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
@@ -180,12 +180,12 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
 
     await vi.waitFor(() => expect(stashAttribution.mutateAsync).toHaveBeenCalledTimes(1));
     expect(stashAttribution.mutateAsync).toHaveBeenCalledWith({
-      to_number: "+15555550212",
+      to_number: "+15555550199",
       job_id: JOB_CONTEXT.jobId,
       customer_id: JOB_CONTEXT.customerId,
     });
 
-    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212"));
+    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199"));
     // The stash is committed before the device rings.
     const stashOrder = stashAttribution.mutateAsync.mock.invocationCallOrder[0]!;
     const callOrder = softphone.current!.call.mock.invocationCallOrder[0]!;
@@ -196,7 +196,7 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
     softphone.current = device();
     render(
       <Softphone
-        prefillNumber="5555550212"
+        prefillNumber="5555550199"
         entityContext={{
           leadId: "e0000000-0000-0000-0000-000000000001",
           leadLabel: "L00007",
@@ -211,7 +211,7 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
     await vi.waitFor(() => expect(stashAttribution.mutateAsync).toHaveBeenCalledTimes(1));
     const body = stashAttribution.mutateAsync.mock.calls[0]![0] as Record<string, unknown>;
     expect(body).toEqual({
-      to_number: "+15555550212",
+      to_number: "+15555550199",
       lead_id: "e0000000-0000-0000-0000-000000000001",
       customer_id: "c0000000-0000-0000-0000-000000000001",
     });
@@ -223,13 +223,13 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
     // browser, so this POST is the only server checkpoint before a call rings.
     // A bare-number dial must hit it too, not just entity-context dials.
     softphone.current = device();
-    render(<Softphone prefillNumber="5555550212" />);
+    render(<Softphone prefillNumber="5555550199" />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
     await vi.waitFor(() => expect(stashAttribution.mutateAsync).toHaveBeenCalledTimes(1));
-    expect(stashAttribution.mutateAsync).toHaveBeenCalledWith({ to_number: "+15555550212" });
-    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212"));
+    expect(stashAttribution.mutateAsync).toHaveBeenCalledWith({ to_number: "+15555550199" });
+    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199"));
     expect(placeCall.mutate).not.toHaveBeenCalled();
   });
 
@@ -238,7 +238,7 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
     stashAttribution.mutateAsync.mockRejectedValueOnce({
       response: { status: 409, data: { code: "NOT_IN_TEST_ALLOWLIST" } },
     });
-    render(<Softphone prefillNumber="5555550213" />);
+    render(<Softphone prefillNumber="6098745299" />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
@@ -255,17 +255,17 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
   it("still places the call when the stash fails for any non-allowlist reason (best-effort attribution)", async () => {
     softphone.current = device();
     stashAttribution.mutateAsync.mockRejectedValueOnce(new Error("stash 500"));
-    render(<Softphone prefillNumber="5555550212" entityContext={JOB_CONTEXT} />);
+    render(<Softphone prefillNumber="5555550199" entityContext={JOB_CONTEXT} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
     await vi.waitFor(() => expect(stashAttribution.mutateAsync).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212"));
+    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199"));
   });
 
   it("keeps the entity context when the number is edited — stashes the edited number", async () => {
     softphone.current = device();
-    render(<Softphone prefillNumber="5555550212" entityContext={JOB_CONTEXT} />);
+    render(<Softphone prefillNumber="5555550199" entityContext={JOB_CONTEXT} />);
 
     // Redirecting to another number (e.g. an allowlisted test line) still
     // attributes the call to the job the dialer was opened from.
@@ -274,12 +274,12 @@ describe("Softphone WebRTC softphone attribution (E2 — office softphone path)"
 
     await vi.waitFor(() => expect(stashAttribution.mutateAsync).toHaveBeenCalledTimes(1));
     expect(stashAttribution.mutateAsync).toHaveBeenCalledWith({
-      to_number: "+155555502129",
+      to_number: "+155555501999",
       job_id: JOB_CONTEXT.jobId,
       customer_id: JOB_CONTEXT.customerId,
     });
     await vi.waitFor(() =>
-      expect(softphone.current!.call).toHaveBeenCalledWith("+155555502129"),
+      expect(softphone.current!.call).toHaveBeenCalledWith("+155555501999"),
     );
   });
 });

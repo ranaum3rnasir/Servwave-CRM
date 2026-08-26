@@ -107,9 +107,7 @@ function customerInitials(c: Pick<Customer, 'first_name' | 'last_name' | 'compan
   return getInitials(name || c.company_name);
 }
 
-// Default sort for the Customers list: newest customers first (issue #420).
-// `created_at` matches the backend parseSortParams allowlist; `created` would be rejected.
-export const DEFAULT_CUSTOMERS_SORTING: SortingState = [{ id: 'created_at', desc: true }];
+import { DEFAULT_CUSTOMERS_SORTING } from '@/lib/customers/customersSorting';
 
 export const columns: ColumnDef<Customer, unknown>[] = [
   {

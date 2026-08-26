@@ -92,7 +92,7 @@ describe('resolveInboundSmsJob — best-effort recency-gated routing', () => {
           jobId: 'job-edge',
           jobLabel: 'J-1880 · 77 Elm St',
           lastOutboundAt: daysAgo(SMS_ROUTER_RECENCY_WINDOW_DAYS),
-          jobStatus: 'UNASSIGNED',
+          jobStatus: 'UNSCHEDULED',
         }),
       ],
       expected: { jobId: 'job-edge', jobLabel: 'J-1880 · 77 Elm St' },

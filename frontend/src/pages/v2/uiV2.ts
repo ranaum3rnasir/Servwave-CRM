@@ -1,49 +1,40 @@
+// Imported and re-exported rather than declared here, so the registry has one
+// owner. This module is imported by every page in this layer, so it must stay
+// free of React and of anything that reaches a page; `routes/paths.ts` globs
+// only `.paths.ts` files for exactly that reason.
+import { V2_ROUTES } from './routes/paths';
+
+export { V2_ROUTES };
+
 /**
- * The v2 presentation layer - registry and feature flag.
+ * The presentation layer's route registry.
  *
- * Every v2 page is reachable at `/v2<path>` for side-by-side comparison against
- * the original at `<path>`. Both layers are live at once; the old pages are
- * never modified.
+ * There is no longer a `/v2` prefix and no feature flag: these routes ARE the
+ * app, mounted at the bare paths (`/leads`, `/jobs`, ...). The registry stays
+ * because it is what proves each path is claimed exactly once - see
+ * `__tests__/uiV2.test.ts` and `__tests__/routeUniqueness.test.ts`.
  *
- * With `VITE_UI_V2=true`, visiting a legacy path that has a v2 counterpart
- * redirects to the v2 route, so the new layer can be exercised as if it were
- * the app. Unset the flag to roll back.
- *
- * Adding a module: append its paths to V2_ROUTES and add the matching <Route>
- * entries in V2Routes.tsx. Nothing else in the router changes.
+ * Adding a module: create `routes/<module>.paths.ts` and
+ * `routes/<module>.routes.tsx`. Both are auto-discovered, so no shared file -
+ * including this one - is edited. See `routes/README.md`.
  */
 
-/** Legacy paths that have a v2 counterpart. Route patterns, not live URLs. */
-export const V2_ROUTES: readonly string[] = [
-  // Populated per module branch, e.g. '/jobs', '/jobs/:id'.
-];
-
-/** Is the flag on? Reads at call time so tests can stub import.meta.env. */
-export function isUiV2Enabled(): boolean {
-  return import.meta.env.VITE_UI_V2 === 'true';
-}
-
 /**
- * Does `pathname` correspond to a v2 page?
+ * Does one route pattern match one pathname?
  *
  * Compares segment by segment so `:id`-style params match any single segment.
  * A pattern only matches a path with the same segment count, so `/jobs` never
  * swallows `/jobs/new`.
- */
-/**
- * Does one route pattern match one pathname?
  *
- * Exported so tests can exercise the real matcher. While V2_ROUTES is empty
- * `hasV2Page` returns false for every input, so a test written against it alone
- * cannot tell a working matcher from a broken one.
+ * Exported so tests can exercise the real matcher rather than a copy of its
+ * rules.
  */
 export function matchesPattern(pattern: string, pathname: string): boolean {
   const norm = (s: string) => s.replace(/\/+$/, '') || '/';
   // Both sides lowercased because React Router matches case-insensitively:
-  // without it, /Jobs would render the legacy page while /jobs redirected, so
-  // the flag would silently only half-apply. Patterns are normalised too - a
-  // stray trailing slash on an entry would otherwise make it unmatchable and
-  // the entry silently dead.
+  // without it, /Jobs and /jobs would disagree about whether the path is
+  // registered. Patterns are normalised too - a stray trailing slash on an
+  // entry would otherwise make it unmatchable and the entry silently dead.
   const a = norm(pattern).toLowerCase().split('/');
   const b = norm(pathname).toLowerCase().split('/');
   // Equal segment counts, so '/jobs' can never swallow '/jobs/new'.
@@ -51,6 +42,32 @@ export function matchesPattern(pattern: string, pathname: string): boolean {
   return a.every((seg, i) => seg.startsWith(':') || seg === b[i]);
 }
 
+/** Is `pathname` a path this layer declares a route for? */
 export function hasV2Page(pathname: string): boolean {
   return V2_ROUTES.some((pattern) => matchesPattern(pattern, pathname));
+}
+
+/**
+ * NO-OP SHIMS, KEPT DELIBERATELY.
+ *
+ * Both functions used to rewrite a path into the parallel `/v2` URL space. That
+ * space is gone - this layer owns the bare paths - so the correct return value
+ * for both is now the path they were handed, unchanged.
+ *
+ * They are kept rather than inlined because there are 62 non-test files calling
+ * them. Deleting them means editing every one of those files to unwrap an
+ * argument, which is a very large diff for exactly zero behaviour change, and a
+ * very large diff is where a real mistake hides. A caller reads the same either
+ * way: `navigate(v2Path('/jobs/1'))` goes to `/jobs/1`.
+ *
+ * If they are ever removed, remove them mechanically and in a commit that does
+ * nothing else.
+ */
+export function v2Path(pathname: string): string {
+  return pathname;
+}
+
+/** See `v2Path` - a no-op shim, kept for its 62 call sites. */
+export function preferV2Path(url: string): string {
+  return url;
 }

@@ -3,9 +3,12 @@ import { screen } from '@testing-library/react';
 import api from '@/lib/axios';
 import { renderWithProviders, LEAD_FIXTURE } from './helpers';
 import { buildAbility } from '@/lib/ability';
-import LeadDetailPage from '@/pages/LeadDetailPage';
+import LeadDetailPage from '@/pages/v2/leads/LeadDetailPage';
 
-// Appearance matrix for the walkthrough tab-trigger dot on LeadDetailPage.
+// Appearance matrix for the walkthrough tab-trigger dot on the ROUTED lead detail page
+// (`pages/v2/leads/LeadDetailPage`, the one `/leads/:id` mounts). This file used to import
+// the unrouted `pages/LeadDetailPage`, so the whole matrix ran against a page no user could
+// open while its routed twin was free to drift.
 //
 // Walkthrough-as-entity redesign, PR-C2: WALKTHROUGH_SCHEDULED left LeadStatus, so the dot no
 // longer reads lead.status AT ALL - it is driven purely by three independent, current-visit-
@@ -83,17 +86,17 @@ const MATRIX: Array<[
   cancelledAt: string | null,
   expected: string,
 ]> = [
-  [null, null, null, 'bg-neutral-border'],
+  [null, null, null, 'bg-muted'],
   // Actively scheduled: the only combination that reads info.
-  [STAMPED, null, null, 'bg-info-strong'],
+  [STAMPED, null, null, 'bg-status-blue'],
   // Completed always wins, whether or not scheduledAt is also (still) set.
-  [null, STAMPED, null, 'bg-success-strong'],
-  [STAMPED, STAMPED, null, 'bg-success-strong'],
+  [null, STAMPED, null, 'bg-status-green'],
+  [STAMPED, STAMPED, null, 'bg-status-green'],
   // The regression guard: cancelledAt must exclude scheduledAt from reading as
   // still-scheduled. A CANCELLED visit keeps scheduled_at set (D15 history), so
   // this is the exact shape the backend actually projects for one.
-  [STAMPED, null, STAMPED, 'bg-neutral-border'],
-  [null, null, STAMPED, 'bg-neutral-border'],
+  [STAMPED, null, STAMPED, 'bg-muted'],
+  [null, null, STAMPED, 'bg-muted'],
 ];
 
 function mockLead(scheduledAt: string | null, completedAt: string | null, cancelledAt: string | null) {
@@ -128,7 +131,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('LeadDetailPage walkthrough dot', () => {
+describe('v2 LeadDetailPage walkthrough dot', () => {
   it.each(MATRIX)(
     'scheduledAt %s, completedAt %s, cancelledAt %s renders %s',
     async (scheduledAt, completedAt, cancelledAt, expected) => {

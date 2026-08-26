@@ -56,7 +56,7 @@ function leadWithEstimate(performerIds: string[] = []) {
     // A walkthrough performer (OWN_WALKTHROUGH) is how a TECHNICIAN reaches the walkthrough
     // write path (perform_walkthrough); for the PATCH path the tech is given a per-user
     // `update Lead` (own-scoped) override and is also a lead_assignee (see existingForTechnician).
-    walkthrough_performers: performerIds.map((id) => ({
+    visit_assignees: performerIds.map((id) => ({
       user_id: id,
       user: { id, first_name: 'Test', last_name: 'Tech', email: 'tech@test.com' },
     })),
@@ -79,7 +79,7 @@ function existingForTechnician() {
   return {
     ...LEAD_FIXTURE,
     lead_assignees: [{ user_id: TEST_USERS.sales.id }],
-    walkthrough_performers: [{ user_id: TEST_USERS.technician.id }],
+    visit_assignees: [{ user_id: TEST_USERS.technician.id }],
   };
 }
 
@@ -94,7 +94,7 @@ beforeEach(() => {
   (prisma.timelineEvent.create as any).mockResolvedValue({});
   // Walkthrough-as-entity redesign, PR-B2: default to "no current visit" so
   // updateWalkthrough's extra Walkthrough-row write is a no-op unless a test opts in.
-  (prisma.walkthrough.findMany as any).mockResolvedValue([]);
+  (prisma.visit.findMany as any).mockResolvedValue([]);
   // updateWalkthrough now wraps its write in a $transaction — hand the same mocked `prisma`
   // object back as `tx` so mockPrisma.lead.update/walkthrough.update keep working transparently.
   (prisma.$transaction as any).mockImplementation((fn: (tx: unknown) => Promise<unknown>) => fn(prisma));

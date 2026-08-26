@@ -107,7 +107,12 @@ export function ImportCSVDialog({ open, onClose, onImport }: Props) {
 
   function buildItems(): NewItem[] {
     if (!parsed || !mapping) return [];
-    const kindAllowed = new Set(["material", "service", "labor", "bundle", "fee"]);
+    // Item Kind is material|service. The three retired tokens are still ACCEPTED
+    // from a CSV - a spreadsheet written last month should not fail to import -
+    // but they land on `service`, which is how all three already billed. Any
+    // other value keeps the long-standing "material" fallback below.
+    const RETIRED_KINDS: Record<string, string> = { labor: "service", bundle: "service", fee: "service" };
+    const kindAllowed = new Set(["material", "service"]);
     return parsed.rows.map((r) => {
       const get = (k: keyof Mapping) =>
         mapping[k] ? r[mapping[k] as string] ?? "" : "";
@@ -119,7 +124,7 @@ export function ImportCSVDialog({ open, onClose, onImport }: Props) {
         name: get("name").trim() || "Unnamed Item",
         category: get("category").trim() || "Uncategorized",
         trade: "general",
-        kind: kindAllowed.has(kind) ? kind : "material",
+        kind: RETIRED_KINDS[kind] ?? (kindAllowed.has(kind) ? kind : "material"),
         uom: get("uom").trim() || "EA",
         unitCost: parseFloat(get("unitCost")) || 0,
         sellPrice: parseFloat(get("sellPrice")) || 0,
@@ -402,7 +407,7 @@ HVC-CAP-30-5,Run Capacitor 30/5 MFD,Capacitors,EA,9.50,32.00,Ferguson HVAC`}
             />
             <span className="text-text-primary">
               <strong>AI auto-categorize</strong> on import — fills missing
-              categories from item name + vendor (PRD §8.1.4 Catalog Ingestion).
+              categories from item name + vendor.
               <span className="ml-1 text-primary">
                 Review queue opens after import.
               </span>

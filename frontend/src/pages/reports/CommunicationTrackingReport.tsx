@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { FlaskConical, Download } from 'lucide-react';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { toCSV, downloadCSV } from '@/lib/csv';
-import { useCommunicationTrackingReport } from './communication-tracking-data';
+import { useCommunicationTrackingReport } from '@/lib/reports/communication-tracking-data';
 import { CadenceTab } from './comm-tracking/CadenceTab';
 import { QaTab } from './comm-tracking/QaTab';
 import { TrainingImpactTab } from './comm-tracking/TrainingImpactTab';

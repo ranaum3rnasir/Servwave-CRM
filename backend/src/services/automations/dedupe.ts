@@ -36,16 +36,49 @@ export function isOccurrenceScoped(trigger: AutomationTriggerType): boolean {
   return OCCURRENCE_SCOPED.has(trigger);
 }
 
+/**
+ * Multi-visit D18: when the CALLER supplies a visit id, it is spliced between
+ * the entity id and the occurrence. Keyed on the parent job alone, visit 2's
+ * "scheduled" notification is swallowed by the [workflow_id, dedupe_key] unique
+ * constraint as a duplicate of visit 1's - the exact swallow D18 names.
+ *
+ * Scoping is driven purely by whether the dispatch site has a visit id. No
+ * member is added to OCCURRENCE_SCOPED and no second set exists, so this helper
+ * gains NO new way to throw. That matters: the throw is swallowed by
+ * createEnrollment's catch, which logs at warn and returns null, i.e. the
+ * automation silently stops firing. The cron and the date-anchor sweep never
+ * pass a visit id, so BEFORE_JOB_START / *_DATE_ANCHORED are untouched by
+ * construction.
+ *
+ * The visit id goes ONLY here, never into occurrence_key. stopIf.ts and
+ * terminalStale.ts compare occurrence_key against someDate.toISOString() and,
+ * on a mismatch, return a stale-reason rather than erroring - widening that
+ * format would quietly kill every anchored wait. rearmAnchoredWaits writes
+ * occurrence_key and never dedupe_key, so it cannot clobber this either.
+ *
+ * REJECTED, and why - no data migration rewrites the two persisted ledgers
+ * (workflow_enrollments.dedupe_key and automation_runs.dedupe_key):
+ *  1. A dual probe (check the old job-only key as well) would suppress exactly
+ *     the visit-2 enrollment D18 exists to create. It defeats the change.
+ *  2. A rewrite migration is unnecessary. Every visit-scoped trigger's
+ *     occurrence is either a freshly minted millisecond stamp (JOB_EN_ROUTE =
+ *     en_route_at, JOB_RESCHEDULED = the new start) or already guarded
+ *     once-per-job by a persisted column (JOB_SCHEDULED via
+ *     Job.customer_scheduled_email_sent_at). So a historical row that stops
+ *     colliding has nothing left that would re-dispatch it.
+ */
 export function buildDedupeKey(
   trigger: AutomationTriggerType,
   entityId: string,
   occurrence?: string,
+  visitId?: string,
 ): string {
+  const scope = visitId ? `${entityId}:${visitId}` : entityId;
   if (OCCURRENCE_SCOPED.has(trigger)) {
     if (!occurrence) {
       throw new Error(`buildDedupeKey: trigger ${trigger} requires an occurrence key`);
     }
-    return `${trigger}:${entityId}:${occurrence}`;
+    return `${trigger}:${scope}:${occurrence}`;
   }
-  return `${trigger}:${entityId}`;
+  return `${trigger}:${scope}`;
 }

@@ -19,7 +19,7 @@ const stashAttribution = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   fmtPhone: (n: string) => n,
   usePhoneCustomers: () => ({ data: [] }),
   usePlaceCall: () => placeCall,
@@ -72,11 +72,11 @@ describe("Softphone dials from the resolved caller-ID number (Task B2)", () => {
       formatted: "(609) 555-0100",
     };
 
-    render(<Softphone prefillNumber="5555550212" surface="phone-tab" />);
+    render(<Softphone prefillNumber="5555550199" surface="phone-tab" />);
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
     await vi.waitFor(() =>
-      expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212", "TPN123"),
+      expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199", "TPN123"),
     );
   });
 
@@ -95,12 +95,12 @@ describe("Softphone dials from the resolved caller-ID number (Task B2)", () => {
     softphone.current = { call: vi.fn(), hangup: vi.fn(), mute: vi.fn(), ready: true };
     myOutboundNumber.current = { none: true };
 
-    render(<Softphone prefillNumber="5555550212" surface="phone-tab" />);
+    render(<Softphone prefillNumber="5555550199" surface="phone-tab" />);
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
-    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212"));
+    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199"));
     expect(softphone.current!.call).not.toHaveBeenCalledWith(
-      "+15555550212",
+      "+15555550199",
       expect.anything(),
     );
   });
@@ -109,9 +109,9 @@ describe("Softphone dials from the resolved caller-ID number (Task B2)", () => {
     softphone.current = { call: vi.fn(), hangup: vi.fn(), mute: vi.fn(), ready: true };
     myOutboundNumber.current = null; // still loading
 
-    render(<Softphone prefillNumber="5555550212" surface="phone-tab" />);
+    render(<Softphone prefillNumber="5555550199" surface="phone-tab" />);
     await userEvent.click(screen.getByRole("button", { name: "Call" }));
 
-    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550212"));
+    await vi.waitFor(() => expect(softphone.current!.call).toHaveBeenCalledWith("+15555550199"));
   });
 });

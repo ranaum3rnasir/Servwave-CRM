@@ -5,9 +5,9 @@ import { MOCK_PEOPLE, MOCK_ENTITIES, MOCK_NOW, MOCK_TASKS } from '@/lib/tasks/ta
 const ctx = { people: MOCK_PEOPLE, entities: MOCK_ENTITIES, now: MOCK_NOW };
 
 describe('taskAI.parse', () => {
-  it('extracts owner, due date, linked job, and title', () => {
+  it('extracts assignee, due date, linked job, and title', () => {
     const p = taskAI.parse('remind Priya to order glass for the Limon job by Friday', ctx);
-    expect(p.owner_id).toBe('u_priya');
+    expect(p.assignee_id).toBe('u_priya');
     expect(p.linked_entity?.id).toBe('L00021');
     expect(p.due_at).not.toBeNull();
     expect(new Date(p.due_at!).getUTCDay()).toBe(5);
@@ -23,7 +23,7 @@ describe('taskAI.parse', () => {
 
   it('falls back to a plain title when nothing matches', () => {
     const p = taskAI.parse('tidy the storage room', ctx);
-    expect(p.owner_id).toBeUndefined();
+    expect(p.assignee_id).toBeUndefined();
     expect(p.due_at).toBeNull();
     expect(p.title).toBe('tidy the storage room');
   });

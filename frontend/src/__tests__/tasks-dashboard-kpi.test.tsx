@@ -27,7 +27,9 @@ vi.mock('@/stores/tasksStore', () => {
   // Inlined inside the hoisted factory (no top-level refs allowed).
   const base = {
     task_number: 'T00001', title: 'x', description: '',
-    priority: 'MEDIUM' as const, owner_id: 'u1', watcher_ids: [] as string[],
+    priority: 'MEDIUM' as const,
+    assignee_ids: ['u1'], assignees: [{ id: 'u1', name: 'Uno One' }],
+    watcher_ids: [] as string[],
     due_at: null, linked_entity: null, tags: [] as string[], subtasks: [],
     created_by: 'u1', created_at: '2026-06-01T00:00:00.000Z',
     updated_at: '2026-06-05T12:00:00.000Z', completed_at: null,

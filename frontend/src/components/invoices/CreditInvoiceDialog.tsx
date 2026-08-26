@@ -1,12 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
+import { Modal } from '@/components/ui/modal';
+import { GiveBackLedger, EMPTY } from '@/components/invoices/GiveBackLedger';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -99,189 +94,188 @@ export function CreditInvoiceDialog({
   const ledger = credits ?? [];
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md" data-testid="credit-invoice-dialog">
-        <DialogHeader>
-          <DialogTitle>Issue Credit</DialogTitle>
-          <DialogDescription>
-            Apply a credit / give-back to this invoice.
-          </DialogDescription>
-        </DialogHeader>
+    <Modal
+      open={open}
+      onClose={() => onOpenChange(false)}
+      title="Issue Credit"
+      subtitle="Apply a credit / give-back to this invoice."
+      width="sm"
+      data-testid="credit-invoice-dialog"
+      footer={
+        <>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            data-testid="credit-invoice-submit"
+            onClick={() => mutation.mutate()}
+            disabled={amountInvalid || !reason.trim() || mutation.isPending}
+          >
+            {mutation.isPending ? 'Processing...' : 'Issue Credit'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <GiveBackLedger
+          rows={ledger}
+          columns={[
+            {
+              key: 'date',
+              label: 'Date',
+              render: (c) => (
+                <span className="whitespace-nowrap">
+                  {c.created_at ? new Date(c.created_at).toLocaleDateString('en-US') : EMPTY}
+                </span>
+              ),
+            },
+            {
+              key: 'amount',
+              label: 'Amount',
+              numeric: true,
+              render: (c) => (
+                <span className="text-success-text">{formatCurrency(Number(c.amount))}</span>
+              ),
+            },
+            { key: 'category', label: 'Category', render: (c) => c.category || EMPTY },
+            {
+              key: 'reason',
+              label: 'Reason',
+              render: (c) => <span className="block max-w-[10rem] truncate">{c.reason || EMPTY}</span>,
+            },
+          ]}
+        />
 
-        <div className="space-y-4">
-          {ledger.length > 0 && (
-            <div className="rounded-lg border border-border/50 overflow-hidden">
-              <table className="w-full text-xs">
-                <thead className="bg-background-light/50">
-                  <tr className="text-left text-text-secondary">
-                    <th className="px-2 py-1.5 font-medium">Date</th>
-                    <th className="px-2 py-1.5 font-medium text-right">Amount</th>
-                    <th className="px-2 py-1.5 font-medium">Category</th>
-                    <th className="px-2 py-1.5 font-medium">Reason</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/50">
-                  {ledger.map((c) => (
-                    <tr key={c.id}>
-                      <td className="px-2 py-1.5 whitespace-nowrap">
-                        {c.created_at ? new Date(c.created_at).toLocaleDateString('en-US') : '—'}
-                      </td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-success-text">
-                        {formatCurrency(Number(c.amount))}
-                      </td>
-                      <td className="px-2 py-1.5">{c.category || '—'}</td>
-                      <td className="px-2 py-1.5 truncate max-w-[10rem]">{c.reason || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        <div className="flex gap-2 rounded-lg border border-info-border bg-info-surface p-3 text-sm text-info-text">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          {!refundInstead ? (
+            <span>
+              Credits apply to the outstanding balance first
+              {balanceOwed > 0 && <> ({formatCurrency(balanceOwed)} owed)</>}; any excess is
+              refunded to {method ? method.replace('_', ' ').toLowerCase() : 'the chosen method'}.
+            </span>
+          ) : reopenBalance ? (
+            <span>
+              The full amount goes back as cash and returns to the balance: the customer will owe{' '}
+              {formatCurrency(balanceOwed + safeAmount)}, and
+              the invoice reopens as unpaid.
+            </span>
+          ) : (
+            <span>
+              The full amount goes back as cash. The {formatCurrency(balanceOwed)} balance still
+              owed is unchanged - the give-back is recorded as a write-off credit so the invoice
+              still balances.
+            </span>
           )}
-
-          <div className="flex gap-2 rounded-lg border border-info-border bg-info-surface p-3 text-sm text-info-text">
-            <Info className="mt-0.5 h-4 w-4 shrink-0" />
-            {!refundInstead ? (
-              <span>
-                Credits apply to the outstanding balance first
-                {balanceOwed > 0 && <> ({formatCurrency(balanceOwed)} owed)</>}; any excess is
-                refunded to {method ? method.replace('_', ' ').toLowerCase() : 'the chosen method'}.
-              </span>
-            ) : reopenBalance ? (
-              <span>
-                The full amount goes back as cash and returns to the balance: the customer will owe{' '}
-                {formatCurrency(balanceOwed + safeAmount)}, and
-                the invoice reopens as unpaid.
-              </span>
-            ) : (
-              <span>
-                The full amount goes back as cash. The {formatCurrency(balanceOwed)} balance still
-                owed is unchanged - the give-back is recorded as a write-off credit so the invoice
-                still balances.
-              </span>
-            )}
-          </div>
-
-          <div>
-            <Label>Amount *</Label>
-            <Input
-              type="number"
-              data-testid="credit-amount-input"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              min={0.01}
-              step={0.01}
-              placeholder="0.00"
-            />
-            {amountInvalid && amount.trim() !== '' && (
-              <p className="text-xs text-danger mt-1">Enter a positive amount.</p>
-            )}
-            {refundInstead ? (
-              <p className="text-xs text-text-secondary mt-1">
-                {formatCurrency(safeAmount)} refunded as cash · nothing credited to the balance.
-              </p>
-            ) : (
-              excess > 0 && (
-                <p className="text-xs text-text-secondary mt-1">
-                  {formatCurrency(balanceOwed)} credited · {formatCurrency(excess)} refunded as excess.
-                </p>
-              )
-            )}
-          </div>
-
-          <div>
-            <Label>Category</Label>
-            <Input
-              type="text"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              placeholder="e.g. goodwill, adjustment (optional)"
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="credit-refund-instead"
-              data-testid="credit-refund-instead"
-              checked={refundInstead}
-              onCheckedChange={(checked) => handleRefundInsteadChange(Boolean(checked))}
-            />
-            <Label htmlFor="credit-refund-instead" className="cursor-pointer">
-              Send the money back as cash instead of crediting the balance
-            </Label>
-          </div>
-
-          {refundInstead && balanceOwed > 0 && (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="credit-reopen-balance"
-                data-testid="credit-reopen-balance"
-                checked={reopenBalance}
-                onCheckedChange={(checked) => setReopenBalance(Boolean(checked))}
-              />
-              <Label htmlFor="credit-reopen-balance" className="cursor-pointer">
-                Put the refunded amount back on the customer&apos;s balance (payment reversal)
-              </Label>
-            </div>
-          )}
-
-          {showMethod && (
-            <div>
-              <Label>Refund method</Label>
-              <SelectField
-                aria-label="Refund method"
-                value={method || 'NONE'}
-                onValueChange={(v) => setMethod(v === 'NONE' ? '' : (v as PaymentMethod))}
-                className="w-full h-9"
-                options={[
-                  { value: 'NONE', label: 'Select a method...' },
-                  ...PAYMENT_METHODS.map((m) => ({ value: m.value, label: m.label })),
-                ]}
-              />
-            </div>
-          )}
-
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="credit-non-taxable"
-              checked={nonTaxableConcession}
-              onCheckedChange={(checked) => setNonTaxableConcession(Boolean(checked))}
-            />
-            <Label htmlFor="credit-non-taxable" className="cursor-pointer">
-              Non-taxable concession (do not reverse tax)
-            </Label>
-          </div>
-
-          <div>
-            <Label>Reason *</Label>
-            <Textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              rows={3}
-              placeholder="Provide details about this credit..."
-              maxLength={500}
-            />
-          </div>
-
-          {mutation.error && (
-            <p className="text-sm text-danger">
-              {extractApiError(mutation.error, 'Failed to issue credit')}
-            </p>
-          )}
-
-          <div className="flex justify-end gap-3">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button
-              data-testid="credit-invoice-submit"
-              onClick={() => mutation.mutate()}
-              disabled={amountInvalid || !reason.trim() || mutation.isPending}
-            >
-              {mutation.isPending ? 'Processing...' : 'Issue Credit'}
-            </Button>
-          </div>
         </div>
-      </DialogContent>
-    </Dialog>
+
+        <div>
+          <Label>Amount *</Label>
+          <Input
+            type="number"
+            data-testid="credit-amount-input"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            min={0.01}
+            step={0.01}
+            placeholder="0.00"
+          />
+          {amountInvalid && amount.trim() !== '' && (
+            <p className="text-xs text-danger mt-1">Enter a positive amount.</p>
+          )}
+          {refundInstead ? (
+            <p className="text-xs text-text-secondary mt-1">
+              {formatCurrency(safeAmount)} refunded as cash · nothing credited to the balance.
+            </p>
+          ) : (
+            excess > 0 && (
+              <p className="text-xs text-text-secondary mt-1">
+                {formatCurrency(balanceOwed)} credited · {formatCurrency(excess)} refunded as excess.
+              </p>
+            )
+          )}
+        </div>
+
+        <div>
+          <Label>Category</Label>
+          <Input
+            type="text"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="e.g. goodwill, adjustment (optional)"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="credit-refund-instead"
+            data-testid="credit-refund-instead"
+            checked={refundInstead}
+            onCheckedChange={(checked) => handleRefundInsteadChange(Boolean(checked))}
+          />
+          <Label htmlFor="credit-refund-instead" className="cursor-pointer">
+            Send the money back as cash instead of crediting the balance
+          </Label>
+        </div>
+
+        {refundInstead && balanceOwed > 0 && (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="credit-reopen-balance"
+              data-testid="credit-reopen-balance"
+              checked={reopenBalance}
+              onCheckedChange={(checked) => setReopenBalance(Boolean(checked))}
+            />
+            <Label htmlFor="credit-reopen-balance" className="cursor-pointer">
+              Put the refunded amount back on the customer&apos;s balance (payment reversal)
+            </Label>
+          </div>
+        )}
+
+        {showMethod && (
+          <div>
+            <Label>Refund method</Label>
+            <SelectField
+              aria-label="Refund method"
+              value={method || 'NONE'}
+              onValueChange={(v) => setMethod(v === 'NONE' ? '' : (v as PaymentMethod))}
+              className="w-full h-9"
+              options={[
+                { value: 'NONE', label: 'Select a method...' },
+                ...PAYMENT_METHODS.map((m) => ({ value: m.value, label: m.label })),
+              ]}
+            />
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="credit-non-taxable"
+            checked={nonTaxableConcession}
+            onCheckedChange={(checked) => setNonTaxableConcession(Boolean(checked))}
+          />
+          <Label htmlFor="credit-non-taxable" className="cursor-pointer">
+            Non-taxable concession (do not reverse tax)
+          </Label>
+        </div>
+
+        <div>
+          <Label>Reason *</Label>
+          <Textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={3}
+            placeholder="Provide details about this credit..."
+            maxLength={500}
+          />
+        </div>
+
+        {mutation.error && (
+          <p className="text-sm text-danger">
+            {extractApiError(mutation.error, 'Failed to issue credit')}
+          </p>
+        )}
+      </div>
+    </Modal>
   );
 }

@@ -177,7 +177,7 @@ export function AddVendorDialog({
         onClose();
       }}
       title="Add New Vendor"
-      subtitle="Creates a new vendor in your master vendor list (PRD §7.6)."
+      subtitle="Creates a new vendor in your master vendor list."
       size="lg"
       footer={
         <>

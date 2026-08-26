@@ -76,3 +76,67 @@ describe('sniffMatchesDeclared', () => {
     expect(sniffMatchesDeclared(webp, 'image/webp', LOGO)).toBe(false);
   });
 });
+
+// ── Documents (docx/xlsx/pptx, legacy Office, csv/txt) ──────────────────────
+//
+// The office formats are containers, not distinct signatures: every OOXML file is a ZIP
+// and every legacy Office file is an OLE2 compound document, so the bytes can say
+// "this is a zip" but never "this is specifically a .xlsx". Sniffing therefore
+// authenticates the CONTAINER and the declared type must belong to that container's
+// family. csv/txt have no signature at all and are validated as text instead.
+const DOCS = [
+  ...ATTACH,
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+  'text/csv', 'text/plain',
+] as const;
+
+const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+const zip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('[Content_Types].xml')]);
+const emptyZip = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+const ole2 = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+const csv = Buffer.from('name,qty\nfilter,2\n');
+const utf8Text = Buffer.from('Évaluation du système septique — 12 Elm St\n');
+const binaryJunk = Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]);
+
+describe('sniffMime — document containers', () => {
+  it('detects the ZIP and OLE2 containers', () => {
+    expect(sniffMime(zip)).toBe('application/zip');
+    expect(sniffMime(emptyZip)).toBe('application/zip');
+    expect(sniffMime(ole2)).toBe('application/x-ole-storage');
+  });
+});
+
+describe('sniffMatchesDeclared — documents', () => {
+  it('accepts docx/xlsx/pptx bytes against their declared OOXML type', () => {
+    expect(sniffMatchesDeclared(zip, DOCX, DOCS)).toBe(true);
+    expect(sniffMatchesDeclared(zip, XLSX, DOCS)).toBe(true);
+  });
+  it('accepts legacy .doc/.xls (OLE2) against their declared type', () => {
+    expect(sniffMatchesDeclared(ole2, 'application/msword', DOCS)).toBe(true);
+    expect(sniffMatchesDeclared(ole2, 'application/vnd.ms-excel', DOCS)).toBe(true);
+  });
+  it('accepts csv/plain text, which have no signature to sniff', () => {
+    expect(sniffMatchesDeclared(csv, 'text/csv', DOCS)).toBe(true);
+    expect(sniffMatchesDeclared(utf8Text, 'text/plain', DOCS)).toBe(true);
+  });
+  it('rejects binary bytes declared as text — the text path is not a bypass', () => {
+    expect(sniffMatchesDeclared(binaryJunk, 'text/csv', DOCS)).toBe(false);
+    expect(sniffMatchesDeclared(zip, 'text/csv', DOCS)).toBe(false);
+  });
+  it('does not let a ZIP masquerade as an image, a PDF, or a legacy Office file', () => {
+    expect(sniffMatchesDeclared(zip, 'image/png', DOCS)).toBe(false);
+    expect(sniffMatchesDeclared(zip, 'application/pdf', DOCS)).toBe(false);
+    expect(sniffMatchesDeclared(zip, 'application/msword', DOCS)).toBe(false);
+    expect(sniffMatchesDeclared(ole2, DOCX, DOCS)).toBe(false);
+  });
+  it('keeps documents off the allowlists that never listed them', () => {
+    expect(sniffMatchesDeclared(zip, DOCX, ATTACH)).toBe(false);
+    expect(sniffMatchesDeclared(csv, 'text/csv', LOGO)).toBe(false);
+    expect(sniffMatchesDeclared(ole2, 'application/msword', AVATAR)).toBe(false);
+  });
+});

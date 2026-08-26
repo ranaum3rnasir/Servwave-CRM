@@ -74,9 +74,9 @@ describe('GET /api/jobs/stats — counts are row-scoped, not org-wide (GAP-3)', 
     const res = await request(app).get('/api/jobs/stats').set(authHeader('technician'));
 
     expect(res.status).toBe(200);
-    // Seven per-status counts (Spec B1 added EN_ROUTE/ON_SITE); EACH must be scoped to the
+    // Five per-status counts (S4 D17 retired EN_ROUTE/ON_SITE); EACH must be scoped to the
     // requester's own jobs.
-    expect(mockPrisma.job.count).toHaveBeenCalledTimes(7);
+    expect(mockPrisma.job.count).toHaveBeenCalledTimes(5);
     for (const call of mockPrisma.job.count.mock.calls) {
       const where = call[0].where as Record<string, unknown>;
       // org filter still present…
@@ -92,7 +92,7 @@ describe('GET /api/jobs/stats — counts are row-scoped, not org-wide (GAP-3)', 
     const res = await request(app).get('/api/jobs/stats').set(authHeader('admin'));
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.job.count).toHaveBeenCalledTimes(7);
+    expect(mockPrisma.job.count).toHaveBeenCalledTimes(5);
     for (const call of mockPrisma.job.count.mock.calls) {
       const where = call[0].where as Record<string, unknown>;
       expect(where.organization_id).toBe(TEST_USERS.admin.organization_id);
@@ -108,8 +108,8 @@ describe('GET /api/jobs/:id — per-instance gate is grant/override-aware (GAP-1
   // The 4 endpoints that gate on canAccessJob (getById/getNotes/addNote/getTimeline) selected only
   // the ownership relations; the fixed canAccessRow re-derives visibility via a scoped findFirst.
   const ACCESS_SELECT_FOREIGN = {
-    assignees: [{ user_id: '99555555-0224-9999-9999-995555550224' }], // NOT the requester
-    estimate: { lead: { lead_assignees: [{ user_id: '99555555-0224-9999-9999-995555550224' }] } },
+    assignees: [{ user_id: '99999999-9999-9999-9999-999999999999' }], // NOT the requester
+    estimate: { lead: { lead_assignees: [{ user_id: '99999999-9999-9999-9999-999999999999' }] } },
   };
   const ACCESS_SELECT_OWN_TECH = {
     assignees: [{ user_id: TEST_USERS.technician.id }],
@@ -243,6 +243,8 @@ describe('POST /api/jobs/:id/cancel — money fields gated behind pricing visibi
         // Inventory P1 (§4.2): cancel's auto-return pass — nothing SYNCED in these flows.
         jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       }),
     );
   }

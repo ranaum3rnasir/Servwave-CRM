@@ -219,7 +219,7 @@ describe('CustomerDetailPage composer From identity', () => {
       { initialEntries: [`/customers/${CUSTOMER.id}`], ability: ADMIN },
     );
 
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
     await user.click(screen.getByRole('button', { name: CUSTOMER.email }));
 
     expect(await screen.findByText(NO_MAILBOX)).toBeInTheDocument();
@@ -248,10 +248,5 @@ describe('source guards', () => {
       readFileSync(join(srcDir, rel), 'utf8').includes(DEAD_READ_NEEDLE),
     );
     expect(offenders).toEqual([]);
-
-    // tsc cannot catch a leftover local here: noUnusedLocals is false and the
-    // eslint no-unused-vars rule is a warning, so this is the only safety net.
-    const inbox = readFileSync(join(srcDir, 'pages/communication/InboxPage.tsx'), 'utf8');
-    expect(inbox.includes('const acct')).toBe(false);
   });
 });

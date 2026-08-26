@@ -6,15 +6,21 @@
 // without importing a component; NumbersView re-exports it for compatibility.
 
 export type NumberType = "Local · Primary" | "Local" | "Toll-free";
-export type NumberStatus = "active" | "paused";
+/** `pending` / `failed` are purchase states: the row is claimed before the
+ *  provider is called, so a purchase that dies mid-flight leaves a VISIBLE row
+ *  instead of an invisible recurring charge. Neither is usable for calls. */
+export type NumberStatus = "active" | "paused" | "released" | "pending" | "failed";
 
 export type OwnedNumber = {
   id: string;
-  number: string; // formatted, e.g. "(555) 555-0208"
+  number: string; // formatted, e.g. "(551) 282-7064"
   tag?: string; // small label under the number
   type: NumberType;
   flowId: string; // "" = no flow assigned
   adGroupId?: string; // "" / undefined = no ad group assigned
+  /** Where calls to this number actually ring (E.164), or null when no simple
+   *  forward is set. Editable - it is the routing, not a label. */
+  forwardTo?: string | null;
   status: NumberStatus;
   createdAt: string; // ISO
   /** Texting-capable (wire `sms_enabled`) — gates the SMS composer (§5.4). */

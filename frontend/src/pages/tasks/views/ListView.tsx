@@ -5,6 +5,8 @@ import { isOverdue } from '@/lib/tasks/tasks-logic';
 import { formatExactInstant } from '@/lib/format-date';
 import { cn } from '@/lib/utils';
 import { useTaskDetailStore } from '@/stores/taskDetailStore';
+import { matchesAssignee, taskAssignees } from '@/lib/tasks/assignees';
+import { AssigneeStack } from '@/components/tasks/AssigneeStack';
 import { StatusBadge } from '@/components/data/status-badge';
 import { PriorityDot } from '@/components/tasks/PriorityDot';
 import { LinkedEntityChip } from '@/components/tasks/LinkedEntityChip';
@@ -21,7 +23,7 @@ export default function ListView() {
     return tasks.filter(
       (t) =>
         t.title.toLowerCase().includes(q) ||
-        (t.owner_name ?? t.owner_id).toLowerCase().includes(q) ||
+        matchesAssignee(t, q) ||
         (t.linked_entity?.label ?? '').toLowerCase().includes(q),
     );
   }, [tasks, query]);
@@ -37,7 +39,7 @@ export default function ListView() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by title, owner, or linked entity..."
+          placeholder="Search by title, assignee, or linked entity..."
           className="h-9 w-full rounded-lg border border-border bg-surface-light px-3 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-1 focus:ring-primary sm:max-w-md"
         />
         <span className="text-xs font-medium text-text-secondary tabular-nums">
@@ -50,7 +52,7 @@ export default function ListView() {
         <table className="w-full caption-bottom text-sm">
           <thead className="border-b border-border bg-background-light">
             <tr>
-              {['Task #', 'Title', 'Owner', 'Status', 'Priority', 'Linked', 'Due', 'Created'].map(
+              {['Task #', 'Title', 'Assignees', 'Status', 'Priority', 'Linked', 'Due', 'Created'].map(
                 (h) => (
                   <th
                     key={h}
@@ -78,7 +80,7 @@ export default function ListView() {
                     <span className="line-clamp-2">{t.title}</span>
                   </td>
                   <td className="px-4 py-3 text-xs text-text-secondary whitespace-nowrap">
-                    {t.owner_name ?? t.owner_id}
+                    <AssigneeStack assignees={taskAssignees(t)} />
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     <StatusBadge domain="task" status={t.status} />

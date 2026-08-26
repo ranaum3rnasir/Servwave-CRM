@@ -49,7 +49,7 @@ describe('GET /api/communication/calls/outcome - did the placed call land yet', 
 
     const res = await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219', since: SINCE })
+      .query({ to_number: '+19294039424', since: SINCE })
       .set(authHeader('dispatcher'));
 
     expect(res.status).toBe(200);
@@ -62,7 +62,7 @@ describe('GET /api/communication/calls/outcome - did the placed call land yet', 
 
     const res = await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219', since: SINCE })
+      .query({ to_number: '+19294039424', since: SINCE })
       .set(authHeader('dispatcher'));
 
     expect(res.status).toBe(200);
@@ -84,13 +84,13 @@ describe('GET /api/communication/calls/outcome - did the placed call land yet', 
 
     await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219', since: SINCE })
+      .query({ to_number: '+19294039424', since: SINCE })
       .set(authHeader('dispatcher'));
 
     const where = mockPrisma.callSession.findFirst.mock.calls[0][0].where;
     expect(where.organization_id).toBe(ALPHA_ORG_ID);
     expect(where.direction).toBe('out');
-    expect(where.to_number).toBe('+15555550219');
+    expect(where.to_number).toBe('+19294039424');
     expect(where.started_at).toEqual({ gte: new Date(SINCE) });
   });
 
@@ -117,13 +117,13 @@ describe('GET /api/communication/calls/outcome - did the placed call land yet', 
 
     const missing = await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219' })
+      .query({ to_number: '+19294039424' })
       .set(authHeader('dispatcher'));
     expect(missing.status).toBe(400);
 
     const malformed = await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219', since: 'yesterday' })
+      .query({ to_number: '+19294039424', since: 'yesterday' })
       .set(authHeader('dispatcher'));
     expect(malformed.status).toBe(400);
 

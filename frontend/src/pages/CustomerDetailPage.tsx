@@ -18,6 +18,7 @@ import { TabsContent } from '@/components/ui/tabs';
 import { TabStrip } from '@/components/patterns/TabStrip';
 import { StatusBadge } from '@/components/data/status-badge';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
+import { RecordNumberEditor } from '@/components/crm/RecordNumberEditor';
 import { LocationFormDialog } from '@/components/customers/LocationFormDialog';
 import { TagInput } from '@/components/leads/TagInput';
 import { CustomerCommunicationsTab } from '@/components/communication/CustomerCommunicationsTab';
@@ -219,7 +220,9 @@ function getAdSourceStyle(source: string | null | undefined): string {
   return AD_SOURCE_STYLES[source] ?? 'bg-neutral-surface text-neutral-text border-neutral-border';
 }
 
-const ACTIVE_JOB_STATUSES = new Set(['UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS']);
+// S4 (D17): EN_ROUTE/ON_SITE retired from JobStatus - such a job now reads SCHEDULED or
+// IN_PROGRESS, so it is still counted as active here.
+const ACTIVE_JOB_STATUSES = new Set(['UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS']);
 
 function formatDate(date: string) {
   return new Date(date).toLocaleDateString('en-US', {
@@ -958,8 +961,16 @@ export default function CustomerDetailPage() {
               </AvatarFallback>
             </Avatar>
             <div>
-              <Heading level={1} scale="2xl">
-                {displayName}
+              <Heading level={1} scale="2xl" className="flex items-baseline gap-2">
+                <RecordNumberEditor
+                  entity="customer"
+                  id={id!}
+                  number={customer.customer_number}
+                  canEdit={ability.can('renumber', 'Customer')}
+                  onRenamed={() => queryClient.invalidateQueries({ queryKey: ['customer', id] })}
+                />
+                <span aria-hidden="true" className="text-text-soft">·</span>
+                <span>{displayName}</span>
               </Heading>
               <div className="flex flex-wrap items-center gap-2 mt-1">
                 {customer.company_name && (customer.first_name || customer.last_name) && (
@@ -1259,27 +1270,34 @@ export default function CustomerDetailPage() {
                   </div>
                 )}
 
-                {customer.email && (
+                {/* Gated on EITHER source, not on the primary alone: extra_emails[] rows
+                    used to be nested inside a `customer.email &&`, so a customer whose
+                    only addresses were secondary rendered no email row at all - and with
+                    the per-address opt-in, one of those can be the sole recipient of the
+                    org's automated mail. Boolean() keeps a 0-length array from leaking a
+                    literal "0" into the card. */}
+                {Boolean(customer.email || customer.extra_emails?.length) && (
                   <div className="flex items-start gap-3">
                     <Mail className="h-4 w-4 text-text-secondary mt-0.5 shrink-0" />
                     <div className="space-y-1 min-w-0">
-                      {canUseComms ? (
-                        // hover-to-primary+underline contact trigger, no matching Button variant/tone cell - left raw
-                        <button
-                          type="button"
-                          onClick={() => setCompose({ mode: 'new', account: PRIMARY_ACCOUNT.id, to: customer.email, subject: '', body: '', customerId: customer.id })}
-                          className="text-left text-sm text-text-primary break-all hover:text-primary hover:underline underline-offset-2"
-                        >
-                          {customer.email}
-                        </button>
-                      ) : (
-                        <a
-                          href={`mailto:${customer.email}`}
-                          className="block text-left text-sm text-text-primary break-all hover:text-primary hover:underline underline-offset-2"
-                        >
-                          {customer.email}
-                        </a>
-                      )}
+                      {customer.email &&
+                        (canUseComms ? (
+                          // hover-to-primary+underline contact trigger, no matching Button variant/tone cell - left raw
+                          <button
+                            type="button"
+                            onClick={() => setCompose({ mode: 'new', account: PRIMARY_ACCOUNT.id, to: customer.email, subject: '', body: '', customerId: customer.id })}
+                            className="text-left text-sm text-text-primary break-all hover:text-primary hover:underline underline-offset-2"
+                          >
+                            {customer.email}
+                          </button>
+                        ) : (
+                          <a
+                            href={`mailto:${customer.email}`}
+                            className="block text-left text-sm text-text-primary break-all hover:text-primary hover:underline underline-offset-2"
+                          >
+                            {customer.email}
+                          </a>
+                        ))}
                       {customer.extra_emails?.map((e: { id: string; email: string; label?: string | null; receives_emails?: boolean }) => (
                         <div key={e.id} className="flex items-center gap-1.5">
                           {canUseComms ? (

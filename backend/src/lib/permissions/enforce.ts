@@ -3,7 +3,7 @@ import { subject } from '@casl/ability';
 import { prisma } from '../prisma';
 import { tenantWhere } from '../tenant';
 import type { Action, Subject } from './catalog';
-import type { Grant } from './defineAbility';
+import { defineAbilityFor, type AppAbility, type Grant, type PermissionOverride } from './defineAbility';
 import { getCachedGrants, setCachedGrants } from './permissionCache';
 import { loadUserOverrides } from './loadUserOverrides';
 import { getManagedCapability, capabilityAllowsRole } from './userCapabilities';
@@ -54,16 +54,31 @@ export function can(
 }
 
 /**
+ * The slice of a user every permission derivation in this module needs. `req.user` satisfies it,
+ * and so does a plain `users` row selected with `custom_role` - which is what lets the `*ForUser`
+ * entry points below answer for someone who is NOT the caller.
+ */
+export interface PermissionUser {
+  id: string;
+  role: string;
+  organization_id: string;
+  custom_role_id?: string | null;
+  custom_role?: { key: string } | null;
+  department_id?: string | null;
+  location_id?: string | null;
+}
+
+/**
  * Resolve the role's persisted grants the SAME way `attachAbility` does
  * (60s request cache, falling back to a `rolePermission` read). Kept here so a
  * list handler can derive its row-scope without the raw grants being plumbed
  * onto `req`. ADMIN short-circuits with no DB read.
  */
-async function grantsForReq(req: Request): Promise<Grant[]> {
-  const orgId = req.user!.organization_id;
+async function grantsForUser(user: PermissionUser): Promise<Grant[]> {
+  const orgId = user.organization_id;
   // SRVW-138: grants live under the CUSTOM role's key when the user has one, else the
   // base role name. Same key for the lookup and the cache, so the two cannot diverge.
-  const role = grantRoleKey(req.user!);
+  const role = grantRoleKey(user);
   let grants = getCachedGrants(orgId, role);
   if (!grants) {
     const rows = await prisma.rolePermission.findMany({
@@ -78,6 +93,23 @@ async function grantsForReq(req: Request): Promise<Grant[]> {
     setCachedGrants(orgId, role, grants);
   }
   return grants;
+}
+
+function grantsForReq(req: Request): Promise<Grant[]> {
+  return grantsForUser(req.user!);
+}
+
+/**
+ * The CASL ability for an arbitrary user - `attachAbility`'s body, lifted so a background or
+ * batched path can ask a subject-level question ("may this person read Customer at all?") about
+ * someone who is not the requester. attachAbility delegates to it, so there is one build.
+ */
+export async function abilityForUser(user: PermissionUser): Promise<AppAbility> {
+  // An ADMIN-DERIVED custom role is NOT a superuser: it must load and apply its grants.
+  if (isSuperUser(user)) return defineAbilityFor(user, []);
+  const grants = await grantsForUser(user);
+  const overrides = await loadUserOverrides(user.id);
+  return defineAbilityFor(user, grants, overrides);
 }
 
 /**
@@ -132,22 +164,58 @@ export async function scopeWhereForReq(
   resource: ScopeResource,
 ): Promise<Record<string, unknown>> {
   if (!req.user) return { ...MATCH_NOTHING };
+  return scopeWhereForUser(req.user, resource);
+}
+
+/**
+ * `scopeWhereForReq` for a reader who is not the requester - same union rules, same fail-closed
+ * behaviour, same per-user override path. Split out so a batched check can ask the row-scope
+ * question about an arbitrary user without fabricating a Request.
+ */
+export async function scopeWhereForUser(
+  user: PermissionUser,
+  resource: ScopeResource,
+): Promise<Record<string, unknown>> {
   // SRVW-138: only an unrestricted ADMIN is unscoped; an ADMIN-derived custom role
   // resolves through its grants like any other role.
-  if (isSuperUser(req.user)) return {};
-  const roleGrants = await grantsForReq(req);
+  if (isSuperUser(user)) return {};
   // Per-user overrides are per-USER (separate cache) — never merged into the role-grants cache.
-  // Capability role-gating compares the BASE role, consistent with the bridge rule everywhere
-  // else: a custom role with base_role SALES qualifies wherever SALES does.
-  const overrides = await loadUserOverrides(req.user.id);
-  const grants = [...roleGrants, ...overrideReadGrants(overrides, req.user.role)];
+  const overrides = await loadUserOverrides(user.id);
+  return scopeTemplateForProfile(user, resource, user.id, overrides);
+}
+
+/**
+ * `scopeWhereForUser` with `{{userId}}` left as a caller-supplied PLACEHOLDER instead of a real id.
+ *
+ * The transpose of the usual question. `scopeWhereForUser` asks "one reader, which rows?"; a caller
+ * asking "one row, which of these readers?" would derive the same fragment once per candidate, and
+ * every derivation but the substitution is identical for everyone who shares a permission profile
+ * (super-user-ness, grant role key, base role, department, location, override set). Deriving the
+ * template once per PROFILE and substituting afterwards is what removes the per-candidate work.
+ *
+ * `overrides` is passed in rather than loaded here for the same reason: a cohort loads them for
+ * everyone in one query (`loadUserOverridesMany`).
+ *
+ * Same body as the per-user path - `scopeWhereForUser` delegates to it - so the two cannot drift.
+ * Capability role-gating compares the BASE role, consistent with the bridge rule everywhere else:
+ * a custom role with base_role SALES qualifies wherever SALES does.
+ */
+export async function scopeTemplateForProfile(
+  user: PermissionUser,
+  resource: ScopeResource,
+  placeholderUserId: string,
+  overrides: PermissionOverride[],
+): Promise<Record<string, unknown>> {
+  if (isSuperUser(user)) return {};
+  const roleGrants = await grantsForUser(user);
+  const grants = [...roleGrants, ...overrideReadGrants(overrides, user.role)];
   return scopeWhereFor(
     {
-      id: req.user.id,
-      role: req.user.role,
-      custom_role_id: req.user.custom_role_id ?? null,
-      department_id: req.user.department_id ?? null,
-      location_id: req.user.location_id ?? null,
+      id: placeholderUserId,
+      role: user.role,
+      custom_role_id: user.custom_role_id ?? null,
+      department_id: user.department_id ?? null,
+      location_id: user.location_id ?? null,
     },
     resource,
     grants,

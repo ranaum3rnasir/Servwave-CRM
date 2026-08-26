@@ -30,6 +30,16 @@ export interface AppShellProps extends React.ComponentProps<"div"> {
   topbar: React.ReactNode;
   defaultMode?: SidebarMode;
   mobileBreakpoint?: string;
+  /**
+   * Hand the whole canvas to the page: no gutter, no page-level scroll.
+   *
+   * For the one kind of page that IS a surface rather than a document on a
+   * surface - the schedule board. A board already scrolls in two axes of its
+   * own, so the canvas scrolling underneath it produces two nested scrollbars
+   * on the same gesture, and the 26px frame around it is 26px of schedule
+   * nobody can see. A flush page is expected to fill its own height.
+   */
+  flush?: boolean;
 }
 
 /**
@@ -67,6 +77,7 @@ function AppShell({
   // Matches the shell.css breakpoint. If the two ever disagree, there is a band
   // of widths where the CSS lays out a column and the JS thinks it is a drawer.
   mobileBreakpoint = "(max-width: 760px)",
+  flush = false,
   ...props
 }: AppShellProps) {
   const isMobile = useMediaQuery(mobileBreakpoint);
@@ -125,7 +136,7 @@ function AppShell({
           )}
 
           <div data-slot="app-canvas" className="canvas">
-            <main data-slot="app-canvas-body" className="canvas-body">
+            <main data-slot="app-canvas-body" className={cn("canvas-body", flush && "is-flush")}>
               {children}
             </main>
           </div>

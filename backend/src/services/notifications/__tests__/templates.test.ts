@@ -17,8 +17,12 @@ describe('renderTemplate — brief verbatim tests', () => {
     expect(t).toMatchObject({ category: 'DISPATCH', priority: 'INTERRUPT', action_type: null, needs_action: false });
   });
 
-  it('isKnownVerb false for deferred task.assigned', () => {
-    expect(isKnownVerb('task.assigned')).toBe(false);
+  // INVERTED by the multi-assignee change: task.assigned is no longer deferred. This
+  // assertion is the load-bearing one for design §5 — emit() silently returns [] on an
+  // unregistered verb, so an un-inverted `false` here would sit green while the whole
+  // notification feature delivered nothing.
+  it('isKnownVerb true for task.assigned (no longer deferred)', () => {
+    expect(isKnownVerb('task.assigned')).toBe(true);
   });
 });
 
@@ -60,9 +64,18 @@ describe('isKnownVerb', () => {
     expect(isKnownVerb('security.new_signin')).toBe(true);
   });
 
+  // Design §9 guard #2 — all five task verbs must be registered, or emit() no-ops silently.
+  it('returns true for all five task verbs', () => {
+    for (const verb of ['task.assigned', 'task.watching', 'task.completed', 'task.removed', 'task.deleted']) {
+      expect(isKnownVerb(verb)).toBe(true);
+    }
+  });
+
   it('returns false for deferred verbs', () => {
-    expect(isKnownVerb('task.assigned')).toBe(false);
+    // task.due_soon / task.overdue stay deferred on purpose — they need a cron that
+    // does not exist. The other five task verbs are registered (see above).
     expect(isKnownVerb('task.overdue')).toBe(false);
+    expect(isKnownVerb('task.due_soon')).toBe(false);
     expect(isKnownVerb('billing.payment_failed')).toBe(false);
     expect(isKnownVerb('service_plan.renewal_due')).toBe(false);
     expect(isKnownVerb('estimate.viewed')).toBe(false);

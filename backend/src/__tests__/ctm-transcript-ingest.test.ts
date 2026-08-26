@@ -39,8 +39,8 @@ const ORG_ID = 'org-1';
 const CALL_END = {
   sid: 'CA9001',
   account_id: 596375,
-  caller_number: '+15555550212',
-  tracking_number: '+15555550203',
+  caller_number: '+15555550199',
+  tracking_number: '+12395395911',
   direction: 'inbound',
   dial_status: 'answered',
   talk_time: 28,
@@ -298,7 +298,7 @@ describe('ingestCall — answered_by attribution', () => {
     await ingestCall(
       prisma,
       ORG_ID,
-      { ...CALL_END, direction: 'outbound', called_number: '+15555550212' },
+      { ...CALL_END, direction: 'outbound', called_number: '+15555550199' },
       'end',
     );
     expect(p.callSession.upsert.mock.calls[0][0].create.answered_by.kind).toBe('none');

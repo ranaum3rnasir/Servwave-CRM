@@ -1,6 +1,13 @@
 /**
- * Tiny shared presentational bits for the Assets slice (P4) — kept in their
- * own module so AssetsView ↔ AssetHistoryDrawer don't import each other.
+ * Tiny shared presentational bits for the Assets slice (P4) - kept in their
+ * own module so the list view and the detail pane don't import each other.
+ *
+ * Those two were `AssetsView.tsx` and `AssetHistoryDrawer.tsx` in this
+ * directory when the split was made. Both are now deleted - they hung off the
+ * dead v1 `pages/inventory/InventoryPage.tsx` - and the pair this module keeps
+ * apart is their routed replacement, `pages/v2/inventory/components/
+ * {assetsView,assetHistoryPanel}.tsx`, which import it today. The reason for
+ * the split is unchanged; only the two files on either side of it are.
  */
 import { ImageIcon } from "lucide-react";
 import { UploadedImage } from "@/components/ui/uploaded-image";

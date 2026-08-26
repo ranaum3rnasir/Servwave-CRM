@@ -100,12 +100,17 @@ export const TOOL_SPECS: Record<string, ToolSpec> = {
         status: {
           type: 'string',
           description:
-            `Filter by status. leads: ${statusVocabulary('lead')}. jobs: ${statusVocabulary('job')}. estimates: ${statusVocabulary('estimate')}. invoices: ${statusVocabulary('invoice', ['OVERDUE'])} (OVERDUE is NOT a status - use the overdue flag; "unpaid" = SENT or PARTIAL).`,
+            // Multi-visit S4 (D17): EN_ROUTE and ON_SITE are still KEYS of the `job` registry
+            // block - they render the per-visit chips - but they retired from JobStatus, and the
+            // jobs list facet now rejects them with a 400. Advertising them here would hand the
+            // model two filter values guaranteed to fail, which is the exact class the comment
+            // above this function describes. They are excluded the same way OVERDUE is.
+            `Filter by status. leads: ${statusVocabulary('lead')}. jobs: ${statusVocabulary('job', ['EN_ROUTE', 'ON_SITE'])}. estimates: ${statusVocabulary('estimate')}. invoices: ${statusVocabulary('invoice', ['OVERDUE'])} (OVERDUE is NOT a status - use the overdue flag; "unpaid" = SENT or PARTIAL).`,
         },
         assigned_to: {
           type: 'string',
           description:
-            'leads: owner user id, or the literal "UNASSIGNED". jobs: a crew member\'s user id (for unassigned jobs use status=UNASSIGNED instead). Get user ids from list_users.',
+            'leads: owner user id, or the literal "UNSCHEDULED". jobs: a crew member\'s user id (for unassigned jobs use status=UNSCHEDULED instead). Get user ids from list_users.',
         },
         overdue: { type: 'boolean', description: 'Invoices only: overdue ones' },
         customer_id: { type: 'string' },
@@ -261,7 +266,7 @@ export const TOOL_SPECS: Record<string, ToolSpec> = {
     mode: 'write',
     gate: { action: 'create', subject: 'Job' },
     description:
-      'Create a job EITHER from an approved estimate (estimate_id) OR standalone (BOTH customer_id AND service_location_id — location ids are in the customer detail). The job is created UNASSIGNED; schedule it and set the crew afterwards with update_job_status action=assign.',
+      'Create a job EITHER from an approved estimate (estimate_id) OR standalone (BOTH customer_id AND service_location_id — location ids are in the customer detail). The job is created UNSCHEDULED; schedule it and set the crew afterwards with update_job_status action=assign.',
     parametersJsonSchema: {
       type: 'object',
       properties: {

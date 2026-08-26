@@ -12,6 +12,11 @@ export interface InventoryFiltersArgs {
   search: string;
   activeLoc: string;
   filters: Filters;
+  /** finishId -> name. Finish is a foreign key, so matching the name the user
+   *  actually sees ("satin chrome") needs the lookup passed in - the item row
+   *  carries only the id. Optional so existing callers still compile; omitting
+   *  it simply means finish is not searched. */
+  finishNameById?: Map<string, string>;
 }
 
 export interface UseInventoryStatsReturn {
@@ -24,16 +29,25 @@ export interface UseInventoryStatsReturn {
 /**
  * The InventoryPage `filteredItems` memo, lifted verbatim. The `.filter()` chain
  * order (kind → search → activeLoc presence → trade → kind → vendor → category →
- * flags → stockStates) and the dependency array are unchanged so the rendered
- * table is identical regardless of whether `allItems` comes from mock or live data.
+ * flags → stockStates) is unchanged so the rendered table is identical regardless
+ * of whether `allItems` comes from mock or live data. The dependency array has
+ * since gained `finishNameById`, which the search branch reads - see the note on
+ * the array itself.
  */
-export function useInventoryFilters({ allItems, search, activeLoc, filters }: InventoryFiltersArgs): {
+export function useInventoryFilters({ allItems, search, activeLoc, filters, finishNameById }: InventoryFiltersArgs): {
   filteredItems: Item[];
 } {
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
+    // No kind allowlist here any more. It used to read
+    //   .filter(i => i.kind === "material" || i.kind === "labor" || i.kind === "service")
+    // which silently hid every `bundle` and `fee` item - both were offerable in
+    // the Add Item dialog, so those items saved successfully and then never
+    // appeared in this grid - and hid kind-less rows the same way. With kind
+    // narrowed to material|service the allowlist matches the whole union, so
+    // the only thing it could still do is drop a malformed row on the floor.
+    // Showing an item you own beats hiding it to keep a list tidy.
     return allItems
-      .filter((i) => i.kind === "material" || i.kind === "labor" || i.kind === "service")
       .filter((i) => {
         if (!q) return true;
         return (
@@ -43,7 +57,8 @@ export function useInventoryFilters({ allItems, search, activeLoc, filters }: In
           i.vendor.toLowerCase().includes(q) ||
           (i.mpn || "").toLowerCase().includes(q) ||
           (i.modelNumber || "").toLowerCase().includes(q) ||
-          (i.upc || "").toLowerCase().includes(q)
+          (i.upc || "").toLowerCase().includes(q) ||
+          (finishNameById?.get(i.finishId ?? "") || "").toLowerCase().includes(q)
         );
       })
       .filter((i) => {
@@ -119,7 +134,13 @@ export function useInventoryFilters({ allItems, search, activeLoc, filters }: In
           return false;
         });
       });
-  }, [allItems, search, activeLoc, filters]);
+    // `finishNameById` belongs here because the search branch above reads it.
+    // The finishes query resolves independently of the four inputs the operator
+    // touches, and `search`/`filters` are useState values whose references are
+    // stable between renders - so a map that arrives AFTER the last keystroke
+    // changes nothing in this list and the memo keeps serving the pre-resolution
+    // result, leaving a finish search stuck at 0 rows until the query is edited.
+  }, [allItems, search, activeLoc, filters, finishNameById]);
 
   return { filteredItems };
 }

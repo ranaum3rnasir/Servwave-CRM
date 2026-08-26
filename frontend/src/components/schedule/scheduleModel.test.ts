@@ -2,9 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   deriveState, timeOverlap, conflictedEventIds, swapCrew, classifyBoardDrop, draftFromDrop,
   hhmmToMin, isOnBoardFor, eventDangerState, conflictNoteFor, boardCapabilitiesFor, rescheduleGate,
+  occupiesAllDayStrip, isAllDayEvent,
+  isDragInert, EVENT_TYPE_META, boardCardScheme, visitLabel, visitLabelCompact,
   type SchedulableEvent,
 } from './scheduleModel';
 import { asWallClock, type WallClock } from '@/lib/schedule-tz';
+import { token } from '@/design-system/tokens';
+import { contrastRatio, compositeOver, rgbDistance } from '@/design-system/contrast';
 
 // This module operates entirely in wall-clock space (see schedule-tz.ts) — fixtures are
 // plain local Dates re-asserted as WallClock, same as the real read boundary does.
@@ -15,7 +19,7 @@ const at = (h: number, durMin = 120): { start: WallClock; end: WallClock } => {
   return { start, end: asWallClock(new Date(start.getTime() + durMin * 60_000)) };
 };
 const ev = (over: Partial<SchedulableEvent>): SchedulableEvent => ({
-  id: 'e', type: 'job', number: 'J1', title: 't', customer: 'c',
+  boardId: 'e', parentId: 'p', type: 'job', number: 'J1', title: 't', customer: 'c',
   crew: [], ownerId: null, start: null, end: null, raw: {}, ...over,
 });
 
@@ -37,39 +41,39 @@ describe('timeOverlap (real Date intervals)', () => {
 
 describe('conflictedEventIds (per shared crew member, spans jobs + walkthroughs)', () => {
   it('shared member + overlap → both flagged', () => {
-    const a = ev({ id: 'a', crew: ['carol'], ...at(10) });
-    const b = ev({ id: 'b', type: 'walkthrough', crew: ['carol'], ...at(11) });
+    const a = ev({ boardId: 'a', crew: ['carol'], ...at(10) });
+    const b = ev({ boardId: 'b', type: 'walkthrough', crew: ['carol'], ...at(11) });
     expect(conflictedEventIds([a, b])).toEqual(new Set(['a', 'b']));
   });
   it('overlap but no shared member → empty', () => {
-    const a = ev({ id: 'a', crew: ['alice'], ...at(10) });
-    const b = ev({ id: 'b', crew: ['bob'], ...at(11) });
+    const a = ev({ boardId: 'a', crew: ['alice'], ...at(10) });
+    const b = ev({ boardId: 'b', crew: ['bob'], ...at(11) });
     expect(conflictedEventIds([a, b]).size).toBe(0);
   });
   it('shared member but no time overlap → empty', () => {
-    const a = ev({ id: 'a', crew: ['carol'], ...at(8) });
-    const b = ev({ id: 'b', crew: ['carol'], ...at(11) });
+    const a = ev({ boardId: 'a', crew: ['carol'], ...at(8) });
+    const b = ev({ boardId: 'b', crew: ['carol'], ...at(11) });
     expect(conflictedEventIds([a, b]).size).toBe(0);
   });
   it('multi-crew: only the shared member triggers it', () => {
-    const a = ev({ id: 'a', crew: ['alice', 'bob'], ...at(10) });
-    const b = ev({ id: 'b', crew: ['bob', 'carol'], ...at(11) });
+    const a = ev({ boardId: 'a', crew: ['alice', 'bob'], ...at(10) });
+    const b = ev({ boardId: 'b', crew: ['bob', 'carol'], ...at(11) });
     expect(conflictedEventIds([a, b])).toEqual(new Set(['a', 'b']));
   });
 });
 
 describe('eventDangerState (the two reds — one precedence decision for every render site)', () => {
   it('timed + 0 crew → needs-crew (red fill), even when also in conflictIds (precedence)', () => {
-    expect(eventDangerState(ev({ id: 'x', ...at(9) }), new Set(['x']))).toBe('needs-crew');
+    expect(eventDangerState(ev({ boardId: 'x', ...at(9) }), new Set(['x']))).toBe('needs-crew');
   });
   it('crewed + id ∈ conflictIds → double-booked (red outline)', () => {
-    expect(eventDangerState(ev({ id: 'x', crew: ['a'], ...at(9) }), new Set(['x']))).toBe('double-booked');
+    expect(eventDangerState(ev({ boardId: 'x', crew: ['a'], ...at(9) }), new Set(['x']))).toBe('double-booked');
   });
   it('crewed, scheduled, no conflict → null (normal type styling)', () => {
-    expect(eventDangerState(ev({ id: 'x', crew: ['a'], ...at(9) }), new Set())).toBeNull();
+    expect(eventDangerState(ev({ boardId: 'x', crew: ['a'], ...at(9) }), new Set())).toBeNull();
   });
   it('ghost/draft cards are previews — never red', () => {
-    expect(eventDangerState({ ...ev({ id: 'x', ...at(9) }), isGhost: true }, new Set(['x']))).toBeNull();
+    expect(eventDangerState({ ...ev({ boardId: 'x', ...at(9) }), isGhost: true }, new Set(['x']))).toBeNull();
   });
 });
 
@@ -101,7 +105,7 @@ describe('classifyBoardDrop (TG10: drag = where/when + whole-lane swap; the edit
 });
 
 describe('draftFromDrop (D5 pre-fill by drop target)', () => {
-  const e = ev({ id: 'e', crew: [] });
+  const e = ev({ boardId: 'e', crew: [] });
   it('member-day: seeds crew + exact time, all auto flags', () => {
     const start = wc(10, 9, 0);
     const d = draftFromDrop(e, { kind: 'member-day', memberId: 'm1', start }, { defaultStartMin: 480, defaultDurationMin: 120 });
@@ -124,7 +128,7 @@ describe('draftFromDrop (D5 pre-fill by drop target)', () => {
     expect(d.start.getHours()).toBe(8);
   });
   it('preserves an already-scheduled event\'s duration over the default', () => {
-    const scheduled = ev({ id: 'e2', ...at(9, 90) }); // 9:00–10:30
+    const scheduled = ev({ boardId: 'e2', ...at(9, 90) }); // 9:00–10:30
     const d = draftFromDrop(scheduled, { kind: 'standard-time', start: wc(11, 13, 0) }, { defaultStartMin: 480, defaultDurationMin: 120 });
     expect(d.durationMin).toBe(90);
   });
@@ -135,6 +139,20 @@ describe('isOnBoardFor (M3 — the shared column-membership predicate)', () => {
     expect(isOnBoardFor(ev({ crew: ['alice', 'bob'] }), 'bob')).toBe(true));
   it('member not on the crew (owner is OFF-BOARD, never a column) → false', () =>
     expect(isOnBoardFor(ev({ crew: ['alice'], ownerId: 'sam' }), 'sam')).toBe(false));
+
+  // Slice 06 (calendar-entries spec §3, ADR 0002) — a user PARTICIPANT also puts an event on a
+  // member's board lane, via a field kept separate from crew (see the ADR-0002 describe block
+  // below for why crew itself must stay untouched).
+  describe('participantUserIds (slice 06)', () => {
+    it('member listed only in participantUserIds → true', () =>
+      expect(isOnBoardFor(ev({ crew: [], participantUserIds: ['dave'] }), 'dave')).toBe(true));
+    it('member on crew with participantUserIds absent → true (existing job case, unmodified)', () =>
+      expect(isOnBoardFor(ev({ crew: ['alice'] }), 'alice')).toBe(true));
+    it('member neither on crew nor in participantUserIds → false', () =>
+      expect(isOnBoardFor(ev({ crew: ['alice'], participantUserIds: ['dave'] }), 'sam')).toBe(false));
+    it('an entry whose only participants are customers (participantUserIds empty) → false for every member', () =>
+      expect(isOnBoardFor(ev({ crew: [], participantUserIds: [] }), 'dave')).toBe(false));
+  });
 });
 
 describe('hhmmToMin', () => {
@@ -152,7 +170,7 @@ describe('conflictNoteFor (D5 — the modal\'s advisory note, never a blocker)',
   const names = new Map([['carol', 'Carol'], ['bob', 'Bob']]);
 
   it('shared crew member + time overlap → "overlaps <number> for <firstName>"', () => {
-    const other = ev({ id: 'o', number: 'J00099', crew: ['carol'], ...at(10) }); // 10:00–12:00
+    const other = ev({ boardId: 'o', number: 'J00099', crew: ['carol'], ...at(10) }); // 10:00–12:00
     const note = conflictNoteFor(
       { eventId: 'e', start: wc(10, 11, 0), durationMin: 120, crew: ['carol'] },
       [other],
@@ -162,8 +180,8 @@ describe('conflictNoteFor (D5 — the modal\'s advisory note, never a blocker)',
   });
 
   it('no shared member → null; and the dragged event itself is excluded', () => {
-    const stranger = ev({ id: 'o', number: 'J00099', crew: ['bob'], ...at(10) });
-    const self = ev({ id: 'e', number: 'J00001', crew: ['carol'], ...at(10) });
+    const stranger = ev({ boardId: 'o', number: 'J00099', crew: ['bob'], ...at(10) });
+    const self = ev({ boardId: 'e', number: 'J00001', crew: ['carol'], ...at(10) });
     const note = conflictNoteFor(
       { eventId: 'e', start: wc(10, 10, 0), durationMin: 60, crew: ['carol'] },
       [stranger, self],
@@ -173,7 +191,7 @@ describe('conflictNoteFor (D5 — the modal\'s advisory note, never a blocker)',
   });
 
   it('empty crew → null (nobody to collide with); unknown member still notes without a name', () => {
-    const other = ev({ id: 'o', number: 'J00099', crew: ['zed'], ...at(10) });
+    const other = ev({ boardId: 'o', number: 'J00099', crew: ['zed'], ...at(10) });
     expect(
       conflictNoteFor({ eventId: 'e', start: wc(10, 10, 0), durationMin: 60, crew: [] }, [other], names),
     ).toBeNull();
@@ -195,6 +213,89 @@ describe('boardCapabilitiesFor (D9 — UI-control gating; data scoping is server
   it('missing/unknown role fails SAFE → no member view, read-only', () => {
     expect(boardCapabilitiesFor(undefined)).toEqual({ memberView: false, readOnly: true });
     expect(boardCapabilitiesFor('SOMETHING_NEW')).toEqual({ memberView: false, readOnly: true });
+  });
+});
+
+describe('occupiesAllDayStrip (mirrors react-big-calendar TimeGrid routing)', () => {
+  const spanning = (fromDay: number, fromH: number, toDay: number, toH: number) =>
+    ev({ start: wc(fromDay, fromH), end: wc(toDay, toH), raw: { is_all_day: false } });
+
+  it('a flagged all-day job occupies the strip', () => {
+    expect(occupiesAllDayStrip(ev({ ...at(9), raw: { is_all_day: true } }))).toBe(true);
+  });
+
+  it('a same-day timed job does NOT occupy the strip', () => {
+    expect(occupiesAllDayStrip(spanning(10, 9, 10, 17))).toBe(false);
+  });
+
+  // The bug: rbc routes any event crossing a calendar-day boundary into the all-day
+  // strip whatever is_all_day says, so the strip must count it too - otherwise the
+  // event renders into a container CSS has collapsed to max-height: 0 and vanishes.
+  it('a cross-midnight timed job occupies the strip', () => {
+    expect(occupiesAllDayStrip(spanning(9, 20, 11, 5))).toBe(true);
+  });
+
+  it('an exactly-24h timed job occupies the strip', () => {
+    expect(occupiesAllDayStrip(spanning(9, 12, 10, 12))).toBe(true);
+  });
+
+  // rbc compares calendar dates, so an event ending at the stroke of midnight is
+  // already "a different day" to it - match that rather than out-clever it.
+  it('a job ending at midnight occupies the strip', () => {
+    expect(occupiesAllDayStrip(spanning(9, 9, 10, 0))).toBe(true);
+  });
+
+  it('an unscheduled event does not occupy the strip', () => {
+    expect(occupiesAllDayStrip(ev({ raw: { is_all_day: false } }))).toBe(false);
+  });
+
+  // Slice 05 — a calendar entry reaches the strip on either axis: its own flag, or (already
+  // true before this slice, via the generic cross-day fallback above) spanning days.
+  it('a flagged all-day calendar entry occupies the strip', () => {
+    const entry = ev({ type: 'calendar-entry', ...at(9), raw: { is_all_day: true } });
+    expect(occupiesAllDayStrip(entry)).toBe(true);
+  });
+
+  it('a timed calendar entry crossing midnight occupies the strip', () => {
+    const entry = ev({
+      type: 'calendar-entry', start: wc(9, 20), end: wc(11, 5), raw: { is_all_day: false },
+    });
+    expect(occupiesAllDayStrip(entry)).toBe(true);
+  });
+});
+
+describe('isAllDayEvent (spec §3 — a calendar entry reads its OWN is_all_day column)', () => {
+  it('a calendar entry flagged is_all_day → true', () => {
+    expect(isAllDayEvent(ev({ type: 'calendar-entry', raw: { is_all_day: true } }))).toBe(true);
+  });
+
+  it('a calendar entry with is_all_day: false → false', () => {
+    expect(isAllDayEvent(ev({ type: 'calendar-entry', raw: { is_all_day: false } }))).toBe(false);
+  });
+
+  it('a calendar entry with no is_all_day on raw at all → false', () => {
+    expect(isAllDayEvent(ev({ type: 'calendar-entry', raw: {} }))).toBe(false);
+  });
+
+  // Same shape as the job branch: the adapter's own `isAllDay` field (carried onto the card)
+  // answers before falling back to raw.
+  it('a calendar entry carrying isAllDay on the card itself → true, even if raw disagrees', () => {
+    const entry = ev({ type: 'calendar-entry', isAllDay: true, raw: { is_all_day: false } });
+    expect(isAllDayEvent(entry)).toBe(true);
+  });
+
+  // Existing job/walkthrough behaviour, pinned so this slice cannot regress it.
+  it('job still reads its own isAllDay flag (unchanged)', () => {
+    expect(isAllDayEvent(ev({ type: 'job', isAllDay: true, raw: {} }))).toBe(true);
+  });
+
+  it('job still falls back to raw.is_all_day (unchanged)', () => {
+    expect(isAllDayEvent(ev({ type: 'job', raw: { is_all_day: true } }))).toBe(true);
+  });
+
+  it('walkthrough still fakes all-day via duration >= 1440 (unchanged)', () => {
+    expect(isAllDayEvent(ev({ type: 'walkthrough', raw: { walkthrough_duration_minutes: 1440 } }))).toBe(true);
+    expect(isAllDayEvent(ev({ type: 'walkthrough', raw: { walkthrough_duration_minutes: 60 } }))).toBe(false);
   });
 });
 
@@ -223,5 +324,139 @@ describe('rescheduleGate (Spec B1, B-2 — money, not status, freezes a job)', (
     const stub = { id: 'preview', title: 'Drop to schedule', start: new Date(), end: new Date() } as unknown as SchedulableEvent;
     expect(() => rescheduleGate(stub)).not.toThrow();
     expect(rescheduleGate(stub)).toEqual({ ok: true });
+  });
+  it('calendar entry → ok (ADR 0002: joins nothing, has no invoices to be gated by)', () => {
+    expect(rescheduleGate(ev({ type: 'calendar-entry' }))).toEqual({ ok: true });
+  });
+});
+
+// ─── Slice 03 — Calendar Entries on the board (calendar-entries spec §3, ADR 0002) ───────────
+
+describe('eventDangerState — calendar entries never paint red (ADR 0002)', () => {
+  it('a timed entry with crew: [] → null, NOT needs-crew (every entry has empty crew by design)', () => {
+    const entry = ev({ type: 'calendar-entry', boardId: 'ce-1', crew: [], ...at(9) });
+    expect(eventDangerState(entry, new Set())).toBeNull();
+  });
+  it('a timed entry whose boardId IS in conflictIds → still null (never double-booked either)', () => {
+    const entry = ev({ type: 'calendar-entry', boardId: 'ce-1', crew: [], ...at(9) });
+    expect(eventDangerState(entry, new Set(['ce-1']))).toBeNull();
+  });
+});
+
+describe('conflictedEventIds — calendar entries excluded on both axes (ADR 0002)', () => {
+  it('an entry sharing a time window with a crewed job → empty set (entry causes no conflict)', () => {
+    const job = ev({ boardId: 'job-1', crew: ['carol'], ...at(10) });
+    const entry = ev({ type: 'calendar-entry', boardId: 'ce-1', crew: [], ...at(10) });
+    expect(conflictedEventIds([job, entry]).size).toBe(0);
+  });
+  it('two overlapping calendar entries → empty set', () => {
+    const a = ev({ type: 'calendar-entry', boardId: 'ce-1', crew: [], ...at(10) });
+    const b = ev({ type: 'calendar-entry', boardId: 'ce-2', crew: [], ...at(10) });
+    expect(conflictedEventIds([a, b]).size).toBe(0);
+  });
+  // A real calendar entry's crew is always [] (crewPeopleOf('calendar-entry', ...) → []), so the
+  // two cases above pass even WITHOUT the type guard - an empty crew never matches `.some(...)`
+  // either way. This case forces crew onto both sides so the assertion actually exercises the
+  // guard, not just the empty-crew coincidence - proof that the exclusion is a TYPE check, not an
+  // accident of a calendar entry never carrying a crew today.
+  it('the exclusion holds even if a calendar entry somehow carried a "crew" (defensive proof, not a real shape)', () => {
+    const a = ev({ boardId: 'job-1', crew: ['carol'], ...at(10) });
+    const entry = ev({ type: 'calendar-entry', boardId: 'ce-1', crew: ['carol'], ...at(10) });
+    expect(conflictedEventIds([a, entry]).size).toBe(0);
+  });
+
+  // Slice 06 — the ADR-0002 assertion this slice exists to prove: naming a user as a
+  // PARTICIPANT (which places the entry in that member's column, per isOnBoardFor above) must
+  // NOT read as crewing the entry. A job crewed with that same user, overlapping the entry's
+  // time window, must still produce an empty conflict set.
+  it('an entry with user participantUserIds still has crew: [], and conflicts with a same-user-crewed job stay empty', () => {
+    const entry = ev({
+      type: 'calendar-entry', boardId: 'ce-1', crew: [], participantUserIds: ['dave'], ...at(10),
+    });
+    expect(entry.crew).toEqual([]);
+    const job = ev({ boardId: 'job-1', crew: ['dave'], ...at(10) }); // same user, overlapping time
+    expect(conflictedEventIds([entry, job]).size).toBe(0);
+  });
+});
+
+describe('EVENT_TYPE_META[\'calendar-entry\'] — the muted "Event" scheme (spec §3, §9 risk 4, slice 03/06)', () => {
+  it('labels the user-facing word "Event"', () => {
+    expect(EVENT_TYPE_META['calendar-entry'].label).toBe('Event');
+  });
+
+  // The board canvas the card actually composites over (bg-event/5 and bg-event/10 both mix the
+  // --event token INTO this, not white — see the tokens.css comment on --olive-700 for why the
+  // original bronze value's "~4.7:1 on white" estimate was the wrong measurement).
+  const CANVAS = token('--background-light');
+  const eventText = token('--event');
+  // The worse of the two real tints on the app: SchedulePage.tsx's Standard-view pill uses
+  // bg-event/10; EVENT_TYPE_META's own `soft` (below) uses bg-event/5, which is lighter still
+  // and therefore higher-contrast. Testing the worse case is the binding constraint.
+  const eventTint10 = compositeOver(eventText, 0.10, CANVAS);
+
+  it('text-event on its own real 10% board tint clears WCAG AA (>= 4.5:1) — not an estimate against white', () => {
+    expect(contrastRatio(eventText, eventTint10)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  // REPLACES a class-string identity check ('bg-event/5' !== 'bg-warning/5' is true no matter
+  // what colour either resolves to) that could never fail: the original --bronze-600 measured
+  // only 79.4 away from warning's amber on this same 0-441 scale — visually near-siblings — while
+  // sailing through the old assertion. This asserts the RENDERED colour instead.
+  it('is visually distinct from every type accent (job/walkthrough/service-plan), by resolved colour', () => {
+    const siblings = {
+      job: token('--info'),
+      walkthrough: token('--warning'),
+      'service-plan': token('--ai'),
+    } as const;
+    for (const hex of Object.values(siblings)) {
+      // A floor comfortably above every sibling type-accent pairing already on this board (the
+      // weakest today, event vs walkthrough, measures ~97.6) — see EVENT_TYPE_META's own comment
+      // for why hues that scored higher here (green/teal) were rejected on a DIFFERENT axis.
+      expect(rgbDistance(eventText, hex)).toBeGreaterThan(60);
+    }
+  });
+
+  it('is not near-indistinguishable from boardCardScheme\'s completed treatment on the real card background', () => {
+    const completedBg = token('--neutral-surface'); // opaque — the completed card's actual fill
+    // §9 risk 4's admitted limit: no low-alpha tint over this canvas gets far from the completed
+    // grey — every hue considered for this fix topped out around ~30 on this 0-441 scale. The
+    // floor sits just under that measured ceiling, not at some larger "solved" number no colour
+    // choice in this family can actually reach (see the tokens.css comment on --olive-700).
+    expect(rgbDistance(eventTint10, completedBg)).toBeGreaterThan(25);
+  });
+});
+
+describe('isDragInert — slice 03 makes calendar entries drag-INERT until slice 08', () => {
+  it('true for a calendar entry (dragChannels has no ce- case; a drop would misroute to /api/jobs/.../assign)', () => {
+    expect(isDragInert(ev({ type: 'calendar-entry' }))).toBe(true);
+  });
+  it('false for job / walkthrough / service-plan — unaffected, still draggable', () => {
+    expect(isDragInert(ev({ type: 'job' }))).toBe(false);
+    expect(isDragInert(ev({ type: 'walkthrough' }))).toBe(false);
+    expect(isDragInert(ev({ type: 'service-plan' }))).toBe(false);
+  });
+});
+
+// D13 has TWO wordings now: the sentence every roomy surface uses, and the abbreviation the
+// 96.3px all-day pill uses because the sentence and the job number cannot both fit there.
+// The risk is not the wording - it is the two drifting apart on the silent-when-single edge,
+// which is the exact case D13 exists to get right. visitLabelCompact delegates the condition
+// rather than restating it; these hold that down.
+describe('visitLabel / visitLabelCompact (one condition, two wordings)', () => {
+  it('word the same trip differently', () => {
+    expect(visitLabel({ visitSeq: 2, visitCount: 5 })).toBe('Visit 2 of 5');
+    expect(visitLabelCompact({ visitSeq: 2, visitCount: 5 })).toBe('2/5');
+  });
+
+  it('agree on silence, case for case', () => {
+    const silent = [
+      { visitSeq: 1, visitCount: 1 },        // the 99% case - a single trip is not news
+      { visitSeq: 1, visitCount: undefined }, // no count known
+      { visitSeq: undefined, visitCount: 5 }, // counted but unnumbered
+    ];
+    for (const e of silent) {
+      expect(visitLabel(e)).toBeNull();
+      expect(visitLabelCompact(e)).toBeNull();
+    }
   });
 });

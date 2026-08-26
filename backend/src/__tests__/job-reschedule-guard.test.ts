@@ -55,16 +55,16 @@ describe('changesSchedule — which PATCH bodies count as a reschedule', () => {
 // reuse assign()'s `scheduled_start ? 'SCHEDULED' : existing.status`, because assign() pairs that
 // with milestoneClears('scheduled') + revertPlanVisitOnUncomplete. Only two of the 21 cells below
 // write a status at all; the other 19 leave the job exactly where it is.
-describe('deriveStatusOnReschedule - only promotes UNASSIGNED and only demotes SCHEDULED', () => {
+describe('deriveStatusOnReschedule - only promotes UNSCHEDULED and only demotes SCHEDULED', () => {
   const WHEN = new Date('2026-03-02T09:00:00Z');
 
   // Column order: [ start untouched, start written, start cleared ]. Hard-coded on purpose -
   // this table is the specification, not a restatement of the implementation's branches.
   const EXPECTED: Record<string, (JobStatus | undefined)[]> = {
-    UNASSIGNED: [undefined, 'SCHEDULED', undefined],
-    SCHEDULED: [undefined, undefined, 'UNASSIGNED'],
-    EN_ROUTE: [undefined, undefined, undefined],
-    ON_SITE: [undefined, undefined, undefined],
+    UNSCHEDULED: [undefined, 'SCHEDULED', undefined],
+    SCHEDULED: [undefined, undefined, 'UNSCHEDULED'],
+    // EN_ROUTE and ON_SITE left this table with multi-visit S4 (D17) - they are VisitStatus
+    // values now. Their rows were all-undefined anyway, so nothing about the rule changed.
     IN_PROGRESS: [undefined, undefined, undefined],
     COMPLETED: [undefined, undefined, undefined],
     CANCELLED: [undefined, undefined, undefined],
@@ -107,7 +107,8 @@ describe('PATCH /api/jobs/:id — reschedule guard (integration)', () => {
     customer_id: 'cust-1',
     source_plan_id: null,
     service_location: { state: 'CA' },
-    assignees: [{ user_id: TEST_USERS.technician.id }],
+    // S8 (D6): the job's crew is reached through its trips.
+    visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
     estimate: null,
     scheduled_start: new Date('2026-03-01T09:00:00Z'),
     scheduled_end: new Date('2026-03-01T11:00:00Z'),
@@ -172,11 +173,15 @@ describe('PATCH /api/jobs/:id — reschedule guard (integration)', () => {
   // job, same window move, but the crew member is busy elsewhere at the new time.
   it('409s a DISPATCHER whose crewed job collides at the new time', async () => {
     mockAuthAs('dispatcher');
+    // Multi-visit S6 (B7): the conflict query reads the other job's VISIT set now.
     mockPrisma.job.findMany.mockResolvedValueOnce([{
       id: 'conflict-job',
       job_number: 'J00002',
-      scheduled_start: new Date('2026-03-02T09:30:00Z'),
-      scheduled_end: new Date('2026-03-02T10:30:00Z'),
+      visits: [{
+        id: 'conflict-visit',
+        scheduled_at: new Date('2026-03-02T09:30:00Z'),
+        scheduled_end: new Date('2026-03-02T10:30:00Z'),
+      }],
     }]);
 
     const res = await request(app)

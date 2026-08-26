@@ -36,14 +36,44 @@ const statements = () =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+/**
+ * Multi-visit S8 (D6) dropped `job_assignees` and moved every stored OWN_JOB condition onto the
+ * visits path. This migration SHIPPED on 2026-08-05 and is a historical record: it must keep
+ * writing the value that was correct then, and S8's own migration repoints those rows forward.
+ * The 28 byte-identical migration pins exist precisely to stop a rename sweep editing shipped SQL.
+ *
+ * So the derivation still starts at DEFAULT_GRANTS - drift between the grant table and this
+ * migration is what the file is for - and then un-does S8's repoint. Loosening a pin like this
+ * can hide a broken chain, so the companion case below asserts the S8 migration really does carry
+ * the matching (old -> new) UPDATE. Together the two say: this migration writes the 2026-08-05
+ * shape, S8 carries it to today's shape, and today's shape is DEFAULT_GRANTS'.
+ */
+const S8_REPOINTS: Array<[pre: string, post: string]> = [
+  [
+    '{"assignees":{"some":{"user_id":"{{userId}}"}}}',
+    '{"visits":{"some":{"assignees":{"some":{"user_id":"{{userId}}"}}}}}',
+  ],
+];
+
+function preS8(literal: string): string {
+  let out = literal;
+  for (const [pre, post] of S8_REPOINTS) out = out.split(post).join(pre);
+  return out;
+}
+
 /** The exact jsonb literal the migration has to write for a given TECHNICIAN grant. */
 function conditionLiteralFor(action: string, subject: string): string {
   const grant = DEFAULT_GRANTS.find(
     (g) => g.role === 'TECHNICIAN' && g.action === action && g.subject === subject,
   );
   expect(grant, `DEFAULT_GRANTS has no TECHNICIAN ${action} ${subject}`).toBeDefined();
-  return JSON.stringify(grant!.conditions);
+  return preS8(JSON.stringify(grant!.conditions));
 }
+
+const S8_MIGRATION = join(
+  __dirname,
+  '../../prisma/migrations/20260820120000_visit_teardown_multi_visit_s8/migration.sql',
+);
 
 // The own-job condition every gate keys on: it is the STOCK, untouched shape, which is how the
 // migration recognises an org whose admin has not re-scoped the Technician role.
@@ -58,6 +88,20 @@ describe('technician creator-control backfill - it writes what DEFAULT_GRANTS sa
     ['read', 'Job'],
   ])('writes the exact %s %s condition from the grant table', (action, subject) => {
     expect(sql()).toContain(`${conditionLiteralFor(action, subject)}'::jsonb`);
+  });
+
+  it('hands the shape it writes to S8, which repoints it onto the visits path', () => {
+    // The other half of preS8(): without this, un-doing the repoint in the derivation above would
+    // let the two migrations silently disagree about what the stored value is.
+    const s8 = readFileSync(S8_MIGRATION, 'utf8');
+    for (const [pre, post] of S8_REPOINTS) {
+      expect(s8).toContain(`SET conditions = '${post}'::jsonb`);
+      expect(s8).toContain(`WHERE conditions = '${pre}'::jsonb`);
+    }
+    // And this migration's own read-Job widen is the OR wrapper around that same pre-shape, which
+    // S8 repoints as its literal (b).
+    expect(sql()).toContain(`'${conditionLiteralFor('read', 'Job')}'::jsonb`);
+    expect(s8).toContain(`WHERE conditions = '${conditionLiteralFor('read', 'Job')}'::jsonb`);
   });
 
   it.each([

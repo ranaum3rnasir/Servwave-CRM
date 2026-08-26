@@ -43,7 +43,13 @@ const fmt = (at: string) => new Date(at).toISOString();
 function renderRow(item: CommItem, props: Partial<Parameters<typeof CommRow>[0]> = {}) {
   return renderWithProviders(
     <ol>
-      <CommRow item={item} formatTimestamp={fmt} customerId={CUSTOMER_ID} {...props} />
+      <CommRow
+        item={item}
+        formatTimestamp={fmt}
+        tz="America/New_York"
+        customerId={CUSTOMER_ID}
+        {...props}
+      />
     </ol>
   );
 }

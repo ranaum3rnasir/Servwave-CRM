@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Phone, Star, PhoneForwarded, AlertTriangle, X } from 'lucide-react';
+import { Phone, Star } from 'lucide-react';
 import { useAppAbility } from '@/contexts/AbilityContext';
 import { useFeature } from '@/lib/entitlements';
 import { fmtPhone } from '@/lib/api/communication';
@@ -9,7 +9,6 @@ import {
   useSetUserDefaultNumber,
   useSetOrgDefaultNumber,
   type NumberAssignmentRow,
-  type RoutingSyncResult,
 } from '@/lib/api/phoneNumbers';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -45,17 +44,6 @@ export default function PhoneNumbersSettingsPage() {
 
   // Which number's assignment checklist is expanded (inline, no portal).
   const [editingId, setEditingId] = useState<string | null>(null);
-
-  // Task D2 — the most recent CTM inbound-routing sync result (from an
-  // assignment or org-default mutation), shown as a guidance banner until
-  // dismissed or replaced by the next one. `null` responses (e.g. unassigning
-  // to zero users, or unsetting the org default) intentionally leave whatever
-  // notice is already showing alone — see the backend controller for why
-  // those actions make no CTM call.
-  const [routingNotice, setRoutingNotice] = useState<{
-    numberFormatted: string;
-    result: RoutingSyncResult;
-  } | null>(null);
 
   // Fail closed: the query above is disabled when !gated (no admin fetch), and
   // the page renders nothing.
@@ -104,43 +92,23 @@ export default function PhoneNumbersSettingsPage() {
     const next = currentlyAssigned
       ? assignedIds.filter((id) => id !== userId)
       : [...assignedIds, userId];
-    setAssignments.mutate(
-      { id: row.id, userIds: next },
-      {
-        onSuccess: (data) => {
-          if (data.routing) setRoutingNotice({ numberFormatted: fmtPhone(row.e164), result: data.routing });
-        },
-      },
-    );
+    setAssignments.mutate({ id: row.id, userIds: next });
   };
 
   const toggleUserDefault = (userId: string, numberId: string, isDefault: boolean) =>
     setUserDefault.mutate({ userId, phoneNumberId: isDefault ? null : numberId });
 
   const toggleOrgDefault = (row: NumberAssignmentRow) =>
-    setOrgDefault.mutate(
-      { id: row.id, isOrgDefault: !row.is_org_default },
-      {
-        onSuccess: (data) => {
-          if (data.routing) setRoutingNotice({ numberFormatted: fmtPhone(row.e164), result: data.routing });
-        },
-      },
-    );
+    setOrgDefault.mutate({ id: row.id, isOrgDefault: !row.is_org_default });
 
   return (
     <div className="space-y-6">
       <p className="text-sm text-text-secondary">
         Choose which team members can place calls and send texts from each number, set each
-        person&apos;s default, and pick the organization&apos;s default caller ID.
+        person&apos;s default, and pick the organization&apos;s default caller ID. Assigning a
+        number also makes that person responsible for the calls it takes - it does not change
+        where the number rings, which is set on the number itself.
       </p>
-
-      {routingNotice && (
-        <RoutingGuidancePanel
-          numberFormatted={routingNotice.numberFormatted}
-          result={routingNotice.result}
-          onDismiss={() => setRoutingNotice(null)}
-        />
-      )}
 
       <div className="space-y-4">
         {numbers.map((row) => {
@@ -279,61 +247,5 @@ export default function PhoneNumbersSettingsPage() {
         })}
       </div>
     </div>
-  );
-}
-
-/**
- * Task D2 — post-assignment CTM setup guidance. ServWave only automates the
- * CONFIRMED half of inbound routing (a voicemail fallback); the rest
- * (Queue/agent ring config) is a one-time manual step in CTM's dashboard.
- * This panel hands the admin exact values instead of leaving them to guess:
- * `synced:true` renders `describeManualQueueScaffold`'s instructions
- * (numbered, with the real voice-menu name/id already filled in);
- * `synced:false` is a plain warning explaining why nothing was set up (never
- * a silent gap).
- */
-function RoutingGuidancePanel({
-  numberFormatted,
-  result,
-  onDismiss,
-}: {
-  numberFormatted: string;
-  result: RoutingSyncResult;
-  onDismiss: () => void;
-}) {
-  if (!result.synced) {
-    return (
-      <Card padding="sm" tone="warning" className="flex items-start gap-3">
-        <AlertTriangle className="h-5 w-5 shrink-0 text-warning" />
-        <div className="min-w-0 flex-1 space-y-1">
-          <p className="text-sm font-semibold text-text-primary">
-            Couldn&apos;t sync inbound routing for {numberFormatted}
-          </p>
-          <p className="text-sm text-text-secondary">{result.reason}</p>
-        </div>
-        <Button variant="ghost" size="sm" aria-label="Dismiss" onClick={onDismiss}>
-          <X className="h-4 w-4" />
-        </Button>
-      </Card>
-    );
-  }
-
-  const { manual_scaffold: scaffold } = result;
-  return (
-    <Card padding="sm" tone="brand" className="flex items-start gap-3">
-      <PhoneForwarded className="h-5 w-5 shrink-0 text-primary" />
-      <div className="min-w-0 flex-1 space-y-2">
-        <p className="text-sm font-semibold text-text-primary">{scaffold.title}</p>
-        <p className="text-sm text-text-secondary">{scaffold.summary}</p>
-        <ol className="list-decimal space-y-1 pl-4 text-sm text-text-primary">
-          {scaffold.steps.map((step, i) => (
-            <li key={i}>{step}</li>
-          ))}
-        </ol>
-      </div>
-      <Button variant="ghost" size="sm" aria-label="Dismiss" onClick={onDismiss}>
-        <X className="h-4 w-4" />
-      </Button>
-    </Card>
   );
 }

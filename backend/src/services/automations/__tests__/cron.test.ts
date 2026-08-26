@@ -46,6 +46,7 @@ beforeEach(() => {
     findUnique: vi.fn().mockResolvedValue(null),
   };
   mockPrisma.job.findMany.mockResolvedValue([]);
+  mockPrisma.visit.findMany.mockResolvedValue([]);
   mockPrisma.invoice.findMany.mockResolvedValue([]);
   mockPrisma.estimate.findMany.mockResolvedValue([]);
   mockCreateEnrollment.mockResolvedValue({ id: 'enr-x' });
@@ -71,23 +72,33 @@ describe('runAutomationTick — scanTimeTriggers', () => {
     });
   });
 
-  it('BEFORE_JOB_START: scans scheduled jobs inside [now, now+offset], org-scoped, and enrolls each candidate', async () => {
+  // S8 §2 (A4, RATIFIED): PER-VISIT, not per-job — repointed onto `visits`. A single-visit job
+  // still yields exactly one candidate, so this proves the query shape; the multi-visit fan-out
+  // (spec user story 43 — "fires on all three mornings") is its own test below.
+  it('BEFORE_JOB_START: scans LIVE visits inside [now, now+offset], org-scoped, and enrolls each candidate', async () => {
     const start = new Date(NOW.getTime() + 2 * HOUR);
     mockPrisma.workflow.findMany.mockResolvedValueOnce([timedWorkflow('BEFORE_JOB_START', 24 * 60)]);
-    mockPrisma.job.findMany.mockResolvedValueOnce([
-      { id: 'job-1', job_number: 'J00042', scheduled_start: start },
+    mockPrisma.visit.findMany.mockResolvedValueOnce([
+      { scheduled_at: start, job: { id: 'job-1', job_number: 'J00042' } },
     ]);
 
     await runAutomationTick(NOW);
 
-    const q = mockPrisma.job.findMany.mock.calls[0][0];
+    const q = mockPrisma.visit.findMany.mock.calls[0][0];
     expect(q.where.organization_id).toBe(ORG);
-    // Spec B1 (B-6): widened past SCHEDULED alone so en-route/on-site jobs still enrol --
-    // terminalStaleReason's ON_SITE/IN_PROGRESS check is what stops the reminder once work has
-    // actually started.
+    // Belt-and-braces guard mirroring the LEAD arm's `lead_id: { not: null }` — `visits` holds
+    // both jobs' and leads' trips.
+    expect(q.where.job_id).toEqual({ not: null });
+    // Spec B1 (B-6): widened past SCHEDULED alone so a technician marking themselves en route or
+    // on site early does not kill the customer's appointment reminder -- terminalStaleReason is
+    // what stops it once work has actually started.
+    //
+    // Multi-visit S8 §2: the candidate SET is unchanged, but it is now read directly off the
+    // VISIT's own status (LIVE_VISIT_STATUSES) instead of inferred through the job-level
+    // SCHEDULED/IN_PROGRESS proxy — EN_ROUTE and ON_SITE live on VisitStatus, not JobStatus.
     expect(q.where.status).toEqual({ in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] });
-    expect(q.where.scheduled_start.gte.getTime()).toBe(NOW.getTime());
-    expect(q.where.scheduled_start.lte.getTime()).toBe(NOW.getTime() + 24 * HOUR);
+    expect(q.where.scheduled_at.gte.getTime()).toBe(NOW.getTime());
+    expect(q.where.scheduled_at.lte.getTime()).toBe(NOW.getTime() + 24 * HOUR);
 
     expect(mockCreateEnrollment).toHaveBeenCalledTimes(1);
     const arg = mockCreateEnrollment.mock.calls[0][0];
@@ -102,11 +113,36 @@ describe('runAutomationTick — scanTimeTriggers', () => {
     expect(arg.now).toBe(NOW);
   });
 
+  // Contract A4's headline behaviour change: this is what "1 fire becomes 3" looks like at the
+  // poller's own boundary — one job, three live visits inside the window, three enrollment
+  // attempts sharing one entity id but each carrying its own occurrence.
+  it('BEFORE_JOB_START: a 3-visit job enrolls THREE times — one per visit, same job, distinct occurrences', async () => {
+    mockPrisma.workflow.findMany.mockResolvedValueOnce([timedWorkflow('BEFORE_JOB_START', 24 * 60)]);
+    const v1 = new Date(NOW.getTime() + HOUR);
+    const v2 = new Date(NOW.getTime() + 2 * HOUR);
+    const v3 = new Date(NOW.getTime() + 3 * HOUR);
+    mockPrisma.visit.findMany.mockResolvedValueOnce([
+      { scheduled_at: v1, job: { id: 'job-1', job_number: 'J00042' } },
+      { scheduled_at: v2, job: { id: 'job-1', job_number: 'J00042' } },
+      { scheduled_at: v3, job: { id: 'job-1', job_number: 'J00042' } },
+    ]);
+
+    await runAutomationTick(NOW);
+
+    expect(mockCreateEnrollment).toHaveBeenCalledTimes(3);
+    const occurrences = mockCreateEnrollment.mock.calls.map((c) => c[0].occurrenceKey);
+    expect(occurrences).toEqual([v1.toISOString(), v2.toISOString(), v3.toISOString()]);
+    expect(new Set(occurrences).size).toBe(3);
+    for (const call of mockCreateEnrollment.mock.calls) {
+      expect(call[0].entity).toEqual({ type: 'job', id: 'job-1', label: 'J00042' });
+    }
+  });
+
   it('BEFORE_JOB_START: createEnrollment resolving null (dedupe collision) does not throw or stop the loop for other candidates', async () => {
     mockPrisma.workflow.findMany.mockResolvedValueOnce([timedWorkflow('BEFORE_JOB_START', 24 * 60)]);
-    mockPrisma.job.findMany.mockResolvedValueOnce([
-      { id: 'job-1', job_number: 'J1', scheduled_start: new Date(NOW.getTime() + HOUR) },
-      { id: 'job-2', job_number: 'J2', scheduled_start: new Date(NOW.getTime() + 2 * HOUR) },
+    mockPrisma.visit.findMany.mockResolvedValueOnce([
+      { scheduled_at: new Date(NOW.getTime() + HOUR), job: { id: 'job-1', job_number: 'J1' } },
+      { scheduled_at: new Date(NOW.getTime() + 2 * HOUR), job: { id: 'job-2', job_number: 'J2' } },
     ]);
     mockCreateEnrollment.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'enr-2' });
 
@@ -168,6 +204,7 @@ describe('runAutomationTick — scanTimeTriggers', () => {
     ]);
     await runAutomationTick(NOW);
     expect(mockPrisma.job.findMany).not.toHaveBeenCalled();
+    expect(mockPrisma.visit.findMany).not.toHaveBeenCalled();
     expect(mockCreateEnrollment).not.toHaveBeenCalled();
   });
 });

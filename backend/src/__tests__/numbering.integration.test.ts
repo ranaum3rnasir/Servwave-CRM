@@ -28,6 +28,14 @@ const enabled =
   typeof process.env.DATABASE_URL === 'string' &&
   !process.env.DATABASE_URL.includes('test:test@localhost');
 
+// A silently skipped guard is worse than no guard. When a run explicitly asks for the
+// integration tests (CI does), refuse to skip quietly - fail and name the reason.
+describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== '1')('integration opt-in', () => {
+  it('has a real DATABASE_URL to run against', () => {
+    expect(enabled).toBe(true);
+  });
+});
+
 describe.skipIf(!enabled)('allocateNumber — real-DB concurrent atomicity', () => {
   // Dynamic imports so this file does NOT pull in PrismaClient when skipped
   // (avoids generated-client side effects in normal unit-test runs).
@@ -46,7 +54,10 @@ describe.skipIf(!enabled)('allocateNumber — real-DB concurrent atomicity', () 
     prisma = new prismaPkg.PrismaClient();
     allocateNumber = numberingMod.allocateNumber;
 
-    // Pre-clean in case a prior run aborted before afterAll.
+    // Pre-clean in case a prior run aborted before afterAll. Customers first: a test that
+    // dies mid-flight leaves its rows behind, and organization.deleteMany then trips the
+    // customers_organization_id_fkey instead of cleaning up.
+    await prisma.customer.deleteMany({ where: { organization_id: { in: [ORG_A, ORG_B] } } });
     await prisma.organization.deleteMany({ where: { id: { in: [ORG_A, ORG_B] } } });
 
     // Seed two throw-away orgs. Use minimal fields; rely on Prisma defaults.
@@ -84,6 +95,7 @@ describe.skipIf(!enabled)('allocateNumber — real-DB concurrent atomicity', () 
 
   afterAll(async () => {
     if (!prisma) return;
+    await prisma.customer.deleteMany({ where: { organization_id: { in: [ORG_A, ORG_B] } } });
     await prisma.organization.deleteMany({ where: { id: { in: [ORG_A, ORG_B] } } });
     await prisma.$disconnect();
   });
@@ -169,6 +181,70 @@ describe.skipIf(!enabled)('allocateNumber — real-DB concurrent atomicity', () 
 
     const next = await allocateNumber(prisma, 'customer', ORG_A);
     expect(Number(next.replace(/^[A-Za-z-]+/, ''))).toBe(6); // max(5)+1, not the stale 1
+
+    await prisma.customer.deleteMany({ where: { organization_id: ORG_A } });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Custom numbers (the editable-record-ids allocator work). Both cases below
+  // execute the tier-1 skip statement, which a mocked $queryRaw never plans — the
+  // `lpad(text, bigint, ...)` 42883 that broke every create in the org was
+  // invisible to the unit suite and visible here on the first run.
+  // ---------------------------------------------------------------------------
+
+  it('steps over a hand-typed number sitting exactly where the counter lands', async () => {
+    // C00007 is taken by hand; the counter is about to hand out 7. Colliding here is the
+    // unique-violation 500 this path exists to prevent.
+    await prisma.customer.create({
+      data: {
+        organization_id: ORG_A,
+        customer_number: 'C00007',
+        number_is_custom: true,
+        kind: 'PERSON',
+        segment: 'RESIDENTIAL',
+        email: 'taken@test.invalid',
+        phone: '+15555550007',
+      },
+    });
+    await prisma.organization.update({
+      where: { id: ORG_A },
+      data: { customer_next_number: 7 },
+    });
+
+    const next = await allocateNumber(prisma, 'customer', ORG_A);
+    expect(next).toBe('C00008');
+
+    await prisma.customer.deleteMany({ where: { organization_id: ORG_A } });
+  });
+
+  it('does not drag the series up to a hand-typed number far above the counter', async () => {
+    // The Workiz-import shape: one hand-typed id in the 500s must not catapult the whole
+    // org's automatic series into that range.
+    await prisma.customer.create({
+      data: {
+        organization_id: ORG_A,
+        customer_number: 'C00500',
+        number_is_custom: true,
+        kind: 'PERSON',
+        segment: 'RESIDENTIAL',
+        email: 'workiz@test.invalid',
+        phone: '+15555550500',
+      },
+    });
+    await prisma.organization.update({
+      where: { id: ORG_A },
+      data: { customer_next_number: 3 },
+    });
+
+    const next = await allocateNumber(prisma, 'customer', ORG_A);
+    expect(next).toBe('C00003');
+
+    const org = await prisma.organization.findUnique({
+      where: { id: ORG_A },
+      select: { customer_next_number: true },
+    });
+    // The counter self-healed off non-custom rows only — it never saw the 500.
+    expect(org.customer_next_number).toBe(4);
 
     await prisma.customer.deleteMany({ where: { organization_id: ORG_A } });
   });

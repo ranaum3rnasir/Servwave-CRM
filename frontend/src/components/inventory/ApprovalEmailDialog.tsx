@@ -234,7 +234,7 @@ export function ApprovalEmailDialog({
       open={open}
       onClose={onClose}
       title={`Email Approval Request · ${approval.itemSku}`}
-      subtitle={`Notifies approvers with full context + a deep link to approve/reject. Prototype: send is mocked.`}
+      subtitle="Notifies approvers with full context plus a direct link to approve or reject."
       size="lg"
       lockEscape={lockEscape}
       footer={

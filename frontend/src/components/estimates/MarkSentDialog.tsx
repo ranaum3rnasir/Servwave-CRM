@@ -111,6 +111,13 @@ export function MarkSentDialog({
     },
   });
 
+  // The mutation outlives any one opening of the dialog, so a failed attempt leaves `mutation.error`
+  // set and the next open renders last time's refusal as if it were about this attempt.
+  useEffect(() => {
+    if (open) mutation.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">

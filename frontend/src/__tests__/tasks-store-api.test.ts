@@ -21,7 +21,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const mockApi = vi.mocked(api);
 const ROW = { id: 't1', task_number: 'T00001', title: 'X', description: '', status: 'TODO', priority: 'MEDIUM',
-  owner_id: null, due_at: null, linked_entity_type: 'JOB', linked_entity_id: 'job-1', tags: [],
+  assignee_ids: ['u1'], assignees: [{ id: 'u1', name: 'Oved Adani' }],
+  due_at: null, linked_entity_type: 'JOB', linked_entity_id: 'job-1', tags: [],
   created_by: 'u1', created_at: '2026-06-17T00:00:00Z', updated_at: '2026-06-17T00:00:00Z', completed_at: null };
 
 beforeEach(() => { vi.clearAllMocks(); });
@@ -31,7 +32,8 @@ it('createTask posts to /api/tasks and maps the row to a full Task', async () =>
   const t = await createTask({ title: 'X', linked_entity: { type: 'JOB', id: 'job-1' } });
   expect(mockApi.post).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({ title: 'X', linked_entity_id: 'job-1', linked_entity_type: 'JOB' }));
   expect(t.subtasks).toEqual([]);            // default-filled
-  expect(t.linked_entity).toEqual({ type: 'JOB', id: 'job-1', label: '' });
+  // Dangling shape: the create response never resolved a label, so it stays '' and NOT redacted.
+  expect(t.linked_entity).toEqual({ type: 'JOB', id: 'job-1', label: '', redacted: false });
   expect(t.ai.source).toBe('manual');
 });
 
@@ -104,7 +106,7 @@ describe('fetchTasks store loading guard', () => {
 
 it('getTask maps the detail row to a full Task', async () => {
   mockApi.get.mockResolvedValue({ data: { task: {
-    ...ROW, owner_name: 'Oved Adani', linked_entity_label: 'J00934 · Access Control',
+    ...ROW, linked_entity_label: 'J00934 · Access Control',
     risk: { score: 40, reason: 'high priority' },
     subtasks: [{ id:'s1', text:'Wire', done:true, position:0 }],
     comments: [{ id:'n1', body:'Ordered', author_id:'u1', author_name:'Oved Adani', at:'2026-06-17T00:00:00Z' }],
@@ -168,6 +170,46 @@ describe('nudgeApi', () => {
   });
 });
 
+describe('assignee_ids on the wire', () => {
+  it('createTask OMITS assignee_ids when the caller did not choose any', async () => {
+    // A missing key is the documented way to say "default to the actor"; an
+    // EMPTY array is a 400 ("a task must have at least one assignee"). The two
+    // must not be conflated by a helpful `?? []`.
+    mockApi.post.mockResolvedValue({ data: { task: ROW } });
+    await createTask({ title: 'X' });
+    const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>;
+    expect('assignee_ids' in body).toBe(false);
+  });
+
+  it('createTask omits assignee_ids when handed an empty array', async () => {
+    mockApi.post.mockResolvedValue({ data: { task: ROW } });
+    await createTask({ title: 'X', assignee_ids: [] });
+    const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>;
+    expect('assignee_ids' in body).toBe(false);
+  });
+
+  it('createTask forwards a chosen assignee set verbatim', async () => {
+    mockApi.post.mockResolvedValue({ data: { task: ROW } });
+    await createTask({ title: 'X', assignee_ids: ['u1', 'u2'] });
+    const body = mockApi.post.mock.calls[0][1] as Record<string, unknown>;
+    expect(body.assignee_ids).toEqual(['u1', 'u2']);
+  });
+
+  it('updateTaskApi forwards assignee_ids in the PATCH body', async () => {
+    mockApi.patch.mockResolvedValue({ data: { task: ROW } });
+    await updateTaskApi('t1', { assignee_ids: ['u2', 'u3'] });
+    expect(mockApi.patch).toHaveBeenCalledWith('/api/tasks/t1', expect.objectContaining({ assignee_ids: ['u2', 'u3'] }));
+  });
+
+  it('mapRowToTask materialises a ref for an id the row did not resolve', async () => {
+    mockApi.get.mockResolvedValue({ data: { tasks: [{ ...ROW, assignee_ids: ['u1', 'ghost'] }] } });
+    const [task] = await listTasks();
+    // 'ghost' has no entry in `assignees`, so it must still render as a person.
+    expect(task.assignee_ids).toEqual(['u1', 'ghost']);
+    expect(task.assignees).toEqual([{ id: 'u1', name: 'Oved Adani' }, { id: 'ghost', name: null }]);
+  });
+});
+
 describe('updateTaskApi watcher_ids', () => {
   it('forwards watcher_ids in the PATCH body', async () => {
     mockApi.patch.mockResolvedValue({ data: { task: ROW } });
@@ -189,6 +231,37 @@ const DETAIL_ROW = {
 describe('store actions trigger fetchTaskDetail resync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('setAssignees: PATCHes the new set then resyncs', async () => {
+    const { useTasksStore } = await import('@/stores/tasksStore');
+    useTasksStore.setState({ tasks: [{ id: 't1', title: 'X' } as never], loaded: true, loading: false });
+
+    mockApi.patch.mockResolvedValue({ data: { task: ROW } });
+    mockApi.get.mockResolvedValue({ data: { task: DETAIL_ROW } });
+
+    await useTasksStore.getState().setAssignees('t1', ['u2', 'u3']);
+
+    expect(mockApi.patch).toHaveBeenCalledWith('/api/tasks/t1', { assignee_ids: ['u2', 'u3'] });
+    expect(mockApi.get).toHaveBeenCalledWith('/api/tasks/t1');
+  });
+
+  it('setAssignees: refuses an EMPTY set locally instead of sending a doomed PATCH', async () => {
+    // The server answers `assignee_ids: []` with a 400 ("a task must have at
+    // least one assignee"). This is called from a multi-select's onChange, where
+    // a rejected promise has nowhere to be caught - so the invariant is enforced
+    // here, with a toast, and the widget resynced back to the real roster.
+    const { useTasksStore } = await import('@/stores/tasksStore');
+    useTasksStore.setState({ tasks: [{ id: 't1', title: 'X' } as never], loaded: true, loading: false });
+
+    mockApi.get.mockResolvedValue({ data: { task: DETAIL_ROW } });
+
+    await useTasksStore.getState().setAssignees('t1', []);
+
+    expect(mockApi.patch).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    // ...and the drawer is put back in sync, so the removed chip reappears.
+    expect(mockApi.get).toHaveBeenCalledWith('/api/tasks/t1');
   });
 
   it('addComment: POSTs then resyncs from server', async () => {

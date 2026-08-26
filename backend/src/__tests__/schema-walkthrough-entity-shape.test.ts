@@ -124,6 +124,6 @@ describe('walkthrough entity foundations migration', () => {
     expect(SQL).not.toMatch(/DROP COLUMN[^;]*"?lead_id"?/i);
     expect(SQL).not.toMatch(/DROP CONSTRAINT[^;]*lead_walkthrough_performers_lead_id_fkey/i);
     expect(SQL).not.toMatch(/DROP INDEX[^;]*lead_walkthrough_performers_lead_id_user_id_key/i);
-    expect(SQL).not.toMatch(/walkthrough_id",\s*"user_id"\)/); // no new (walkthrough_id, user_id) unique index yet
+    expect(SQL).not.toMatch(/walkthrough_id",\s*"user_id"\)/); // no new (visit_id, user_id) unique index yet
   });
 });

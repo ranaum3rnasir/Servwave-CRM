@@ -56,6 +56,21 @@ async function main() {
 
   console.log('\nApplying updates...');
   for (const lead of leads) {
+    // DELIBERATE BYPASS of the single-writer rule (spec #1751 D6). Every other writer of
+    // `leads.status` in the product goes through `transitionLeadStatus`, which is what makes the
+    // status ledger trustworthy enough to report from. This one-shot repair script does not, and
+    // the consequences are recorded here rather than left to be discovered:
+    //
+    //   - it files NO ledger entry, so these repairs are absent from the lead's timeline and from
+    //     any time-in-stage computed off it;
+    //   - it stamps NO stage clock, so a lead moved here gets no `first_estimate_sent_at` from
+    //     this run (D10's backfill derives that from the estimate's own `sent_at` instead);
+    //   - it has no actor to attribute the move to, which is the honest reason not to file a
+    //     ledger entry claiming somebody made it.
+    //
+    // It repairs rows written before PR #75 and MUST NOT BE RE-RUN. A second run against a
+    // database that has moved on would re-assert ESTIMATED over statuses set legitimately since,
+    // silently and with no trace of having done so.
     await prisma.lead.update({
       where: { id: lead.id },
       data: { status: 'ESTIMATED' },

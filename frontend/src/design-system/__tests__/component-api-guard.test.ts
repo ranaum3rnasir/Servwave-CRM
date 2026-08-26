@@ -984,6 +984,17 @@ const RAW_TAG_CEILINGS: Record<string, number> = {
   // typography cue has no slack left in the frozen SOFT ratchet to restore).
   // Re-measured against this exact classifier, cumulative across all five
   // merged button batches.
+  // NOTE for every batch record below that names `assets/AssetsView.tsx` or
+  // `assets/AssetHistoryDrawer.tsx`: BOTH FILES ARE DELETED. They were the
+  // Assets tab of the dead v1 `pages/inventory/InventoryPage.tsx`, their only
+  // importer, and the routed page has carried its own kit-built replacements
+  // (`pages/v2/inventory/components/{assetsView,assetHistoryPanel}.tsx`) since
+  // the v2 rebuild. Deleting the v1 page orphaned them, so they went with it.
+  // The batch totals below are deliberately left as measured - they were true
+  // when taken - and the citations are annotated by this one note rather than
+  // rewritten one by one, so a reader who greps either filename finds the
+  // reason here. Their sibling `assets/{AssetDialog,AssetActionDialog,
+  // AssetBits}.tsx` are all still live: the v2 forks import them directly.
   // 788 -> 765, "inventory transfer, staging and asset views" batch: 23 of
   // the 50 raw buttons across StagingAreaPicker.tsx, StagingView.tsx,
   // TransferDialog.tsx, VendorDetailDialog.tsx, assets/AssetActionDialog.tsx,
@@ -1685,7 +1696,19 @@ const RAW_TAG_CEILINGS: Record<string, number> = {
   // LogoUpload.tsx, components/workflows/RecipientMultiSelect.tsx, pages/
   // CustomersPage.tsx, pages/JobDetailPage.tsx, pages/inventory/InventoryPage
   // .tsx, pages/reports/{CallTrackingReport,CampaignRoiReport}.tsx, pages/
-  // service-plans/ServicePlansPage.tsx): ServicePlansPage.tsx's Plan name +
+  // service-plans/ServicePlansPage.tsx
+  // -- TWO OF THOSE ELEVEN NO LONGER EXIST. `pages/JobDetailPage.tsx` and
+  // `pages/inventory/InventoryPage.tsx` were both dead v1 pages: `App.tsx`
+  // routes only what `v2Routes()` returns, so neither had been reachable
+  // since the v2 cutover, and each was deleted once its routed replacement
+  // reached parity. The "144 -> 141" figure is NOT restated - it was a
+  // correct measurement when taken, and the conversions it counts really
+  // happened. Only the file list is annotated, so a reader who greps for
+  // either path learns why it is missing instead of concluding the record
+  // is wrong. Same treatment switch.stories.tsx gives its own removed call
+  // site. Today's scan simply never visits them, and every ratchet here is
+  // `toBeLessThanOrEqual`, so a deletion can only ever create slack.
+  // ): ServicePlansPage.tsx's Plan name +
   // Start date labels each hand-rolled a `<label>` above a sibling Input with
   // no htmlFor/id, so both now render through FormField; its Sold by label
   // converts the same way via FormField's render-prop child (Select is a
@@ -2013,9 +2036,21 @@ const RAW_TAG_CEILINGS: Record<string, number> = {
   // against this exact classifier, cumulative on top of the settings-panel,
   // workflows/ai-center, inventory, pages-root-m-z, reports and pages-root-a-l
   // batches above.
-  heading: 67,
+  // 67 -> 58, closing the nine-count slack the guard had been reporting for
+  // several runs. Nothing was converted to earn this: the tree already measured
+  // 58 and the ceiling was simply higher than the count. It is lowered now
+  // because the kit finally has somewhere for a heading to go - ui-kit's
+  // components/ui/heading.tsx (level 1-6, scale independent of level) landed
+  // with the statCard/CardTitle parity work, and CardTitle renders a real h3
+  // through it. Before that a page below page-header level had no legal way to
+  // author a heading and hand-rolled role="heading" instead, so holding slack
+  // open was the humane choice. It no longer is.
+  heading: 58,
   a: 44,
-  table: 57,
+  // 57 -> 56. The invoice credit and refund dialogs each hand-rolled the same
+  // give-back ledger table; they now share one (invoices/GiveBackLedger.tsx),
+  // so the tree is one raw <table> lighter and the ceiling follows it down.
+  table: 56,
   img: 38,
 };
 

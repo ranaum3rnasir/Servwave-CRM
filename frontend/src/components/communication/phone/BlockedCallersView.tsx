@@ -39,6 +39,7 @@ import {
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
 import { dayLabel } from "@/components/communication/phone/shared";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 /* ─────────────────── Blocked callers ─────────────────── */
 
@@ -57,6 +58,7 @@ export function BlockedCallersView({
   onUnblock: (id: string) => void;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
+  const tz = useScheduleTimezone();
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
@@ -138,7 +140,7 @@ export function BlockedCallersView({
                     </p>
                   )}
                   <p className="mt-0.5 text-[11px] text-text-secondary">
-                    Blocked {dayLabel(b.blockedAt)} · {b.blockedBy}
+                    Blocked {dayLabel(b.blockedAt, tz)} · {b.blockedBy}
                   </p>
                 </div>
                 <button

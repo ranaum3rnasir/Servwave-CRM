@@ -30,14 +30,10 @@ import { EntityCallDrawer } from '@/components/communication/shared/EntityCallDr
 import { EntitySmsDrawer } from '@/components/communication/shared/EntitySmsDrawer';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useLeadCommunications, useSendLeadSms } from '@/lib/api/jobCommunications';
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
-function formatAt(at: string) {
-  return new Date(at).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+function formatAt(at: string, tz: string) {
+  return formatInstant(at, tz);
 }
 
 export function LeadCommunicationsTab({
@@ -55,6 +51,7 @@ export function LeadCommunicationsTab({
   customerName?: string;
   customerPhone?: string;
 }) {
+  const tz = useScheduleTimezone();
   const { data: items, isLoading, isError } = useLeadCommunications(leadId);
   const sendSms = useSendLeadSms(leadId);
   const ability = useAppAbility();
@@ -130,7 +127,8 @@ export function LeadCommunicationsTab({
             <CommRow
               key={it.id}
               item={it}
-              formatTimestamp={formatAt}
+              formatTimestamp={(at) => formatAt(at, tz)}
+              tz={tz}
               currentLeadId={leadId}
               customerId={customerId}
               onSelect={

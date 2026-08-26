@@ -57,7 +57,7 @@ const SALES_USER = TEST_USERS.sales;
 const JOB_WITH_COMMISSION = {
   ...JOB_FIXTURE,
   status: 'SCHEDULED' as const,
-  assignees: [{ user_id: TECH_USER.id }],
+  assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
   estimate: {
     ...JOB_FIXTURE.estimate,
     lead: {
@@ -75,7 +75,7 @@ const JOB_WITH_COMMISSION = {
 const SCHEDULED_NO_INVOICE_JOB = {
   ...JOB_FIXTURE,
   status: 'SCHEDULED' as const,
-  assignees: [{ user_id: TECH_USER.id }],
+  assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
   invoices: [],
 };
 
@@ -83,7 +83,7 @@ const SCHEDULED_NO_INVOICE_JOB = {
 const COMPLETED_JOB = {
   ...JOB_FIXTURE,
   status: 'COMPLETED' as const,
-  assignees: [{ user_id: TECH_USER.id }],
+  assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
   invoices: [],
   estimate: {
     ...JOB_FIXTURE.estimate,
@@ -135,7 +135,7 @@ describe('POST /api/jobs (direct create, no estimate) — dispatch.job_created',
       id: 'j0000000-0000-0000-0000-000000000099',
       job_number: 'J00099',
       estimate: null,
-      assignees: [],
+      assignees: [], visits: [{ assignees: [] }],
     };
 
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
@@ -190,7 +190,7 @@ describe('POST /api/jobs/:id/start — job.started', () => {
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       id: JOB_WITH_COMMISSION.id,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       job_number: JOB_WITH_COMMISSION.job_number,
     });
 
@@ -236,7 +236,7 @@ describe('POST /api/jobs/:id/complete — job.completed', () => {
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       id: JOB_FIXTURE.id,
       status: 'IN_PROGRESS',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       job_number: JOB_FIXTURE.job_number,
       source_plan_id: null,
     });
@@ -287,13 +287,16 @@ describe('POST /api/jobs/:id/cancel — job.cancelled', () => {
       },
     });
 
-    // cancel() uses a $transaction. The tx.job.update returns jobDetailSelect shape
-    // where assignees = [{ user: { id, ... } }] (not { user_id }).
+    // cancel() uses a $transaction; tx.job.update returns the jobDetailSelect shape.
+    // S8 (D6): jobDetailSelect returns crew through the TRIPS - there is no top-level
+    // `assignees` key on a job row any more, and a fixture that keeps one alive is how a
+    // notification that reaches nobody stays green.
     const cancelledJob = {
       ...JOB_WITH_COMMISSION,
       status: 'CANCELLED',
       cancelled_at: new Date(),
-      assignees: [{ user: { id: TECH_USER.id, first_name: 'Test', last_name: 'Tech' } }],
+      assignees: undefined,
+      visits: [{ assignees: [{ user_id: TECH_USER.id, user: { id: TECH_USER.id, first_name: 'Test', last_name: 'Tech' } }] }],
     };
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
@@ -304,6 +307,8 @@ describe('POST /api/jobs/:id/cancel — job.cancelled', () => {
         // Inventory P1 (§4.2): cancel's auto-return pass — nothing SYNCED in this flow.
         jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       }),
     );
 
@@ -342,12 +347,13 @@ describe('POST /api/jobs/:id/reopen — job.reopened', () => {
       invoices: [],
     });
 
-    // prisma.job.update returns jobDetailSelect shape for assignees.
+    // S8 (D6): the detail select's crew lives on the visits. See the cancel test above.
     const reopenedJob = {
       ...COMPLETED_JOB,
       status: 'IN_PROGRESS',
       completed_at: null,
-      assignees: [{ user: { id: TECH_USER.id, first_name: 'Test', last_name: 'Tech' } }],
+      assignees: undefined,
+      visits: [{ assignees: [{ user_id: TECH_USER.id, user: { id: TECH_USER.id, first_name: 'Test', last_name: 'Tech' } }] }],
     };
     mockPrisma.job.update.mockResolvedValue(reopenedJob);
     mockPrisma.timelineEvent.create.mockResolvedValue({});

@@ -27,7 +27,7 @@ function stubEveryDashboardQuery() {
   (prisma.user.findMany as Mock).mockResolvedValue([]);
   (prisma.timelineEvent.findMany as Mock).mockResolvedValue([]);
   (prisma.invoice.findMany as Mock).mockResolvedValue([]);
-  (prisma.walkthrough.findMany as Mock).mockResolvedValue([]);
+  (prisma.visit.findMany as Mock).mockResolvedValue([]);
   (prisma.$queryRaw as Mock).mockResolvedValue([]);
 }
 
@@ -38,16 +38,21 @@ beforeEach(() => {
 });
 
 describe('GET /api/dashboard — walkthrough attention query', () => {
-  it('filters the "needs scheduling" attention query by Walkthrough.status = REQUESTED, not lead status/columns', async () => {
+  // Multi-visit D22a: the bucket flipped from "has a REQUESTED placeholder" to "has NO live
+  // visit". REQUESTED described a lead needing a visit, not a state of a visit, and it cannot
+  // survive multi-visit - with several live visits there is no single row to be the placeholder.
+  it('filters the "needs scheduling" attention query by the ABSENCE of a live visit, not lead status/columns', async () => {
     mockAuthAs('orgB_admin');
 
     const res = await request(app).get('/api/dashboard').set(authHeader('orgB_admin'));
 
     expect(res.status).toBe(200);
     const leadFindManyCalls = (prisma.lead.findMany as Mock).mock.calls;
-    const attentionCall = leadFindManyCalls.find((c: any[]) => c[0]?.where?.walkthroughs !== undefined);
+    const attentionCall = leadFindManyCalls.find((c: any[]) => c[0]?.where?.visits !== undefined);
     expect(attentionCall).toBeDefined();
-    expect(attentionCall![0].where.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(attentionCall![0].where.visits).toEqual({
+      none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } },
+    });
     // The old legacy-column filters must be gone.
     expect(attentionCall![0].where.walkthrough_needed).toBeUndefined();
     expect(attentionCall![0].where.walkthrough_scheduled_at).toBeUndefined();
@@ -61,15 +66,15 @@ describe('GET /api/dashboard — schedule widget walkthroughs', () => {
     const res = await request(app).get('/api/dashboard').set(authHeader('orgB_admin'));
 
     expect(res.status).toBe(200);
-    expect(prisma.walkthrough.findMany).toHaveBeenCalled();
-    const call = (prisma.walkthrough.findMany as Mock).mock.calls[0][0];
+    expect(prisma.visit.findMany).toHaveBeenCalled();
+    const call = (prisma.visit.findMany as Mock).mock.calls[0][0];
     expect(call.where.status).toEqual({ in: ['SCHEDULED', 'COMPLETED'] });
     expect(call.where.scheduled_at).toBeDefined();
   });
 
   it('the schedule lane entity keeps the LEAD id (not the Walkthrough row id) for the frontend link contract', async () => {
     mockAuthAs('orgB_admin');
-    (prisma.walkthrough.findMany as Mock).mockResolvedValue([
+    (prisma.visit.findMany as Mock).mockResolvedValue([
       {
         id: 'wt-1',
         scheduled_at: new Date(),
@@ -82,7 +87,7 @@ describe('GET /api/dashboard — schedule widget walkthroughs', () => {
           customer: { first_name: 'John', last_name: 'Doe', company_name: null },
           service_location: { address_line1: '123 Main St', city: 'Austin' },
         },
-        performers: [{ user: { id: 'u1', first_name: 'Test', last_name: 'Tech' } }],
+        assignees: [{ user: { id: 'u1', first_name: 'Test', last_name: 'Tech' } }],
       },
     ]);
 
@@ -95,5 +100,48 @@ describe('GET /api/dashboard — schedule widget walkthroughs', () => {
       .find((item: any) => item.entity === 'walkthrough');
     expect(walkthroughEntry).toBeDefined();
     expect(walkthroughEntry.id).toBe('lead-1');
+  });
+});
+
+describe('GET /api/dashboard - job visits are not walkthroughs (multi-visit S2)', () => {
+  // The S2 migration backfills one WORK visit per already-scheduled job, and POST
+  // /api/jobs/:id/visits mints more. Those rows have NO lead, so a walkthrough query that
+  // selects every visit on the date hands the schedule builder a lead-less row and the whole
+  // dashboard 500s for any org with a job scheduled that day.
+  it('still answers, and lists only the LEAD walkthrough, when a job visit falls on the same day', async () => {
+    mockAuthAs('orgB_admin');
+    (prisma.visit.findMany as Mock).mockResolvedValue([
+      {
+        id: 'visit-job-1',
+        scheduled_at: new Date(),
+        duration_minutes: 150,
+        completed_at: null,
+        // A job visit: D5 says exactly one parent, so `lead` is null here.
+        lead: null,
+        assignees: [],
+      },
+      {
+        id: 'visit-lead-1',
+        scheduled_at: new Date(),
+        duration_minutes: 60,
+        completed_at: null,
+        lead: {
+          id: 'lead-1',
+          lead_number: 'L00001',
+          service_request: 'AC repair',
+          customer: { first_name: 'John', last_name: 'Doe', company_name: null },
+          service_location: { address_line1: '123 Main St', city: 'Austin' },
+        },
+        assignees: [{ user: { id: 'u1', first_name: 'Test', last_name: 'Tech' } }],
+      },
+    ]);
+
+    const res = await request(app).get('/api/dashboard').set(authHeader('orgB_admin'));
+
+    expect(res.status).toBe(200);
+    const walkthroughEntries = (res.body.schedule_today ?? [])
+      .flatMap((lane: any) => lane.jobs ?? [])
+      .filter((item: any) => item.entity === 'walkthrough');
+    expect(walkthroughEntries.map((w: any) => w.id)).toEqual(['lead-1']);
   });
 });

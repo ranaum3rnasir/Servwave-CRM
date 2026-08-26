@@ -12,10 +12,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 import { DatePicker } from '@/components/form/DatePicker';
 
-export interface Opt {
-  key: string;
-  label: string;
-}
+import type { Opt } from '@/lib/reports/types';
 
 const ord = (n: number) => {
   const s = ['th', 'st', 'nd', 'rd'];

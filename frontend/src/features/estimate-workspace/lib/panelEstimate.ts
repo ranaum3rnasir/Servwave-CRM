@@ -14,6 +14,12 @@ export interface EstimateJobRef {
 export interface PanelEstimate {
   id: string;
   estimate_number: string;
+  // Editable record IDs (2026-08-19 plan) - RecordNumberEditor's `isDerivedAndLocked` prop:
+  // true when this estimate's number was derived from a container parent (container_kind set)
+  // AND has not been custom-edited yet (number_is_custom false). See estimate.controller.ts's
+  // estimateDetailSelect for where these are selected.
+  container_kind?: string | null;
+  number_is_custom?: boolean;
   status: string;
   tax_rate: number;
   discount_type?: 'PERCENTAGE' | 'FIXED_AMOUNT' | null;

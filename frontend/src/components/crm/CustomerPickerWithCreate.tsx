@@ -63,11 +63,18 @@ export interface CustomerPickerWithCreateProps {
    */
   valueLabel: string;
   onChange: (id: string, label: string) => void;
+  /**
+   * Show the "Create new customer" row (and let a search term drop into the create form).
+   * Defaults to `true` so every existing caller keeps today's behaviour byte-identical.
+   * Pass `false` for a picker that must offer existing customers only - e.g. the Event
+   * dialog's participants field, where the product owner asked for no inline create.
+   */
+  allowCreate?: boolean;
 }
 
-export function CustomerPickerWithCreate({ value, valueLabel, onChange }: CustomerPickerWithCreateProps) {
+export function CustomerPickerWithCreate({ value, valueLabel, onChange, allowCreate = true }: CustomerPickerWithCreateProps) {
   const ability = useAppAbility();
-  const canCreate = ability.can('create', 'Customer');
+  const canCreate = allowCreate && ability.can('create', 'Customer');
   const { toast } = useToast();
   const qc = useQueryClient();
 

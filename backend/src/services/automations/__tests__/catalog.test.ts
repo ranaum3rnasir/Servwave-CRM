@@ -13,6 +13,7 @@ import {
   type AutomationTemplate,
 } from '../catalog';
 import { validateWorkflowDefinition } from '../workflowValidation';
+import { LEAD_STAGE_CLOCK_ANCHORS } from '../anchors';
 
 const ALL_TRIGGERS = Object.values(AutomationTriggerType);
 const ALL_ACTIONS = Object.values(AutomationActionType);
@@ -319,11 +320,36 @@ describe('catalog — date-anchored triggers', () => {
     expect(TRIGGERS.JOB_DATE_ANCHORED.mergeFields).toEqual(TRIGGERS.JOB_SCHEDULED.mergeFields);
   });
 
-  it('advertises one anchor option per entity for the builder', () => {
-    expect(ANCHOR_OPTIONS.invoice).toEqual([{ key: 'invoice.due_date', label: 'the invoice due date' }]);
-    expect(ANCHOR_OPTIONS.job).toEqual([{ key: 'job.scheduled_start', label: 'the appointment' }]);
-    expect(ANCHOR_OPTIONS.estimate).toEqual([{ key: 'estimate.valid_until', label: 'the estimate expiration' }]);
-    expect(ANCHOR_OPTIONS.lead).toEqual([{ key: 'lead.walkthrough_scheduled_at', label: 'the walkthrough' }]);
+  it('advertises the anchor options each entity offers the builder', () => {
+    const both = ['before', 'after'];
+    expect(ANCHOR_OPTIONS.invoice).toEqual([
+      { key: 'invoice.due_date', label: 'the invoice due date', directions: both },
+    ]);
+    expect(ANCHOR_OPTIONS.job).toEqual([{ key: 'job.scheduled_start', label: 'the appointment', directions: both }]);
+    expect(ANCHOR_OPTIONS.estimate).toEqual([
+      { key: 'estimate.valid_until', label: 'the estimate expiration', directions: both },
+    ]);
+    // Spec #1751 D8: the lead gains three stage clocks, and the ORDER is asserted along with the
+    // set because it is the order the builder's dropdown renders. The walkthrough anchor stays
+    // first: it is the one every existing org's reminders already use.
+    expect(ANCHOR_OPTIONS.lead).toEqual([
+      { key: 'lead.walkthrough_scheduled_at', label: 'the walkthrough', directions: both },
+      { key: 'lead.created_at', label: 'the lead arriving', directions: ['after'] },
+      { key: 'lead.contacted_at', label: 'first contact', directions: ['after'] },
+      { key: 'lead.last_visit_completed_at', label: 'the completed walkthrough', directions: ['after'] },
+    ]);
+  });
+
+  // The builder reads `directions` to decide what to OFFER, so this list and the validator have to
+  // agree: anything advertised as legal here must survive a save. Asserted against the same set the
+  // validator tests, rather than against a second hand-written copy of it.
+  it('advertises no direction the validator would reject', () => {
+    for (const options of Object.values(ANCHOR_OPTIONS)) {
+      for (const option of options) {
+        const expected = LEAD_STAGE_CLOCK_ANCHORS.has(option.key) ? ['after'] : ['before', 'after'];
+        expect(option.directions).toEqual(expected);
+      }
+    }
   });
 });
 

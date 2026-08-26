@@ -10,6 +10,7 @@ import { applyFilters } from '../lib/query/filterEngine';
 import { leadFacets } from '../lib/query/registries/lead.filters';
 import { tenantWhere } from '../lib/tenant';
 import { allocateNumber } from '../lib/numbering';
+import { computeRenumber, applyRenumber, validateNumberFormat, type RenumberComputation } from '../lib/record-renumber';
 // Creator tracking (audit only) - stamped at every create, never read for authorization here.
 import { createdByUser } from '../lib/created-by';
 import { withRequiredCustomerFields } from '../lib/customer-create';
@@ -30,6 +31,8 @@ import {
 import type { Subject } from '../lib/permissions/catalog';
 import { isOwnerEligible } from '../lib/permissions/assignableRoles';
 import { scopeWhereForReq, canAccessRow } from '../lib/permissions/enforce';
+import { sendWalkthroughScheduledEmail, sendWalkthroughRescheduledEmail, type EmailDispatchResult, type OrganizationBrandingSubset } from '../lib/email';
+import { DEFAULT_TIMEZONE } from '../lib/timezone';
 import { emit } from '../services/notifications/notificationService';
 import { dispatchAutomationEvent } from '../services/automations/dispatch';
 import { rearmAnchoredWaits } from '../services/automations/enrollment';
@@ -38,6 +41,7 @@ import { logAudit } from '../lib/audit';
 import { mergeCustomFields, validateCustomFieldValues, CustomFieldValidationError } from '../lib/custom-fields';
 import {
   projectLeadWalkthroughFields,
+  projectLeadVisitCrew,
   walkthroughSnapshotSelect,
   mergeWalkthroughsSome,
   replaceWalkthroughPerformers,
@@ -46,6 +50,10 @@ import {
   findActiveWalkthrough,
   findScheduledWalkthrough,
   findCurrentWalkthroughForLead,
+  listLeadVisits,
+  nextVisitSeqForLead,
+  withVisitSeqRetry,
+  createLeadVisit,
   scheduleActiveWalkthrough,
   unscheduleWalkthroughRow,
   completeWalkthroughRow,
@@ -54,6 +62,7 @@ import {
   type PerformerMember,
   type WalkthroughSnapshotRow,
 } from '../services/walkthrough.service';
+import { transitionLeadStatus, leadClockPatch, stampLeadClock } from '../services/lead-stage.service';
 
 // ─── Select Objects ────────────────────────────────────
 
@@ -75,13 +84,20 @@ const leadListSelect = {
   // duration_minutes are no longer selected as raw legacy columns - projectLeadWalkthroughFields
   // (called from withTagsMany/exportAll) sources them from this relation instead, resolving
   // D15's "current visit" so they stay coherent under multiple visits.
-  walkthroughs: { select: walkthroughSnapshotSelect },
+  //
+  // S8 (D6): `assignees` joins the snapshot here because `visit_assignees.lead_id` is dropped -
+  // the lead's walkthrough crew is now reached through its trips. projectLeadVisitCrew flattens
+  // it onto the INTERNAL `visit_assignees` key, which projectLeadWalkthroughFields then renames
+  // to `walkthrough_performers` on the way out (#1637/#1642). The wire key readers see is the
+  // latter; `visit_assignees` never reaches a client.
+  visits: { select: { ...walkthroughSnapshotSelect, assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } } } },
   contacted_at: true,
-  customer: { select: { id: true, customer_number: true, first_name: true, last_name: true, company_name: true, phone: true, ad_source: true, service_locations: { where: { is_primary: true }, take: 1, select: { city: true, state: true } } } },
+  // email: see the job list select - the walkthrough composer needs it too (SRVW-243).
+  customer: { select: { id: true, customer_number: true, first_name: true, last_name: true, company_name: true, phone: true, email: true, ad_source: true, service_locations: { where: { is_primary: true }, take: 1, select: { city: true, state: true } } } },
   // Scheduler redesign: the SINGLE owner (commission_owner) + the MULTI performer set.
   commission_owner: { select: { id: true, first_name: true, last_name: true } },
   lead_assignees: { select: { user_id: true, user: { select: { id: true, first_name: true, last_name: true } } } },
-  walkthrough_performers: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+
   estimates: {
     select: { id: true, total_amount: true },
   },
@@ -106,7 +122,11 @@ const leadDetailSelect = {
   // this relation, resolving D15's "current visit" so they stay coherent under multiple visits
   // (the raw columns' old incoherence bug - e.g. rescheduling never clearing
   // walkthrough_completed_at - is what this structurally fixes).
-  walkthroughs: { select: walkthroughSnapshotSelect },
+  //
+  // S8 (D6): see the list select above - `assignees` rides along, projectLeadVisitCrew flattens
+  // it onto the internal `visit_assignees`, and the last-mile projection renames that to the
+  // `walkthrough_performers` wire key.
+  visits: { select: { ...walkthroughSnapshotSelect, assignees: { select: { user_id: true, user: { select: { id: true, first_name: true, last_name: true, email: true } } } } } },
   contacted_at: true,
   contacted_note: true,
   notes: true,
@@ -150,7 +170,7 @@ const leadDetailSelect = {
   // and the MULTI walkthrough performer set.
   commission_owner: { select: { id: true, first_name: true, last_name: true, email: true } },
   lead_assignees: { select: { user_id: true, user: { select: { id: true, first_name: true, last_name: true } } } },
-  walkthrough_performers: { select: { user_id: true, user: { select: { id: true, first_name: true, last_name: true, email: true } } } },
+
   estimates: {
     select: {
       id: true, estimate_number: true, status: true, total_amount: true, created_at: true,
@@ -264,8 +284,21 @@ export const markLostSchema = z.object({
   lost_reason: z.string().min(1).max(2000),
 });
 
-// contactLeadSchema removed with contactLead (D6, PR-B2) - contacted_at is inferred from
-// outbound activity, never set by hand.
+// contactLeadSchema was removed with contactLead (D6, PR-B2). The comment that replaced it
+// claimed contacted_at was "inferred from outbound activity"; spec #1751 established that the
+// inference never existed - between PR-B2 and now, the ONLY writer of contacted_at anywhere in
+// the product was the demo seeder, which is why the dashboard's "needs follow-up" tile equals the
+// open-lead count on every real org. D5 gives the column real writers (human-originated outbound
+// call, text or email) and reinstates a hand-correction door scoped as a CORRECTION - below.
+//
+// `contacted_at` is required, not optional: this door exists to state a moment, and a body that
+// named none would be asking the server to guess which of "now" and "leave it alone" was meant.
+// It is deliberately NOT clearable (no `.nullable()`) - nothing in this spec un-sets a clock, and
+// a door that could would let a missed response-time breach be erased.
+export const contactLeadSchema = z.object({
+  contacted_at: z.string().datetime(),
+  contacted_note: z.string().max(5000).optional(),
+});
 
 // Walkthrough performers are MULTI (REPLACE semantics, like job crew). Crew ⟂ schedule:
 // scheduling sets the time + the visit's own SCHEDULED status; performers are independent.
@@ -275,6 +308,17 @@ export const scheduleWalkthroughSchema = z.object({
   walkthrough_duration_minutes: z.number().int().min(15).max(480).default(60),
   send_email: z.boolean().optional().default(true),
   force: z.boolean().optional().default(false),
+  // SRVW-243 - "tell the customer", as a direct action. Deliberately SEPARATE
+  // from send_email above, which gates the whole automation block (the customer
+  // copy AND the internal performer notices) and defaults ON. This one is the
+  // customer-facing send only, defaults OFF, and when set it REPLACES the
+  // customer automation for this occurrence rather than adding to it.
+  notify_customer: z.boolean().optional(),
+  // SRVW-243 compose fields - same contract as assignJobSchema and the estimate
+  // send. The recipient override is one-off and never written back to the customer.
+  notify_recipient_email: z.string().email().optional(),
+  notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+  notify_message: z.string().max(5000).optional(),
 });
 
 // Performer-only REPLACE (no status/time change). See setPerformers().
@@ -291,6 +335,14 @@ export const cancelWalkthroughSchema = z.object({
 export const cancelLeadSchema = z.object({
   cancelled_reason: z.string().min(1).max(2000),
 });
+
+// Editable record IDs (decision #7) - preview + rename share this body shape. The
+// charset/length/numeric-cap rules live in validateNumberFormat inside record-renumber.ts
+// (invoked by computeRenumber/applyRenumber), NOT duplicated here - this schema only
+// guarantees `number` is present and a string.
+export const leadNumberSchema = z.object({
+  number: z.string(),
+}).strict();
 
 // ─── Helpers ───────────────────────────────────────────
 
@@ -376,23 +428,24 @@ function requestsLocationChange(body: {
 // Walkthrough-as-entity redesign, PR-B2: withTags/withTagsMany are the universal last-mile
 // funnel every lead-returning handler already routes through, so this is where
 // projectLeadWalkthroughFields runs - sourcing the walkthrough_* JSON fields from the lead's
-// `walkthroughs` relation (D15's current visit) instead of the raw legacy columns, while keeping
-// the response field NAMES unchanged. withTags always carries a leadDetailSelect-shaped row
+// `walkthroughs` relation (D15's current visit) instead of the raw legacy columns, and renaming
+// `visit_assignees` back to `walkthrough_performers` (#1637), while keeping the response field
+// NAMES unchanged. withTags always carries a leadDetailSelect-shaped row
 // (full field set); withTagsMany is list()'s leadListSelect-shaped rows (narrower set).
-async function withTags<T extends { id: string; walkthroughs?: WalkthroughSnapshotRow[] }>(
+async function withTags<T extends { id: string; visits?: WalkthroughSnapshotRow[]; visit_assignees?: unknown }>(
   req: Request,
   lead: T,
-): Promise<Omit<T, 'walkthroughs'> & { tags: TagSummary[] }> {
+): Promise<Omit<T, 'visits' | 'visit_assignees'> & { tags: TagSummary[] }> {
   const tags = await loadTagsForEntity(req, 'LEAD', lead.id);
-  return { ...projectLeadWalkthroughFields(lead, { full: true }), tags };
+  return { ...projectLeadWalkthroughFields(projectLeadVisitCrew(lead), { full: true }), tags };
 }
 
-async function withTagsMany<T extends { id: string; walkthroughs?: WalkthroughSnapshotRow[] }>(
+async function withTagsMany<T extends { id: string; visits?: WalkthroughSnapshotRow[]; visit_assignees?: unknown }>(
   req: Request,
   leads: T[],
-): Promise<Array<Omit<T, 'walkthroughs'> & { tags: TagSummary[] }>> {
+): Promise<Array<Omit<T, 'visits' | 'visit_assignees'> & { tags: TagSummary[] }>> {
   const grouped = await loadTagsByEntity(req, 'LEAD', leads.map((l) => l.id));
-  return leads.map((l) => ({ ...projectLeadWalkthroughFields(l, { full: false }), tags: grouped.get(l.id) ?? [] }));
+  return leads.map((l) => ({ ...projectLeadWalkthroughFields(projectLeadVisitCrew(l), { full: false }), tags: grouped.get(l.id) ?? [] }));
 }
 
 // #233 / audit F-012: monetary summary fields embedded on a lead's estimate(s). Stripped
@@ -472,20 +525,26 @@ export async function buildLeadListWhere(req: Request): Promise<{ where: Record<
   const where: Record<string, unknown> = { ...tenantWhere(req), ...scopeWhere };
 
   // Walkthrough-as-entity redesign, PR-B2: repointed from the legacy walkthrough_scheduled_at
-  // column onto the relation. SECURITY: `scopeWhere.walkthroughs` may already be set here (a
+  // column onto the relation. SECURITY: `scopeWhere.visits` may already be set here (a
   // TECHNICIAN's OWN_WALKTHROUGH read condition — see defaultGrants.ts). Assigning a fresh
-  // `where.walkthroughs` would silently CLOBBER that row-scope (RBAC bypass), so this merges
+  // `where.visits` would silently CLOBBER that row-scope (RBAC bypass), so this merges
   // into the SAME `some` clause instead of overwriting the key — which is also the semantically
   // correct read: "my own walkthrough that is ALSO in this date range", not two independent
   // `some` checks. Mirrors the `assigned_to` facet's clobber-guard in lead.filters.ts.
   const walkthroughAfter  = req.query.walkthrough_after  as string | undefined;
   const walkthroughBefore = req.query.walkthrough_before as string | undefined;
   if (walkthroughAfter || walkthroughBefore) {
-    where.walkthroughs = mergeWalkthroughsSome(where, {
+    where.visits = mergeWalkthroughsSome(where, {
       scheduled_at: {
         ...(walkthroughAfter  ? { gte: new Date(walkthroughAfter)  } : {}),
         ...(walkthroughBefore ? { lte: new Date(walkthroughBefore) } : {}),
       },
+      // Multi-visit S6: a called-off trip is not on the board. Without this a lead whose ONLY
+      // in-window walkthrough was cancelled still matched, and then rendered whatever
+      // resolveCurrentWalkthrough picked - a time that need not be inside the window at all.
+      // Invisible while the job lane read the Job.scheduled_start mirror (which already excludes
+      // cancelled trips); visible the moment both lanes ask the same question of the visit set.
+      status: { not: 'CANCELLED' },
     });
   }
 
@@ -614,7 +673,7 @@ export async function exportAll(req: Request, res: Response) {
     // Walkthrough-as-entity redesign, PR-B2: exportAll bypasses withTagsMany (no tag
     // enrichment on the CSV path), so it needs its own projectLeadWalkthroughFields call to
     // source the walkthrough_* columns from the relation rather than the raw legacy ones.
-    res.json({ leads: leads.map((lead) => projectLeadWalkthroughFields(lead, { full: false })) });
+    res.json({ leads: leads.map((lead) => projectLeadWalkthroughFields(projectLeadVisitCrew(lead), { full: false })) });
   } catch (err) {
     logger.error('Export leads error:', err);
     res.status(500).json({ error: 'Failed to export leads' });
@@ -763,15 +822,11 @@ export async function create(req: Request, res: Response) {
           select: leadDetailSelect,
         });
 
-        // Walkthrough-as-entity redesign, PR-B2: seed the default bucket entry. Every new lead
-        // used to appear in the "needs scheduling" bucket for free via
-        // `walkthrough_needed @default(true)` + `walkthrough_scheduled_at` defaulting to null;
-        // now that the bucket is `Walkthrough.status = REQUESTED`, a lead has ZERO walkthrough
-        // rows until one is explicitly created, so create() must seed one to keep that default
-        // behavior (every new lead needs a visit until told otherwise).
-        await tx.walkthrough.create({
-          data: { organization_id: orgId, lead_id: lead.id, status: 'REQUESTED' },
-        });
+        // Multi-visit D22a: a new lead no longer gets a placeholder visit row. The bucket used
+        // to be "has a REQUESTED visit", so create() had to seed one; it is now "has no live
+        // visit", which a brand-new lead satisfies by having no visits at all. Minting a row
+        // here would also be wrong under multi-visit - there is no single placeholder slot once
+        // a lead can hold several trips.
 
         return lead;
       });
@@ -893,11 +948,7 @@ export async function create(req: Request, res: Response) {
           select: leadDetailSelect,
         });
 
-        // Walkthrough-as-entity redesign, PR-B2: seed the default bucket entry (see the
-        // new-customer path above for the full rationale).
-        await tx.walkthrough.create({
-          data: { organization_id: orgId, lead_id: created.id, status: 'REQUESTED' },
-        });
+        // Multi-visit D22a: no placeholder visit row (see the new-customer path above).
 
         return created;
       });
@@ -1008,6 +1059,32 @@ export async function update(req: Request, res: Response) {
       delete data.status;
     }
 
+    // Spec #1751 D6: a hand-edited status is a transition like any other and goes through the one
+    // writer, so it stamps won_at and leaves a from/to ledger entry. Before this, the ONLY record
+    // of a status edit was the audit row logged below, which names which FIELDS changed and
+    // nothing else — no from, no to, so no time-in-stage was computable from it even
+    // retroactively. That is the defect this spec exists to close.
+    const statusChange: LeadStatus | undefined = data.status;
+    /**
+     * `notFrom: []` — a person editing the status directly is stating the outcome outright, and
+     * the terminal guard that protects the AUTOMATIC writers must not stop them correcting a
+     * mistake. This is exactly the behaviour the door has today; routing it through the helper
+     * must not quietly make the field read-only once a lead is won.
+     */
+    const applyStatusChange = async (tx: Prisma.TransactionClient) => {
+      if (!statusChange || statusChange === existing.status) return;
+      await transitionLeadStatus(tx, {
+        leadId: param(req, 'id'),
+        orgId: req.user!.organization_id,
+        to: statusChange,
+        from: existing.status,
+        actorId: req.user!.id,
+        notFrom: [],
+        description: `Lead status changed to ${statusChange.toLowerCase()}`,
+        metadata: { via: 'manual_edit' },
+      });
+    };
+
     // Extract ad_source — it belongs on the customer, not the lead row.
     // Extract the location-change inputs — they go through resolveOrAccreteLocation,
     // never directly into the lead.update data (besides the legacy address sync).
@@ -1016,6 +1093,12 @@ export async function update(req: Request, res: Response) {
     // caller-supplied bag over the stored one: no validation, and every untouched key lost.
     const { ad_source, service_location_id, new_location, custom_fields, ...rest } = data;
     const leadData = { ...rest };
+    // Removed from the generic spread so `transitionLeadStatus` is the ONLY writer of the column
+    // (D6). Leaving it here as well would work — the values agree — but it would leave a second
+    // status writer in the codebase for the next change to diverge from, which is the exact
+    // failure mode D6 exists to end. Re-added to the audit row's field list below so the audit
+    // trail is unchanged by the move.
+    delete leadData.status;
 
     if (custom_fields !== undefined) {
       try {
@@ -1071,6 +1154,9 @@ export async function update(req: Request, res: Response) {
         const newState = resolved.state ?? addressForResolve?.state ?? data.service_state;
         taxWarning = buildLocationTaxWarning(existing.service_state, newState);
       }
+      // BEFORE the update below, so the row this returns already carries the new status and the
+      // response needs no second read.
+      await applyStatusChange(tx as unknown as Prisma.TransactionClient);
       return tx.lead.update({
         where: { id: param(req, 'id') },
         data: leadData,
@@ -1089,8 +1175,9 @@ export async function update(req: Request, res: Response) {
           });
           return runLeadUpdate(tx as never);
         });
-      } else if (explicitLocationChange) {
-        // Location resolution needs a tx (accretion is a create).
+      } else if (explicitLocationChange || statusChange) {
+        // Location resolution needs a tx (accretion is a create). So does a status change: the
+        // status write, the clock and the ledger entry are one fact and must not half-commit.
         lead = await prisma.$transaction(async (tx) => runLeadUpdate(tx as never));
       } else {
         lead = await prisma.lead.update({
@@ -1115,7 +1202,13 @@ export async function update(req: Request, res: Response) {
     await stripEstimateMoneyUnlessVisible(req, lead);
 
     const payload = await withTags(req, lead);
-    void logAudit({ req, action: 'lead.updated', resourceType: 'Lead', resourceId: param(req, 'id'), metadata: { fields: Object.keys(leadData) } });
+    void logAudit({
+      req,
+      action: 'lead.updated',
+      resourceType: 'Lead',
+      resourceId: param(req, 'id'),
+      metadata: { fields: [...Object.keys(leadData), ...(statusChange ? ['status'] : [])] },
+    });
     res.json(taxWarning ? { lead: payload, tax_warning: taxWarning } : { lead: payload });
   } catch (err) {
     logger.error('Update lead error:', err);
@@ -1137,7 +1230,8 @@ export async function remove(req: Request, res: Response) {
       where: { id, ...tenantWhere(req) },
       include: {
         lead_assignees: { select: { user_id: true } },
-        walkthrough_performers: { select: { user_id: true } },
+        // S8 (D6): crew through the trips - `visit_assignees.lead_id` is gone.
+        visits: { select: { assignees: { select: { user_id: true } } } },
       },
     });
     if (!existing) {
@@ -1347,7 +1441,7 @@ export async function updateWalkthrough(req: Request, res: Response) {
         select: leadDetailSelect,
       });
       if (current) {
-        await tx.walkthrough.update({
+        await tx.visit.update({
           where: { id: current.id },
           data: {
             notes: walkthrough_notes ?? undefined,
@@ -1370,8 +1464,9 @@ export async function updateWalkthrough(req: Request, res: Response) {
   }
 }
 
-// contactLead removed (D6, PR-B2) - contacted_at is inferred from outbound activity, never set
-// by hand. Its route (POST /:id/contact) was also deleted (lead.routes.ts).
+// contactLead removed (D6, PR-B2). See the note on contactLeadSchema above: the "inferred from
+// outbound activity" claim described an inference that was never built. Spec #1751 D5 owns both
+// halves of the repair - the automatic writers and the hand-correction door.
 
 // ─── Schedule Walkthrough ────────────────────────────
 
@@ -1412,6 +1507,83 @@ async function dispatchWalkthroughPerformerRemoved(
   }
 }
 
+/**
+ * SRVW-243 - the customer-facing half of `notify_customer: true` on
+ * scheduleWalkthrough(). Mirrors notifyCustomerOfSchedule in job.controller.ts:
+ * one EmailDispatchResult, never throws, decides nothing about the booking that
+ * has already committed.
+ *
+ * Customer only. The performer and owner copies the pre-#1003 walkthrough sender
+ * also fanned out are internal notices with no opt-in behind them; they stay
+ * with the automation engine so a customer-facing tick cannot silently start
+ * mailing staff.
+ */
+async function notifyCustomerOfWalkthrough(
+  req: Request,
+  args: {
+    leadId: string;
+    customer: { id: string; first_name: string | null; last_name: string | null; company_name: string | null; email: string | null } | null;
+    serviceAddress: string;
+    performers: { first_name: string; last_name: string }[];
+    scheduledAt: Date;
+    isReschedule: boolean;
+    /** Multi-visit D13 - the trip's own number, taken off the row the transaction wrote. */
+    visitSeq?: number | null;
+    /** Compose-dialog overrides; none of it written back to the customer record. */
+    recipientEmail?: string;
+    cc?: string[];
+    message?: string;
+  },
+): Promise<EmailDispatchResult> {
+  // Typed override wins; the saved address is the fallback. Trimmed so an
+  // all-whitespace field falls through to no_recipient rather than reach Resend.
+  const to = args.recipientEmail?.trim() || args.customer?.email;
+  if (!to) return { status: 'skipped', reason: 'no_recipient' };
+
+  const organizationId = req.user!.organization_id;
+  const customerName =
+    [args.customer?.first_name, args.customer?.last_name].filter(Boolean).join(' ')
+    || args.customer?.company_name
+    || 'there';
+  const performerName =
+    args.performers.map((u) => `${u.first_name} ${u.last_name}`.trim()).filter(Boolean).join(', ')
+    || 'Our team';
+  // One row for three things: the zone the time is rendered in, the name the customer
+  // is told to contact, and (SRVW-243 header-brand fix) the org's own header wordmark/
+  // logo, so the notice can no longer read as ServWave's rather than the org's own.
+  // Two-to-three lookups could not disagree, but one is cheaper and this runs on the
+  // response path.
+  const orgRow = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true, logo_url: true, brand_color: true, timezone: true },
+  });
+  const timezone = orgRow?.timezone || DEFAULT_TIMEZONE;
+  const companyName = orgRow?.name ?? '';
+  // Undefined, never a guessed name, when the org row itself is missing - wrapHtml's own
+  // 'ServWave' fallback exists for exactly that case (see email.ts:55, 639-640).
+  const org: OrganizationBrandingSubset | undefined = orgRow
+    ? { id: organizationId, name: orgRow.name, logo_url: orgRow.logo_url, brand_color: orgRow.brand_color }
+    : undefined;
+  const record = {
+    organizationId,
+    customerId: args.customer?.id ?? null,
+    leadId: args.leadId,
+    // The reply anchor: the walkthrough notice, its reschedules and the
+    // customer's reply are one conversation - see lib/reply-token.ts.
+    entityType: 'lead',
+    entityId: args.leadId,
+  };
+
+  const common = {
+    organizationId, org, to, customerName, performerName, visitSeq: args.visitSeq,
+    serviceAddress: args.serviceAddress, timezone, record,
+    cc: args.cc, message: args.message,
+  };
+  return args.isReschedule
+    ? sendWalkthroughRescheduledEmail({ ...common, newDate: args.scheduledAt })
+    : sendWalkthroughScheduledEmail({ ...common, scheduledDate: args.scheduledAt, companyName });
+}
+
 // Walkthrough performers are MULTI (REPLACE+diff, mirroring the job crew side). The schedule
 // (time + SCHEDULED status on the Walkthrough row) is independent of the performer set. The
 // customer "scheduled/rescheduled" automation is suppressed when there are 0 performers
@@ -1430,13 +1602,27 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
     // #106 P1: SQL-based per-instance scope (nested-safe) — see update().
     if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) { res.status(403).json({ error: 'Insufficient permissions' }); return; }
 
-    const { walkthrough_scheduled_at, performer_ids, walkthrough_duration_minutes, send_email, force } = req.body as {
+    const {
+      walkthrough_scheduled_at, performer_ids, walkthrough_duration_minutes, send_email, force,
+      notify_customer, notify_recipient_email, notify_cc_emails, notify_message,
+    } = req.body as {
       walkthrough_scheduled_at: string;
       performer_ids: string[];
       walkthrough_duration_minutes?: number;
       send_email?: boolean;
       force?: boolean;
+      notify_customer?: boolean;
+      notify_recipient_email?: string;
+      notify_cc_emails?: string[];
+      notify_message?: string;
     };
+    // Q1: the flat, three-state-capable boolean this door uses (undefined/true/false), same shape
+    // as the job side's legacy assign() door. `undefined` -> unchanged, back-compat: the automation
+    // fires. `true` -> unchanged: the direct send below fires, automation suppressed. `false` ->
+    // NEITHER fires - the caller explicitly declined telling the customer, and the automation gate
+    // below used to test bare `!notify_customer`, which is also true on a decline, silently mailing
+    // the customer through the workflow anyway.
+    const notifyDeclined = notify_customer === false;
 
     // Per-member eligibility: every performer must be an active, assignable in-org user.
     const performers = await validatePerformers(req, performer_ids);
@@ -1449,14 +1635,15 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
     const scheduledStart = new Date(walkthrough_scheduled_at);
     const scheduledEnd = new Date(scheduledStart.getTime() + durationMinutes * 60_000);
 
-    // The lead's active (REQUESTED/SCHEDULED) visit, if any. Reusing it is a (re)schedule of
-    // the SAME visit; when the last visit already finished (COMPLETED/CANCELLED — or there is
-    // none at all), this books a fresh, distinct visit (D1 — a lead has many walkthroughs).
+    // The lead's EARLIEST live visit, if any. Reusing it is a (re)schedule of the SAME visit;
+    // when there is none live, this books a fresh, distinct visit. Booking an ADDITIONAL visit
+    // alongside a live one is POST /api/leads/:id/visits, not this endpoint - see the visit
+    // service for why this legacy path still collapses onto one row.
     const activeWalkthrough = await findActiveWalkthrough(req, id);
-    const wasAlreadyScheduled = activeWalkthrough?.status === 'SCHEDULED';
+    const wasAlreadyScheduled = activeWalkthrough != null;
 
     // Diff vs the CURRENT performer set (drives conflict scope + diff-emails).
-    const currentIds = new Set((activeWalkthrough?.performers ?? []).map((p) => p.user_id));
+    const currentIds = new Set((activeWalkthrough?.assignees ?? []).map((p) => p.user_id));
     const nextIds = new Set(performer_ids);
     const addedIds = performer_ids.filter((uid) => !currentIds.has(uid));
     const keptIds = performer_ids.filter((uid) => currentIds.has(uid));
@@ -1481,32 +1668,74 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
       }
     }
 
-    // Customer "scheduled/rescheduled" automation only when performers≥1. Stamp the flag on the
-    // first such send (mirror the job first-schedule/flag pattern). The flag now lives on the
-    // Walkthrough row (customer_email_sent_at), not the lead.
+    // Customer "scheduled/rescheduled" automation only when performers≥1.
     const hasPerformers = performer_ids.length > 0;
-    const stampCustomerFlag = hasPerformers && activeWalkthrough?.customer_email_sent_at == null;
 
     const orgId = req.user!.organization_id;
-    const { lead, isReschedule } = await prisma.$transaction(async (tx) => {
+    const { lead, isReschedule, walkthroughId } = await prisma.$transaction(async (tx) => {
       const { walkthrough, isReschedule: reschedule } = await scheduleActiveWalkthrough(tx, {
         leadId: id,
         orgId,
         activeWalkthroughId: activeWalkthrough?.id ?? null,
         wasAlreadyScheduled,
+        visitSeq: await nextVisitSeqForLead(tx, orgId, id),
         scheduledAt: scheduledStart,
+        scheduledEnd,
         durationMinutes,
-        stampCustomerEmailSentAt: stampCustomerFlag,
+        // Q1: NOT stamped here, matching POST /api/leads/:id/visits (createVisit) below and the
+        // job visit doors. The old `hasPerformers && not-yet-stamped` test decided this on CREW
+        // EXISTENCE, not on any confirmed send - so it OVER-stamped a walkthrough scheduled with
+        // send_email:false (nobody told, row says "announced"), and it UNDER-stamped a tick sent
+        // through this door with zero performers (notify_customer's direct send doesn't check
+        // hasPerformers, so it CAN send with none - see below). The send has not happened yet at
+        // this point and may come back skipped (no address on file) or failed; the stamp has to
+        // follow the OUTCOME, not the intent.
+        stampCustomerEmailSentAt: false,
       });
       await replaceWalkthroughPerformers(tx, walkthrough.id, id, orgId, performer_ids);
 
       // D5: the ONLY status side effect — advance NEW -> CONTACTED. Every other status is
       // left untouched (never pulled backward into a walkthrough-labeled status).
-      const statusPatch = existing.status === 'NEW' ? { status: 'CONTACTED' as const } : {};
+      //
+      // Spec #1751 D6 routes it through the one writer so it leaves a from/to ledger entry; the
+      // advance was previously invisible as a status change (only a WALKTHROUGH_SCHEDULED event
+      // was written). It deliberately does NOT stamp contacted_at — see the note on
+      // transitionLeadStatus. Booking a walkthrough is not reaching out to the customer, and if
+      // it wrote the contact clock, the "first contact to walkthrough booked" interval would be
+      // structurally zero for exactly the leads it is meant to measure.
+      if (existing.status === 'NEW') {
+        await transitionLeadStatus(tx, {
+          leadId: id,
+          orgId,
+          to: 'CONTACTED',
+          from: existing.status,
+          actorId: req.user!.id,
+          description: 'Lead moved to contacted — walkthrough booked',
+          metadata: { via: 'walkthrough_scheduled' },
+        });
+      }
 
+      // Spec #1751 D2: when the FIRST walkthrough on this lead was booked. `new Date()`, not
+      // `scheduledStart` — the owner's policy is "booked within a day or two of first contact",
+      // so an appointment set three weeks out was still booked on time, and anchoring on the
+      // appointment instant would score the salesperson on the customer's availability.
+      //
+      // Stamped on a reschedule too, and that is correct rather than sloppy: first touch wins, so
+      // a reschedule of a walkthrough already booked cannot move the clock, while a lead whose
+      // very first booking arrives through this door as `reschedule` (the active-visit path) is
+      // still recorded. Nothing here needs to know which case it is in.
+      //
+      // Through `stampLeadClock`, not through a patch derived from `existing`: the clock is
+      // MONOTONIC, and `existing` was read before this transaction opened. Deciding "is it still
+      // null?" out here and writing in there is a read-then-write two concurrent bookings can
+      // both win. The helper's `WHERE ... IS NULL` settles it in Postgres instead.
+      await stampLeadClock(tx, id, orgId, 'walkthrough_first_booked_at', new Date());
+
+      // `data: {}` — the row is re-read for the response shape only; the writers above already
+      // made every change. Same idiom completeWalkthrough has always used.
       const updatedLead = await tx.lead.update({
         where: { id },
-        data: statusPatch,
+        data: {},
         select: leadDetailSelect,
       });
 
@@ -1516,14 +1745,16 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
           entity_type: 'LEAD', entity_id: id,
           event_type: reschedule ? 'WALKTHROUGH_RESCHEDULED' : 'WALKTHROUGH_SCHEDULED',
           description: reschedule
-            ? `Walkthrough rescheduled for ${scheduledStart.toISOString()}`
-            : `Walkthrough scheduled for ${scheduledStart.toISOString()}`,
+            // Same rule as the job visit writers: no instant in the prose, because the
+            // Activity panel prints these verbatim to every viewer in every zone (MV-TZ-07).
+            ? 'Walkthrough rescheduled'
+            : 'Walkthrough scheduled',
           metadata: { performer_ids, duration: durationMinutes, send_email },
           created_by: req.user!.id,
         },
       });
 
-      return { lead: updatedLead, isReschedule: reschedule };
+      return { lead: updatedLead, isReschedule: reschedule, walkthroughId: walkthrough.id };
     });
 
     // #233 / audit F-012: ability-gated strip before responding (no-op for estimate-readers).
@@ -1547,8 +1778,18 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
     // the customer email and the performer diff emails); WALKTHROUGH_SCHEDULED/
     // _RESCHEDULED additionally requires hasPerformers — the state-4 0-performer
     // schedule sent nothing before and must not start sending now.
+    //
+    // SRVW-243 - notify_customer suppresses ONLY the customer-facing event, and
+    // only for this occurrence. An explicit tick has already sent that message
+    // directly (below); letting the workflow send it too would mail the customer
+    // twice for one action, and a workflow's send_window could deliver the
+    // duplicate hours later. The performer notices are a different audience and
+    // are untouched.
     if (send_email !== false) {
-      if (hasPerformers) {
+      // Q1: `&& !notifyDeclined` is the fix. Keep the `hasPerformers` half exactly as it is - a
+      // separate, deliberate guard (the state-4 zero-performer schedule sends nothing, and must
+      // not start now); only the negation on `notify_customer` was wrong.
+      if (hasPerformers && !notify_customer && !notifyDeclined) {
         dispatchAutomationEvent({
           type: isReschedule ? 'WALKTHROUGH_RESCHEDULED' : 'WALKTHROUGH_SCHEDULED',
           organizationId: orgId,
@@ -1574,7 +1815,41 @@ export async function scheduleWalkthrough(req: Request, res: Response) {
       void rearmAnchoredWaits('lead', id);
     }
 
-    res.json({ lead: await withTags(req, lead) });
+    // Awaited, post-commit, and never fatal - see notifyCustomerOfSchedule on the
+    // job side for why the send cannot roll the booking back and cannot be
+    // swallowed either. Deliberately outside the send_email block: send_email
+    // governs the automation engine, and an explicit tick is not the engine.
+    const notify = notify_customer
+      ? await notifyCustomerOfWalkthrough(req, {
+          leadId: id,
+          customer: lead.customer,
+          serviceAddress: [existing.service_address_line1, existing.service_city, existing.service_state]
+            .filter(Boolean).join(', '),
+          performers: performers.users,
+          scheduledAt: scheduledStart,
+          isReschedule,
+          recipientEmail: notify_recipient_email,
+          cc: notify_cc_emails,
+          message: notify_message,
+        })
+      : undefined;
+
+    // Q1: the stamp is the OUTCOME of the send, never the intent behind it - same contract as
+    // POST /api/leads/:id/visits above and the job visit doors. Guarded on "not already announced"
+    // (rather than unconditionally re-stamping) so a later tick on an already-told trip does not
+    // overwrite the ORIGINAL timestamp - the same "only on the first announce" rule
+    // rescheduleVisit applies on the job side. `activeWalkthrough` is the PRE-transaction read, so
+    // this is the state the row was in before this request touched it.
+    const alreadyAnnounced = activeWalkthrough?.customer_email_sent_at != null;
+    const announcedAt = !alreadyAnnounced && notify?.status === 'sent' ? new Date() : null;
+    if (announcedAt) {
+      await prisma.visit.updateMany({
+        where: { id: walkthroughId, ...tenantWhere(req) },
+        data: { customer_email_sent_at: announcedAt },
+      });
+    }
+
+    res.json({ lead: await withTags(req, lead), ...(notify ? { notify } : {}) });
   } catch (err) {
     logger.error('Schedule walkthrough error:', err);
     res.status(500).json({ error: 'Failed to schedule walkthrough' });
@@ -1613,7 +1888,7 @@ export async function setPerformers(req: Request, res: Response) {
       return;
     }
 
-    const currentIds = new Set(activeWalkthrough.performers.map((p) => p.user_id));
+    const currentIds = new Set(activeWalkthrough.assignees.map((p) => p.user_id));
     const nextIds = new Set(performer_ids);
     const addedIds = performer_ids.filter((uid) => !currentIds.has(uid));
     const removedIds = [...currentIds].filter((uid) => !nextIds.has(uid));
@@ -1679,9 +1954,25 @@ export async function unscheduleWalkthrough(req: Request, res: Response) {
     const orgId = req.user!.organization_id;
     const lead = await prisma.$transaction(async (tx) => {
       await unscheduleWalkthroughRow(tx, scheduled.id);
+      // Spec #1751 D6. Two consequences of routing this through the one writer, both wanted:
+      // the fall-back now appears in the ledger with a from/to (it was previously invisible as a
+      // status change - only a WALKTHROUGH_UNSCHEDULED event was written), and the helper's
+      // default terminal guard stops it pulling a WON/LOST/CANCELLED lead backward to CONTACTED,
+      // which the unconditional write it replaces would happily do.
+      await transitionLeadStatus(tx, {
+        leadId: id,
+        orgId,
+        to: 'CONTACTED',
+        from: existing.status,
+        actorId: req.user!.id,
+        description: 'Lead returned to contacted — walkthrough unscheduled',
+        metadata: { via: 'walkthrough_unscheduled' },
+      });
+      // `data: {}` — the row is re-read for the response shape only; the writer above already
+      // made every change. Same idiom completeWalkthrough has always used.
       const updatedLead = await tx.lead.update({
         where: { id },
-        data: { status: 'CONTACTED' },
+        data: {},
         select: leadDetailSelect,
       });
       await tx.timelineEvent.create({
@@ -1705,6 +1996,16 @@ export async function unscheduleWalkthrough(req: Request, res: Response) {
     res.status(500).json({ error: 'Failed to unschedule walkthrough' });
   }
 }
+
+/**
+ * Internal sentinel: the visit was live in the pre-transaction read but another request had
+ * already completed it by the time the guarded write ran. Thrown INSIDE the transaction so the
+ * whole of the losing request rolls back with the no-op write — the timeline event and the
+ * re-anchoring clock included — and so the winner's `completed_at` stands. Never escapes this
+ * module; completeWalkthrough maps it to the SAME 400 a sequential second call already gets, so a
+ * caller that lost a race and a caller that was simply too late are indistinguishable.
+ */
+class WalkthroughAlreadyCompletedError extends Error {}
 
 // ─── Complete Walkthrough ────────────────────────────
 //
@@ -1731,27 +2032,58 @@ export async function completeWalkthrough(req: Request, res: Response) {
     const existing = await prisma.lead.findUnique({ where: { id, ...tenantWhere(req) } });
     if (!existing) { res.status(404).json({ error: 'Lead not found' }); return; }
 
+    // MV-RBAC-19: authorization BEFORE the business-state check, not after. findScheduledWalkthrough
+    // used to run first, so an unowned lead answered "Can only complete a scheduled walkthrough"
+    // (400) instead of 403 - leaking whether an invisible lead even has one to a caller who should
+    // not be able to tell this lead exists at all. findScheduledWalkthrough has no dependency on
+    // this check (it is a tenant-scoped read, nothing more), so this is a pure reorder.
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Only the assigned performer, Admin, or Dispatcher can complete this walkthrough' });
+      return;
+    }
+
     const scheduled = await findScheduledWalkthrough(req, id);
     if (!scheduled) {
       res.status(400).json({ error: 'Can only complete a scheduled walkthrough' });
       return;
     }
 
-    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
-      res.status(403).json({ error: 'Only the assigned performer, Admin, or Dispatcher can complete this walkthrough' });
-      return;
-    }
-
     const orgId = req.user!.organization_id;
     const completedAt = new Date();
     const lead = await prisma.$transaction(async (tx) => {
-      await completeWalkthroughRow(tx, scheduled.id, completedAt);
+      // `scheduled` was read BEFORE this transaction opened, so it is a snapshot, not a lock.
+      // The writer re-tests the status in its own WHERE and reports whether it was the one that
+      // landed the transition; losing means another request completed this visit in between.
+      if (!(await completeWalkthroughRow(tx, scheduled.id, completedAt))) {
+        throw new WalkthroughAlreadyCompletedError();
+      }
       // PR-C2: WALKTHROUGH_COMPLETED left LeadStatus - completing a visit is now purely a fact
       // recorded on the Walkthrough row, not a lead-pipeline transition. The lead's status is
       // left exactly where the earlier schedule call (D5: NEW -> CONTACTED only) put it.
+      //
+      // Spec #1751 D3 advances the two completion clocks, which say different things and are
+      // BOTH needed. The monotonic one records that this lead has, at some point, finished a
+      // walkthrough - permanently, so booking a follow-up visit months later cannot erase it.
+      // The re-anchoring one records that there is currently nothing outstanding. Neither is the
+      // legacy `walkthrough_completed_at` WIRE key, which is projected from the lead's CURRENT
+      // visit and falls back to null the moment a later visit is booked (right for the page hero,
+      // unusable as an SLA anchor).
+      //
+      // They are written by two different mechanisms because they have two different invariants.
+      // The monotonic one goes through `stampLeadClock`, whose `WHERE ... IS NULL` decides
+      // first-touch-wins inside Postgres - `existing` was read before this transaction opened, so
+      // testing it out here and writing in here would let two concurrent completions of the same
+      // lead both observe null and both write. The re-anchoring one has no invariant to protect
+      // and rides along in the update the door already makes.
+      //
+      // Order relative to completeWalkthroughRow does not matter: neither clock reads the visit
+      // rows, both values are the `completedAt` this handler minted, and both writes are in the
+      // same transaction.
+      await stampLeadClock(tx, id, orgId, 'walkthrough_first_completed_at', completedAt);
+      const completionPatch = leadClockPatch({ visitCompletedAt: completedAt });
       const updatedLead = await tx.lead.update({
         where: { id },
-        data: {},
+        data: completionPatch,
         select: leadDetailSelect,
       });
       await tx.timelineEvent.create({
@@ -1779,6 +2111,12 @@ export async function completeWalkthrough(req: Request, res: Response) {
       actorId: req.user?.id ?? null,
     });
   } catch (err) {
+    // Raced with another completion: the transaction rolled back with the no-op write, so this
+    // request wrote nothing at all, and never reached the response or the automation dispatch.
+    if (err instanceof WalkthroughAlreadyCompletedError) {
+      res.status(400).json({ error: 'Can only complete a scheduled walkthrough' });
+      return;
+    }
     logger.error('Complete walkthrough error:', err);
     res.status(500).json({ error: 'Failed to complete walkthrough' });
   }
@@ -1812,9 +2150,21 @@ export async function cancelWalkthrough(req: Request, res: Response) {
         walkthroughId: scheduled.id, leadId: id, orgId,
         cancelledAt, reason, cancelledBy: req.user!.id,
       });
+      // Spec #1751 D6 — see unscheduleWalkthrough above for both consequences.
+      await transitionLeadStatus(tx, {
+        leadId: id,
+        orgId,
+        to: 'CONTACTED',
+        from: existing.status,
+        actorId: req.user!.id,
+        description: 'Lead returned to contacted — walkthrough cancelled',
+        metadata: { via: 'walkthrough_cancelled' },
+      });
+      // `data: {}` — the row is re-read for the response shape only; the writer above already
+      // made every change. Same idiom completeWalkthrough has always used.
       const updatedLead = await tx.lead.update({
         where: { id },
-        data: { status: 'CONTACTED' },
+        data: {},
         select: leadDetailSelect,
       });
       await tx.timelineEvent.create({
@@ -1877,26 +2227,28 @@ export async function cancelLead(req: Request, res: Response) {
         cancelledAt, reason: 'Lead cancelled', cancelledBy: req.user!.id,
       });
 
-      const updatedLead = await tx.lead.update({
-        where: { id },
-        data: {
-          status: 'CANCELLED',
-          cancelled_at: cancelledAt,
-          cancelled_reason: req.body.cancelled_reason,
-        },
-        select: leadDetailSelect,
+      // Spec #1751 D6 - see markLost above for why `notFrom` is empty and why the row is
+      // re-read rather than returned by the writer.
+      await transitionLeadStatus(tx, {
+        leadId: id,
+        orgId,
+        to: 'CANCELLED',
+        from: existing.status,
+        actorId: req.user!.id,
+        notFrom: [],
+        description: scheduled
+          ? 'Lead cancelled — walkthrough auto-cancelled'
+          : 'Lead cancelled',
+        metadata: { walkthrough_auto_cancelled: Boolean(scheduled) },
+        data: { cancelled_at: cancelledAt, cancelled_reason: req.body.cancelled_reason },
       });
 
-      await tx.timelineEvent.create({
-        data: {
-          organization_id: orgId,
-          entity_type: 'LEAD', entity_id: id,
-          event_type: 'STATUS_CHANGE',
-          description: scheduled
-            ? 'Lead cancelled — walkthrough auto-cancelled'
-            : 'Lead cancelled',
-          created_by: req.user!.id,
-        },
+      // `data: {}` — the row is re-read for the response shape only; the writer above already
+      // made every change. Same idiom completeWalkthrough has always used.
+      const updatedLead = await tx.lead.update({
+        where: { id },
+        data: {},
+        select: leadDetailSelect,
       });
 
       return updatedLead;
@@ -2088,6 +2440,127 @@ export async function addNote(req: Request, res: Response) {
   }
 }
 
+// ─── Contact (hand correction) ─────────────────────────
+
+/**
+ * POST /api/leads/:id/contact — set or correct `contacted_at` BY HAND.
+ *
+ * Spec #1751 D5, ratified by the product owner. Reinstates the door the walkthrough redesign
+ * removed, deliberately re-scoped: it is no longer how a lead normally becomes contacted. The
+ * normal path is automatic now — an outbound call, an outbound text or a human-written email
+ * stamps the clock at the moment it happened (services/lead-contact.service.ts). This door exists
+ * for the two cases automation cannot reach:
+ *
+ *   - the outreach happened OUTSIDE the platform (a rep used their personal phone), so a
+ *     salesperson who did the work is otherwise recorded as negligent (user story 17); and
+ *   - the automatic stamp is WRONG (a misattributed call), and a bad instant would permanently
+ *     distort the report (user story 16).
+ *
+ * THIS IS THE ONE DELIBERATE EXCEPTION TO FIRST-TOUCH-WINS IN THE WHOLE SPEC, which is why it does
+ * NOT go through `stampLeadClock`. That helper's entire contract is `WHERE contacted_at IS NULL` —
+ * it CANNOT overwrite, by design, and using it here would make the correction silently do nothing
+ * on exactly the leads a person is trying to correct. The write below is unconditional on purpose.
+ *
+ * It is still not destructive: the schema refuses null, so a set clock can be moved but never
+ * un-set. Nothing in this spec erases a clock, because erasing one erases the evidence of a
+ * breach that already happened.
+ *
+ * The status is NOT touched. The pre-redesign version of this handler moved the lead to CONTACTED
+ * and that is precisely what D6 forbids now: status moves through `transitionLeadStatus` and
+ * nowhere else, and a status change must never write this clock in either direction (booking a
+ * walkthrough advances a NEW lead to CONTACTED in the same transaction, so a status-driven stamp
+ * would make "first contact to walkthrough booked" structurally zero for the very leads it exists
+ * to measure).
+ */
+export async function contactLead(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const existing = await prisma.lead.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: { id: true, contacted_at: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Lead not found' });
+      return;
+    }
+
+    // #106 P1: SQL-based per-instance scope (nested-safe) — the same pair every sibling action on
+    // this router applies (see markLost / cancelLead). The route's own `canDo('contact', 'Lead')`
+    // answers "may this role correct contact times at all"; this answers "on THIS row".
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    const orgId = req.user!.organization_id;
+    const previous = existing.contacted_at;
+    const contactedAt = new Date(req.body.contacted_at);
+
+    const lead = await prisma.$transaction(async (tx) => {
+      const updated = await tx.lead.update({
+        where: { id },
+        data: {
+          contacted_at: contactedAt,
+          // WHO corrected it. The automatic writers deliberately leave this null, so the two are
+          // distinguishable forever after — which is the whole point: an anonymous correction is
+          // not auditable, and a report cannot tell a measured response time from an asserted one
+          // unless the row says which it is.
+          contacted_set_by: req.user!.id,
+          // Reuses the column the removed door already wrote. Absent stays absent rather than
+          // being blanked, so correcting the instant twice does not silently drop the note that
+          // explained the first correction.
+          ...(req.body.contacted_note !== undefined
+            ? { contacted_note: req.body.contacted_note || null }
+            : {}),
+        },
+        select: leadDetailSelect,
+      });
+
+      // D7: the ledger is the existing timeline, not a new table. Prose only — the instant lives
+      // in metadata, because this description is printed verbatim in the Activity panel and a
+      // server-rendered instant there would be in the wrong zone (MV-TZ-07).
+      await tx.timelineEvent.create({
+        data: {
+          organization_id: orgId,
+          entity_type: 'LEAD',
+          entity_id: id,
+          event_type: 'CONTACT_SET',
+          description: previous
+            ? 'Contact time corrected by hand'
+            : 'Contact time set by hand',
+          metadata: {
+            contacted_at: contactedAt.toISOString(),
+            previous_contacted_at: previous ? previous.toISOString() : null,
+            source: 'manual_correction',
+          },
+          created_by: req.user!.id,
+        },
+      });
+
+      return updated;
+    });
+
+    void logAudit({
+      req,
+      action: 'lead.contact_set',
+      resourceType: 'Lead',
+      resourceId: id,
+      metadata: {
+        contacted_at: contactedAt.toISOString(),
+        previous_contacted_at: previous ? previous.toISOString() : null,
+      },
+    });
+
+    // #233 / audit F-012: ability-gated strip before responding (no-op for estimate-readers).
+    await stripEstimateMoneyUnlessVisible(req, lead);
+
+    res.json({ lead: await withTags(req, lead) });
+  } catch (err) {
+    logger.error('Contact lead error:', err);
+    res.status(500).json({ error: 'Failed to set the contact time' });
+  }
+}
+
 // ─── Mark Lost ────────────────────────────────────────
 
 // Walkthrough-as-entity redesign, PR-B2: same auto-cancel repoint as cancelLead — the trigger is
@@ -2122,28 +2595,38 @@ export async function markLost(req: Request, res: Response) {
         cancelledAt, reason: 'Lead marked as lost', cancelledBy: req.user!.id,
       });
 
-      const updatedLead = await tx.lead.update({
-        where: { id },
-        data: {
-          status: 'LOST',
-          lost_at: new Date(),
-          lost_reason: req.body.lost_reason,
-        },
-        select: leadDetailSelect,
+      // Spec #1751 D6: the ONE writer that moves a lead's status. It writes the status, the
+      // reason and the ledger entry in this transaction, and the ledger entry now carries
+      // `from` and `to` - which the hand-rolled timelineEvent.create it replaces did not, so no
+      // time-in-stage was computable from it even retroactively.
+      //
+      // `notFrom: []` because the 400 above has already rejected every terminal status with a
+      // specific message; re-applying the helper's default guard here would silently turn that
+      // into a 200 that did nothing.
+      await transitionLeadStatus(tx, {
+        leadId: id,
+        orgId,
+        to: 'LOST',
+        from: existing.status,
+        actorId: req.user!.id,
+        notFrom: [],
+        description: scheduled
+          ? 'Lead marked as lost — walkthrough auto-cancelled'
+          : 'Lead marked as lost',
+        metadata: { walkthrough_auto_cancelled: Boolean(scheduled) },
+        data: { lost_at: new Date(), lost_reason: req.body.lost_reason },
       });
 
-      // Log timeline event
-      await tx.timelineEvent.create({
-        data: {
-          organization_id: orgId,
-          entity_type: 'LEAD',
-          entity_id: id,
-          event_type: 'STATUS_CHANGE',
-          description: scheduled
-            ? 'Lead marked as lost — walkthrough auto-cancelled'
-            : 'Lead marked as lost',
-          created_by: req.user!.id,
-        },
+      // Re-read for the response shape. The writer above deliberately returns no row: it updates
+      // through updateMany so that its tenant scope and its "never overwrite" guards live in the
+      // WHERE clause, and a helper that also had to satisfy each caller's own `select` would be
+      // back to being nine different writers.
+      // `data: {}` — the row is re-read for the response shape only; the writer above already
+      // made every change. Same idiom completeWalkthrough has always used.
+      const updatedLead = await tx.lead.update({
+        where: { id },
+        data: {},
+        select: leadDetailSelect,
       });
 
       return updatedLead;
@@ -2179,5 +2662,387 @@ export async function markLost(req: Request, res: Response) {
   } catch (err) {
     logger.error('Mark lost error:', err);
     res.status(500).json({ error: 'Failed to mark lead as lost' });
+  }
+}
+
+// ─── Visits collection (multi-visit S1) ────────────────────────────────────
+//
+// The multi-visit interface, alongside the legacy single-visit endpoints above. Per the spec's API
+// contract, visits are a NESTED COLLECTION on their parent, following the platform's existing
+// `/api/{resource}` + `POST :id/{action}` shape. The lead side lands here; slice S2 hangs the same
+// collection off jobs.
+//
+// The distinction that matters: POST /walkthrough/schedule (re)schedules the lead's active visit
+// by collapsing onto one row, whereas POST /visits books an ADDITIONAL one. That is the whole
+// invariant this slice lifts - a lead can now hold several live visits at once.
+
+export const createVisitSchema = z.object({
+  scheduled_at: z.string().datetime(),
+  duration_minutes: z.number().int().min(15).max(480).default(60),
+  assignee_ids: z.array(z.string().uuid()).default([]),
+  notes: z.string().max(5000).optional(),
+  // S7 (D3 - a visit is a visit): the SAME nested notify object the three job-visit schemas take,
+  // with `.email()` and the cc array capped at 5 exactly as assignJobSchema has them.
+  //
+  // The dead `send_email: z.boolean().optional().default(true)` that used to sit here is gone.
+  // It was destructured nowhere, so removing it is a no-op on the wire (Zod already strips
+  // unknown keys), and a `.default(true)` flag lying around is a live trap the moment someone
+  // wires it up. It is NOT the same flag as the legacy /walkthrough/schedule door's send_email,
+  // which is real and gates that endpoint's whole automation block.
+  notify: z
+    .object({
+      notify_customer: z.boolean().optional(),
+      notify_recipient_email: z.string().email().optional(),
+      notify_cc_emails: z.array(z.string().email()).max(5).optional(),
+      notify_message: z.string().max(5000).optional(),
+    })
+    .optional(),
+  force: z.boolean().optional().default(false),
+});
+
+/** Every visit on the lead, earliest scheduled first. */
+export async function listVisits(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const lead = await prisma.lead.findUnique({ where: { id, ...tenantWhere(req) }, select: { id: true } });
+    if (!lead) {
+      res.status(404).json({ error: 'Lead not found' });
+      return;
+    }
+    // The route gate `canDo('read','Lead')` is SUBJECT-level, and TECHNICIAN holds read Lead
+    // conditioned on OWN_WALKTHROUGH - so without this the nested collection hands every
+    // technician the times, notes and crew of every lead's trips in the org, while GET
+    // /api/leads/:id on the parent row 403s them. A nested collection is never the weaker door.
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+    res.json({ visits: await listLeadVisits(req, id) });
+  } catch (err) {
+    logger.error('List visits error:', err);
+    res.status(500).json({ error: 'Failed to list visits' });
+  }
+}
+
+/** Book a NEW visit on the lead, leaving any existing ones untouched. */
+export async function createVisit(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const { scheduled_at, duration_minutes, assignee_ids, notes, force, notify } = req.body as {
+      scheduled_at: string;
+      duration_minutes: number;
+      assignee_ids: string[];
+      notes?: string;
+      force: boolean;
+      notify?: {
+        notify_customer?: boolean;
+        notify_recipient_email?: string;
+        notify_cc_emails?: string[];
+        notify_message?: string;
+      };
+    };
+    const notifyCustomer = notify?.notify_customer === true;
+
+    const existing = await prisma.lead.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: {
+        id: true,
+        status: true,
+        // S7: the customer email's own fields, the same set the legacy walkthrough door reads.
+        customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
+        service_address_line1: true,
+        service_city: true,
+        service_state: true,
+      },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Lead not found' });
+      return;
+    }
+
+    // The same per-instance scope the legacy /walkthrough/schedule door applies (:1513). Its
+    // route gate `canDo('schedule_walkthrough','Lead')` is SUBJECT-level and SALES holds that
+    // grant conditioned on OWN_LEAD, so without this a salesperson books trips on every lead in
+    // the org - and since S7 that write also mails the customer, from the org's verified sending
+    // domain, at a recipient and with a body the request itself chose.
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    // Per-member eligibility, same rule the legacy schedule path applies.
+    const assignees = await validatePerformers(req, assignee_ids);
+    if (!assignees.ok) {
+      res.status(assignees.status).json({ error: assignees.error });
+      return;
+    }
+
+    const scheduledStart = new Date(scheduled_at);
+    const scheduledEnd = new Date(scheduledStart.getTime() + duration_minutes * 60_000);
+
+    // D21: crew double-booking WARNS, never blocks. The 409 is advisory and the client retries
+    // with force:true once the dispatcher has seen which job or lead it clashes with - a hard
+    // block just moves scheduling out of the software and into a text message.
+    if (!force && assignee_ids.length > 0) {
+      const conflicts = await detectPerformerConflicts(req, {
+        leadId: id,
+        userIds: assignee_ids,
+        schedStart: scheduledStart,
+        schedEnd: scheduledEnd,
+      });
+      if (conflicts.length > 0) {
+        res.status(409).json({ error: 'Schedule conflict detected', conflicts });
+        return;
+      }
+    }
+
+    const orgId = req.user!.organization_id;
+    // Same retry as the job door: visit_seq comes from MAX + 1 with no lock, so the unique
+    // index can reject a number a concurrent create already took (section 4.4).
+    const visit = await withVisitSeqRetry(() => prisma.$transaction(async (tx) => {
+      const created = await createLeadVisit(tx, {
+        leadId: id,
+        orgId,
+        visitSeq: await nextVisitSeqForLead(tx, orgId, id),
+        scheduledAt: scheduledStart,
+        scheduledEnd,
+        durationMinutes: duration_minutes,
+        notes: notes ?? null,
+        // NOT here: the send is post-commit and can come back skipped (no address on file, which
+        // the composer explicitly invites) or failed. The flag says the customer WAS told, so it
+        // records the OUTCOME of the send and is written below, once there is one.
+        stampCustomerEmailSentAt: false,
+      });
+      await replaceWalkthroughPerformers(tx, created.id, id, orgId, assignee_ids);
+
+      // Same single status side effect as the legacy path: advance NEW -> CONTACTED and never
+      // pull the lead's own status backward (D2/D5). Through the one writer (spec #1751 D6) for
+      // the same reasons as /walkthrough/schedule, including NOT stamping contacted_at.
+      if (existing.status === 'NEW') {
+        await transitionLeadStatus(tx, {
+          leadId: id,
+          orgId,
+          to: 'CONTACTED',
+          from: existing.status,
+          actorId: req.user!.id,
+          description: 'Lead moved to contacted — walkthrough booked',
+          metadata: { via: 'visit_created' },
+        });
+      }
+
+      // Spec #1751 D2, the same stamp the /walkthrough/schedule door makes. This door books an
+      // ADDITIONAL visit, so on a lead that already has one the write is a no-op — which is the
+      // point of first-touch-wins — but it is the FIRST booking whenever a lead is booked through
+      // this door first, and leaving it out would make the clock depend on which of two
+      // equivalent doors the dispatcher happened to use.
+      //
+      // Through `stampLeadClock` for the same reason that door uses it: the clock is MONOTONIC,
+      // and its `WHERE ... IS NULL` is what makes "was it already set?" atomic rather than a
+      // read-then-write across the transaction boundary.
+      await stampLeadClock(tx, id, orgId, 'walkthrough_first_booked_at', new Date());
+
+      await tx.timelineEvent.create({
+        data: {
+          organization_id: orgId,
+          entity_type: 'LEAD', entity_id: id,
+          event_type: 'WALKTHROUGH_SCHEDULED',
+          description: `Visit ${created.visit_seq} scheduled`,
+          metadata: { visit_id: created.id, visit_seq: created.visit_seq, assignee_ids, duration: duration_minutes },
+          created_by: req.user!.id,
+        },
+      });
+
+      return created;
+    }));
+
+    // AWAITED and post-commit, never fatal - the same contract every other notify site has.
+    // visitSeq and the date come off the row the transaction RETURNED (#1522).
+    const notifyResult = notifyCustomer
+      ? await notifyCustomerOfWalkthrough(req, {
+          leadId: id,
+          customer: existing.customer,
+          serviceAddress: [existing.service_address_line1, existing.service_city, existing.service_state]
+            .filter(Boolean).join(', '),
+          performers: assignees.users,
+          scheduledAt: visit.scheduled_at ?? scheduledStart,
+          isReschedule: false,
+          visitSeq: visit.visit_seq,
+          recipientEmail: notify?.notify_recipient_email,
+          cc: notify?.notify_cc_emails,
+          message: notify?.notify_message,
+        })
+      : undefined;
+
+    // The stamp is the outcome of the send, never the intent behind it - see the create above.
+    // updateMany rather than update so the tenant predicate rides along on the write.
+    const announcedAt = notifyResult?.status === 'sent' ? new Date() : null;
+    if (announcedAt) {
+      await prisma.visit.updateMany({
+        where: { id: visit.id, ...tenantWhere(req) },
+        data: { customer_email_sent_at: announcedAt },
+      });
+    }
+
+    res.status(201).json({
+      visit: announcedAt ? { ...visit, customer_email_sent_at: announcedAt } : visit,
+      ...(notifyResult ? { notify: notifyResult } : {}),
+    });
+  } catch (err) {
+    logger.error('Create visit error:', err);
+    res.status(500).json({ error: 'Failed to create visit' });
+  }
+}
+
+// ─── Editable Record ID - preview + rename (decision #7) ───────────
+//
+// Lead has no entity-specific rename precondition beyond the route's canDo('renumber',
+// 'Lead') gate + per-instance ownership - that lock is Invoice-only (decision #8,
+// isInvoiceRenumberLocked), so neither handler below checks one.
+
+/** Carries the structured conflict computation out of the locked transaction so the
+ * catch block can build a 409 body from real data instead of a message string -
+ * applyRenumber itself only throws a plain Error, so the conflict check is duplicated
+ * here (computeRenumber, then applyRenumber, which re-derives it again internally) to
+ * get that structure. Mirrors what applyRenumber does internally; see its doc comment. */
+class LeadRenumberConflictError extends Error {
+  constructor(public computation: RenumberComputation) {
+    super(`Cannot rename lead ${computation.parentId}: number already in use`);
+  }
+}
+
+// Read-only, no lock - safe against a plain (non-transaction) client, matching the
+// engine's own contract for computeRenumber.
+export async function previewNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+    const { number } = req.body as { number: string };
+
+    const existing = await prisma.lead.findUnique({ where: { id, ...tenantWhere(req) } });
+    if (!existing) {
+      res.status(404).json({ error: 'Lead not found' });
+      return;
+    }
+
+    // Mirrors update()/assign()'s per-instance ownership check - the route's
+    // canDo('renumber', 'Lead') is a bare-subject check and does not bind the row.
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    let computation: RenumberComputation;
+    try {
+      computation = await computeRenumber(prisma, 'lead', id, orgId, number);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid record number' });
+      return;
+    }
+
+    res.json(computation);
+  } catch (err) {
+    logger.error('Preview lead number error:', err);
+    res.status(500).json({ error: 'Failed to preview lead number' });
+  }
+}
+
+export async function renameNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+    const { number } = req.body as { number: string };
+
+    // Cheap existence + ownership + format checks BEFORE opening a transaction, so a
+    // request that's going to 404/403/400 anyway never takes the row lock.
+    const existing = await prisma.lead.findUnique({ where: { id, ...tenantWhere(req) } });
+    if (!existing) {
+      res.status(404).json({ error: 'Lead not found' });
+      return;
+    }
+
+    if (!(await canAccessRow(req, 'Lead', prisma.lead, id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    const formatCheck = validateNumberFormat(number);
+    if (!formatCheck.ok) {
+      res.status(400).json({ error: formatCheck.error });
+      return;
+    }
+
+    let computation: RenumberComputation;
+    try {
+      computation = await prisma.$transaction(async (tx) => {
+        // `leads` is an ANCHOR table (numbering.ts's allocateAnchoredNumber locks it
+        // FOR NO KEY UPDATE for anchored logistic-order allocation) - matching that
+        // lock strength here avoids a FOR UPDATE / FOR NO KEY UPDATE conflict deadlock
+        // against a concurrent allocation on the same row.
+        await tx.$executeRaw`SELECT id FROM leads WHERE id = ${id}::uuid AND organization_id = ${orgId}::uuid FOR NO KEY UPDATE`;
+
+        // Re-derive fresh inside the lock to get the STRUCTURED conflict list for a 409
+        // body - applyRenumber (below) would throw on the same conflict, but only as a
+        // plain Error message, not the computation itself.
+        const preview = await computeRenumber(tx, 'lead', id, orgId, number);
+        if (preview.hasConflicts) {
+          throw new LeadRenumberConflictError(preview);
+        }
+        return applyRenumber(tx, 'lead', id, orgId, number);
+      });
+    } catch (err) {
+      if (err instanceof LeadRenumberConflictError) {
+        res.status(409).json({ error: err.message, computation: err.computation });
+        return;
+      }
+      throw err;
+    }
+
+    const derivedCount = computation.derived.length + computation.labelRefreshes.length;
+
+    // Timeline event AFTER the transaction commits.
+    await prisma.timelineEvent.create({
+      data: {
+        organization_id: orgId,
+        entity_type: 'LEAD',
+        entity_id: id,
+        event_type: 'LEAD_RENUMBERED',
+        description: `Lead number changed from ${computation.oldNumber} to ${computation.newNumber} (${derivedCount} derived record${derivedCount === 1 ? '' : 's'} updated)`,
+        metadata: {
+          old_number: computation.oldNumber,
+          new_number: computation.newNumber,
+          derived_count: derivedCount,
+        },
+        created_by: req.user!.id,
+      },
+    });
+
+    void logAudit({
+      req,
+      action: 'lead.renumbered',
+      resourceType: 'Lead',
+      resourceId: id,
+      metadata: { old_number: computation.oldNumber, new_number: computation.newNumber },
+    });
+
+    // Built from the pre-transaction row + the computation, not a re-select - the
+    // rename only ever touches lead_number/number_is_custom/original_number, all
+    // known here, so a fresh query would be redundant. Includes the full
+    // derived-change list so the (later) frontend confirmation dialog needs no
+    // second round trip.
+    res.status(200).json({
+      lead: {
+        ...existing,
+        lead_number: computation.newNumber,
+        number_is_custom: true,
+        original_number: existing.original_number ?? computation.oldNumber,
+      },
+      old_number: computation.oldNumber,
+      new_number: computation.newNumber,
+      derived: computation.derived,
+      label_refreshes: computation.labelRefreshes,
+    });
+  } catch (err) {
+    logger.error('Rename lead number error:', err);
+    res.status(500).json({ error: 'Failed to rename lead number' });
   }
 }

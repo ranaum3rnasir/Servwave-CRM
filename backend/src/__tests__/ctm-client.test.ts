@@ -87,8 +87,11 @@ describe('auth + base url', () => {
     mockEnv.env.CTM_API_BASE = 'https://api.calltrackingmetrics.com/api/v1/';
     fetchMock.mockResolvedValueOnce(jsonResponse({ numbers: [] }));
     await listNumbers('596375');
+    // The trailing slash is stripped and the base is honored. listNumbers now
+    // walks pages, so the query carries page=1; the point of this test is the
+    // base URL, not the pagination cursor.
     expect(String(fetchMock.mock.calls[0][0])).toBe(
-      'https://api.calltrackingmetrics.com/api/v1/accounts/596375/numbers',
+      'https://api.calltrackingmetrics.com/api/v1/accounts/596375/numbers?page=1',
     );
   });
 });
@@ -99,12 +102,12 @@ describe('buyNumber response shape', () => {
   // `.number` / `.formatted` off the top level.
   it('unwraps a purchase nested under `number`', async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ number: { id: 'TPN-X', number: '+15555550211', formatted: '(555) 555-0211' } }),
+      jsonResponse({ number: { id: 'TPN-X', number: '+16095968565', formatted: '(609) 596-8565' } }),
     );
-    await expect(buyNumber('597911', { phone_number: '+15555550211' })).resolves.toMatchObject({
+    await expect(buyNumber('597911', { phone_number: '+16095968565' })).resolves.toMatchObject({
       id: 'TPN-X',
-      number: '+15555550211',
-      formatted: '(555) 555-0211',
+      number: '+16095968565',
+      formatted: '(609) 596-8565',
     });
   });
 
@@ -181,6 +184,102 @@ describe('pagination (page-based envelope)', () => {
     expect(pages).toEqual([[]]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  // The live envelope, captured from account 596375 on 2026-08-13: `next_page`
+  // is a URL, NOT a page number. The fixture above invented the numeric form,
+  // so it passed while production stopped after page 1. Page size is 10, so
+  // every list silently truncated - 10 of 20 numbers, 10 of 123 calls.
+  it('follows next_page when it is a URL rather than a number', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          page: 1,
+          next_page: 'https://api.calltrackingmetrics.com/api/v1/accounts/596375/calls?page=2',
+          total_pages: 2,
+          calls: [{ sid: 'CA1' }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ page: 2, next_page: null, total_pages: 2, calls: [{ sid: 'CA2' }] }),
+      );
+
+    const seen: string[] = [];
+    for await (const page of listCalls('596375')) for (const c of page) seen.push(String(c.sid));
+
+    expect(seen).toEqual(['CA1', 'CA2']);
+  });
+
+  it('stops at total_pages even if next_page keeps pointing forward', async () => {
+    // Runaway guard: a next_page that never goes null must not loop forever.
+    // A fresh Response per call - a Response body can only be read once, so a
+    // single shared object would fail on the second fetch for the wrong reason.
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        page: 1,
+        next_page: 'https://api.calltrackingmetrics.com/api/v1/accounts/596375/calls?page=2',
+        total_pages: 2,
+        calls: [{ sid: 'CA1' }],
+      }),
+    );
+
+    const pages = [];
+    for await (const page of listCalls('596375')) pages.push(page);
+
+    expect(pages).toHaveLength(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops on an empty page even when the envelope claims more', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ page: 1, next_page: 'x?page=2', total_pages: 99, calls: [{ sid: 'CA1' }] }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ page: 2, next_page: 'x?page=3', total_pages: 99, calls: [] }));
+
+    const pages = [];
+    for await (const page of listCalls('596375')) pages.push(page);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(pages.flat()).toHaveLength(1);
+  });
+});
+
+describe('listNumbers pagination', () => {
+  // Alpha Doors holds 20 tracking numbers across 2 pages. listNumbers fetched
+  // page 1 and stopped, so Sync imported exactly half the account and the
+  // Numbers table under-reported what the customer is billed for.
+  const numbersPage = (n: number, ids: string[], totalPages: number) =>
+    jsonResponse({
+      page: n,
+      next_page:
+        n < totalPages
+          ? `https://api.calltrackingmetrics.com/api/v1/accounts/596375/numbers?page=${n + 1}`
+          : null,
+      total_pages: totalPages,
+      numbers: ids.map((id) => ({ id, number: `+1201555${id.padStart(4, '0')}` })),
+    });
+
+  it('returns every number on the account, not just the first page', async () => {
+    fetchMock
+      .mockResolvedValueOnce(numbersPage(1, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], 2))
+      .mockResolvedValueOnce(
+        numbersPage(2, ['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'], 2),
+      );
+
+    const numbers = await listNumbers('596375');
+
+    expect(numbers).toHaveLength(20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('still works for an account that fits on one page', async () => {
+    fetchMock.mockResolvedValueOnce(numbersPage(1, ['1', '2', '3', '4'], 1));
+
+    const numbers = await listNumbers('597911');
+
+    expect(numbers).toHaveLength(4);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('numbers', () => {
@@ -254,7 +353,7 @@ describe('webhooks', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ id: 77 }));
     await createWebhook('596375', {
       name: 'servwave-end',
-      weburl: 'https://servwave-dev-api.onrender.com/api/webhooks/ctm/end?token=t',
+      weburl: 'https://alpha-crm-test-env.onrender.com/api/webhooks/ctm/end?token=t',
       position: 'end',
       username: 'servwave',
       password: 'hook-token',

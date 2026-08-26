@@ -13,7 +13,7 @@
 -- weight for a later cleanup pass; nothing this slice touches reads or writes
 -- it as truth any more (see the Prisma model comments).
 --
--- BACKFILL (verified against live staging data,
+-- BACKFILL (verified against live staging data, project redacted-staging-ref,
 -- before writing this):
 --   select count(*), count(*) filter (where thread_id is not null),
 --          count(*) filter (where direction is null)

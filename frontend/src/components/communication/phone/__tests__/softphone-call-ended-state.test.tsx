@@ -24,7 +24,7 @@ const outcome = vi.hoisted(() => ({ current: null as null | Record<string, unkno
 const outcomeArgs = vi.hoisted(() => ({ current: [] as unknown[] }));
 
 vi.mock('@/lib/api/communication', () => ({
-  BUSINESS_NUMBER: '(555) 555-0208',
+  BUSINESS_NUMBER: '(551) 282-7064',
   fmtPhone: (n: string) => n,
   usePhoneCustomers: () => ({ data: [] }),
   usePlaceCall: () => placeCall,
@@ -76,7 +76,7 @@ beforeEach(() => {
 
 describe('Softphone - bridge call ended state', () => {
   it('still reads "Call placed" while the end webhook has not landed', () => {
-    render(<Softphone prefillNumber="5555550219" />);
+    render(<Softphone prefillNumber="9294039424" />);
     placeACall();
 
     expect(screen.getAllByText('Call placed').length).toBeGreaterThanOrEqual(2);
@@ -88,7 +88,7 @@ describe('Softphone - bridge call ended state', () => {
 
   it('flips to a real ended state with the call duration once the row lands', () => {
     outcome.current = { id: 'ca-1', status: 'completed', durationSec: 19 };
-    render(<Softphone prefillNumber="5555550219" />);
+    render(<Softphone prefillNumber="9294039424" />);
     placeACall();
 
     // Both surfaces that reported "Call placed" must now agree: the status pill
@@ -104,7 +104,7 @@ describe('Softphone - bridge call ended state', () => {
 
   it('formats a call over a minute as m:ss, not raw seconds', () => {
     outcome.current = { id: 'ca-2', status: 'completed', durationSec: 154 };
-    render(<Softphone prefillNumber="5555550219" />);
+    render(<Softphone prefillNumber="9294039424" />);
     placeACall();
 
     expect(screen.getByText('2:34')).toBeInTheDocument();
@@ -115,11 +115,11 @@ describe('Softphone - bridge call ended state', () => {
   // and reports its duration as this call's.
   it('pins the poll to this destination and to the moment it dialled', () => {
     const before = Date.now();
-    render(<Softphone prefillNumber="5555550219" />);
+    render(<Softphone prefillNumber="9294039424" />);
     placeACall();
 
     const [toNumber, since] = outcomeArgs.current as [string | null, string | null];
-    expect(toNumber).toBe('+15555550219');
+    expect(toNumber).toBe('+19294039424');
     expect(since).toBeTruthy();
     const dialedAt = Date.parse(since as string);
     expect(Number.isNaN(dialedAt)).toBe(false);
@@ -127,7 +127,7 @@ describe('Softphone - bridge call ended state', () => {
   });
 
   it('asks nothing while idle - the poll is scoped to a placed call', () => {
-    render(<Softphone prefillNumber="5555550219" />);
+    render(<Softphone prefillNumber="9294039424" />);
 
     const [toNumber, since] = outcomeArgs.current as [string | null, string | null];
     expect(toNumber).toBeNull();

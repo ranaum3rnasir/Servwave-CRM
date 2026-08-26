@@ -11,7 +11,7 @@ const FIXTURE_ORG = {
   address_line1: '1001 Willow Avenue',
   address_line2: null,
   city: 'Hoboken', state: 'NJ', postal_code: '07030', country: 'US',
-  email: 'info@example.com',
+  email: 'info@alphasecurityus.com',
   phone: null,
   website: 'https://alphadoorsnewjersey.com/',
   logo_url: null,

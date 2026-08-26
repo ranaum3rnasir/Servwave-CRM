@@ -20,14 +20,14 @@ import { ChartCard } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { token } from '@/design-system';
 import { formatCurrencyWhole } from '@/lib/utils';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { MultiSelectFilter } from './_shared';
-import { buildItemsServices, buildWeeklyVariance } from './items-services-data';
+import { buildItemsServices, buildWeeklyVariance } from '@/lib/reports/items-services-data';
 import {
   companyKpis, technicianIds, technicianRows, technicianSummary,
   type ItemServiceStat, type TechItemStat, type TechRow,
-} from './items-services-logic';
+} from '@/lib/reports/items-services-logic';
 
 const min = (n: number) => `${Math.round(n)}m`;
 const pct = (n: number) => `${n >= 0 ? '+' : ''}${Math.round(n)}%`;

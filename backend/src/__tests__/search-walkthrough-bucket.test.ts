@@ -51,7 +51,7 @@ function lead(over: Record<string, unknown>) {
     service_city: 'Austin',
     service_state: 'TX',
     customer: { first_name: 'John', last_name: 'Doe', company_name: null, phone: '5551234567' },
-    walkthroughs: [walkthrough({ id: 'w-req', status: 'REQUESTED' })],
+    visits: [walkthrough({ id: 'w-req', status: 'REQUESTED' })],
     ...over,
   };
 }
@@ -63,6 +63,17 @@ function reset() {
   m.customer.findMany.mockResolvedValue([]);
   m.estimate.findMany.mockResolvedValue([]);
   m.invoice.findMany.mockResolvedValue([]);
+}
+
+/** Every `visits.some.status` predicate named anywhere in a where tree, however it is composed. */
+function boardStatusPredicates(node: unknown): unknown[] {
+  if (Array.isArray(node)) return node.flatMap(boardStatusPredicates);
+  if (!node || typeof node !== 'object') return [];
+  const rec = node as Record<string, any>;
+  const out: unknown[] = [];
+  if (rec.visits?.some?.status !== undefined) out.push(rec.visits.some.status);
+  for (const v of Object.values(rec)) out.push(...boardStatusPredicates(v));
+  return out;
 }
 
 function wheresOf(mock: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
@@ -114,12 +125,22 @@ describe('GET /api/search - leads are searchable by their lead number', () => {
 describe('GET /api/search?scope=schedule - unscheduled walkthroughs are findable', () => {
   beforeEach(reset);
 
-  it('admits REQUESTED walkthroughs, not just SCHEDULED ones - the sidebar bucket is REQUESTED', async () => {
+  it('admits every LIVE visit state, not just SCHEDULED - the board renders all of them', async () => {
     await search({ q: 'doe', scope: 'schedule' });
 
     for (const w of wheresOf(m.lead.findMany)) {
-      const some = (w.walkthroughs as { some: { status: unknown } }).some;
-      expect(some.status).toEqual({ in: ['REQUESTED', 'SCHEDULED'] });
+      // Found ANYWHERE in the where tree: the board filter is AND-composed on top of the caller's
+      // Lead row-scope, which owns a top-level `visits` key of its own, so reading a fixed key
+      // path here would assert over the wrong node (or over nothing at all).
+      const named = boardStatusPredicates(w);
+      expect(named.length).toBeGreaterThan(0);
+      // This pinned ['REQUESTED', 'SCHEDULED'] until multi-visit S4. REQUESTED was retired by the
+      // S1 migration and the query kept naming it - a Prisma validation error against real
+      // Postgres, swallowed by safeQuery into an empty array, invisible under a mocked Prisma.
+      // Sourced from LIVE_VISIT_STATUSES now, so the query cannot drift out of the enum again.
+      for (const status of named) {
+        expect(status).toEqual({ in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] });
+      }
     }
   });
 
@@ -147,14 +168,14 @@ describe('GET /api/search?scope=schedule - unscheduled walkthroughs are findable
 
   it('orders scheduled walkthroughs ahead of unscheduled ones, soonest first', async () => {
     m.lead.findMany.mockResolvedValue([
-      lead({ id: 'unscheduled', walkthroughs: [walkthrough({ status: 'REQUESTED' })] }),
+      lead({ id: 'unscheduled', visits: [walkthrough({ status: 'REQUESTED' })] }),
       lead({
         id: 'later',
-        walkthroughs: [walkthrough({ scheduled_at: new Date('2026-08-20T09:00:00.000Z') })],
+        visits: [walkthrough({ scheduled_at: new Date('2026-08-20T09:00:00.000Z') })],
       }),
       lead({
         id: 'sooner',
-        walkthroughs: [walkthrough({ scheduled_at: new Date('2026-08-15T09:00:00.000Z') })],
+        visits: [walkthrough({ scheduled_at: new Date('2026-08-15T09:00:00.000Z') })],
       }),
     ]);
 
@@ -168,7 +189,7 @@ describe('GET /api/search?scope=schedule - unscheduled walkthroughs are findable
   it('still sources a SCHEDULED walkthrough date from its current visit', async () => {
     const scheduledAt = new Date('2026-08-15T14:00:00.000Z');
     m.lead.findMany.mockResolvedValue([
-      lead({ walkthroughs: [walkthrough({ status: 'SCHEDULED', scheduled_at: scheduledAt })] }),
+      lead({ visits: [walkthrough({ status: 'SCHEDULED', scheduled_at: scheduledAt })] }),
     ]);
 
     const res = await search({ q: 'doe', scope: 'schedule' });

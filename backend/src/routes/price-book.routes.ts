@@ -27,6 +27,10 @@ router.delete('/items/:id', canDo('delete', 'PriceBook'), priceBookController.de
 // ─── Brands + Item Groups (single catalog write path — P0 §D2) ───────────────
 router.post('/brands', canDo('create', 'PriceBook'), validate(priceBookController.upsertBrandSchema), priceBookController.upsertBrand);
 router.delete('/brands/:id', canDo('delete', 'PriceBook'), priceBookController.deleteBrand);
+router.post('/finishes', canDo('create', 'PriceBook'), validate(priceBookController.upsertFinishSchema), priceBookController.upsertFinish);
+router.delete('/finishes/:id', canDo('delete', 'PriceBook'), priceBookController.deleteFinish);
+router.post('/uom-options', canDo('create', 'PriceBook'), validate(priceBookController.upsertUomOptionSchema), priceBookController.upsertUomOption);
+router.delete('/uom-options/:id', canDo('delete', 'PriceBook'), priceBookController.deleteUomOption);
 router.post('/item-groups', canDo('create', 'PriceBook'), validate(priceBookController.upsertItemGroupSchema), priceBookController.upsertItemGroup);
 router.delete('/item-groups/:id', canDo('delete', 'PriceBook'), priceBookController.deleteItemGroup);
 

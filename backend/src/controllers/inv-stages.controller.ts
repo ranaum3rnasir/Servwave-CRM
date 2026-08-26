@@ -10,6 +10,7 @@ import { applyStockMovement } from './inv-stock.controller';
 import { recomputePoStatus } from './inv-po.controller';
 import { emitStagingReady, emitStagingNoAreaIfNeeded, emitPoPartial } from '../services/notifications/inventoryEmit';
 import { sendStagePickupEmail, dispatchFailureStatus } from '../lib/email';
+import { getOrgTimezone } from '../lib/timezone';
 
 // ─── Stage attachments → Supabase Storage (P5 §5) ───────────────────────────
 // Reuses the existing `attachments` bucket (RLS policies already in place).
@@ -602,7 +603,34 @@ export async function receiveStageLine(req: Request, res: Response) {
     const actor = `${req.user!.first_name ?? ''} ${req.user!.last_name ?? ''}`.trim() || 'Unknown';
     // §3.6: receive INTO the stage's own location; the DEC3 org default is the
     // fallback only when the stage has no staged_location.
-    const destinationId = (stage as any).staged_location_id ?? await resolveReceiveLocationId(req);
+    //
+    // `staged_location_id` carries no foreign key (schema.prisma - the JobStage
+    // model declares it as a bare `String? @db.Uuid`), so it can outlive the
+    // location it names, and no write path validates it as this org's either.
+    // Confirm it still resolves inside the tenant before crediting stock to it.
+    // It deliberately does NOT fall back to the org default when it does not:
+    // the operator chose a specific place for these parts, and quietly booking
+    // them into a different warehouse would leave the stock record wrong with
+    // nothing to show that it happened. Fail with something actionable instead.
+    let destinationId: string | null;
+    const stagedLocationId = (stage as any).staged_location_id as string | null;
+    if (stagedLocationId) {
+      const stagedLocation = await prisma.inventoryLocation.findFirst({
+        where: { id: stagedLocationId, ...tenantWhere(req) },
+        select: { id: true },
+      });
+      if (!stagedLocation) {
+        res.status(409).json({
+          error: 'STAGED_LOCATION_MISSING',
+          message:
+            'The inventory location this stage was staged at no longer exists. Pick a staging location for the stage before receiving parts.',
+        });
+        return;
+      }
+      destinationId = stagedLocation.id;
+    } else {
+      destinationId = await resolveReceiveLocationId(req);
+    }
 
     // applyStockMovement only credits a stock level when it has a destination
     // (inv-stock.controller §254), so receiving with none resolvable used to log
@@ -786,6 +814,7 @@ export async function emailJobStage(req: Request, res: Response) {
       customer: stage.customer,
       site: stage.site,
       scheduledFor: stage.scheduled_for ? stage.scheduled_for.toISOString() : null,
+      timezone: await getOrgTimezone(orgId),
       notes: stage.notes ?? null,
       lines,
       // Job-scoped, NOT customer-scoped: a pickup ticket goes to the tech or a

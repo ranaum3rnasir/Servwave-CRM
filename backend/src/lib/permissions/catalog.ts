@@ -8,7 +8,12 @@ export type Subject =
   | 'Report' | 'Pricing' | 'Organization' | 'StateTaxRate' | 'AppSetting'
   | 'Attachment' | 'Walkthrough' | 'Inventory' | 'PurchaseOrder' | 'Vendor' | 'LogisticOrder' | 'Communication'
   | 'Location' | 'Role' | 'ServicePlan' | 'Task' | 'Notification' | 'Timeclock'
-  | 'Automation' | 'all';
+  | 'Automation'
+  // Calendar Entries (Slice 01, spec §4) - permission plumbing shipped BEFORE the
+  // `calendar_entries` table exists (Slice 02), same move as 'renumber' above. Visibility is
+  // org-wide (ADR 0002 / spec §4: no ownership chain, no own-scope) - never add this to
+  // SCOPE_ENTITIES (roleViewModel.ts).
+  | 'CalendarEntry' | 'all';
 
 export type Action =
   | 'manage' | 'create' | 'read' | 'update' | 'delete'
@@ -19,6 +24,10 @@ export type Action =
   | 'export' | 'mark_lost' | 'contact' | 'schedule_walkthrough' | 'perform_walkthrough'
   // entity-redesign §10 lifecycle (Phase 3 minimal — broad CASL stays Phase 5)
   | 'archive' | 'force_purge' | 'anonymize'
+  // Editable record IDs (2026-08-19 plan, decision #7). Permission plumbing only - the
+  // PATCH .../:id/number endpoints this gates ship in a later PR. ADMIN gets it via the
+  // manage-all bypass (no row needed); DISPATCHER holds it via an explicit DEFAULT_GRANTS row.
+  | 'renumber'
   // Inventory P3 (D10/D13): per-user restriction flag — a per-user capability only
   // (userCapabilities.ts), never a role grant. See THE ACTUAL GATE note below.
   | 'location_restricted'
@@ -76,6 +85,7 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   { action: 'archive',           subject: 'Customer',     description: 'Archive / unarchive customers and locations',       category: 'Customers'     },
   { action: 'force_purge',       subject: 'Customer',     description: 'Force-purge a customer subtree (admin-only)',       category: 'Customers'     },
   { action: 'anonymize',         subject: 'Customer',     description: 'Anonymize a customer (admin-only, deferred)',       category: 'Customers'     },
+  { action: 'renumber',          subject: 'Customer',     description: 'Edit the customer id number',                       category: 'Customers'     },
   // Lead
   { action: 'create',            subject: 'Lead',         description: 'Create leads',                                      category: 'Leads'         },
   { action: 'read',              subject: 'Lead',         description: 'View leads',                                        category: 'Leads'         },
@@ -87,6 +97,7 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   { action: 'cancel',            subject: 'Lead',         description: 'Cancel a lead',                                     category: 'Leads'         },
   { action: 'schedule_walkthrough', subject: 'Lead',      description: 'Schedule a walkthrough on a lead',                  category: 'Leads'         },
   { action: 'perform_walkthrough',  subject: 'Lead',      description: 'Record & complete an assigned walkthrough',         category: 'Leads'         },
+  { action: 'renumber',          subject: 'Lead',         description: 'Edit the lead id number',                           category: 'Leads'         },
   // Estimate
   { action: 'create',            subject: 'Estimate',     description: 'Create estimates',                                  category: 'Estimates'     },
   { action: 'read',              subject: 'Estimate',     description: 'View estimates',                                    category: 'Estimates'     },
@@ -109,6 +120,7 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   // permanently ADMIN-only, never grantable to another role via the Settings UI.
   { action: 'approve',           subject: 'Estimate',     description: 'Approve an estimate internally (verbal/off-platform win)', category: 'Estimates' },
   { action: 'decline',           subject: 'Estimate',     description: 'Decline an estimate internally (verbal/off-platform loss)', category: 'Estimates' },
+  { action: 'renumber',          subject: 'Estimate',     description: 'Edit the estimate id number',                       category: 'Estimates'     },
   // refund_deposit + reactivate_deposit folded into the unified Invoice refund (Phase 5):
   // the deposit refund is now POST /api/invoices/:id/refund on the kind=DEPOSIT invoice.
   // Job
@@ -139,6 +151,7 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   // These descriptions are not rendered anywhere - `isCatalogEntry` is the only consumer of this
   // table - so a label here would not have surfaced it either.
   { action: 'manage_lines',      subject: 'Job',          description: 'Add/remove job line items and scopes',              category: 'Jobs'          },
+  { action: 'renumber',          subject: 'Job',          description: 'Edit the job id number',                            category: 'Jobs'          },
   // Invoice
   { action: 'create',            subject: 'Invoice',      description: 'Create invoices',                                   category: 'Invoices'      },
   { action: 'read',              subject: 'Invoice',      description: 'View invoices',                                     category: 'Invoices'      },
@@ -151,6 +164,7 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   { action: 'void_payment',      subject: 'Invoice',      description: 'Void a manual payment (admin-only)',                 category: 'Invoices'      },
   { action: 'record_payment',    subject: 'Invoice',      description: 'Record payment on invoice',                         category: 'Invoices'      },
   { action: 'manage_lines',      subject: 'Invoice',      description: 'Add/remove invoice line items',                      category: 'Invoices'      },
+  { action: 'renumber',          subject: 'Invoice',      description: 'Edit the invoice id number',                        category: 'Invoices'      },
   // PriceBook
   { action: 'read',              subject: 'PriceBook',    description: 'View price book categories and items',              category: 'Price Book'    },
   { action: 'create',            subject: 'PriceBook',    description: 'Create price book items/categories',                category: 'Price Book'    },
@@ -159,6 +173,11 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   // Tag
   { action: 'read',              subject: 'Tag',          description: 'View tags',                                         category: 'Tags'          },
   { action: 'create',            subject: 'Tag',          description: 'Create tags',                                       category: 'Tags'          },
+  // Renaming/recolouring and deleting a tag are org-wide edits: a delete detaches the
+  // tag from every record it is on. Deliberately ADMIN-only — no defaultGrants row,
+  // ADMIN reaches them via `manage all`.
+  { action: 'update',            subject: 'Tag',          description: 'Rename or recolour tags org-wide',                   category: 'Tags'          },
+  { action: 'delete',            subject: 'Tag',          description: 'Delete tags org-wide (removes them from all records)', category: 'Tags'        },
   // User
   { action: 'create',            subject: 'User',         description: 'Create login users and staff',                      category: 'Users'         },
   { action: 'read',              subject: 'User',         description: 'View users',                                        category: 'Users'         },
@@ -240,12 +259,24 @@ export const PERMISSION_CATALOG: CatalogEntry[] = [
   // Tasks
   { action: 'read',              subject: 'Task',          description: 'View tasks',                                        category: 'Tasks'         },
   { action: 'create',            subject: 'Task',          description: 'Create tasks',                                      category: 'Tasks'         },
-  { action: 'update',            subject: 'Task',          description: 'Edit tasks (title, status, priority, owner, etc.)', category: 'Tasks'         },
+  { action: 'update',            subject: 'Task',          description: 'Edit tasks (title, status, priority, due date, etc.)', category: 'Tasks'      },
   { action: 'delete',            subject: 'Task',          description: 'Delete tasks',                                      category: 'Tasks'         },
+  // Multi-assignee design §3. Without this a caller may only ever put THEMSELVES on a task.
+  // ADMIN reaches it through `manage all` (defineAbility.ts:90) — no DEFAULT_GRANTS row exists
+  // or is wanted; SALES / DISPATCHER / TECHNICIAN deliberately do not hold it. It is a grant
+  // rather than a role test precisely so a custom role (e.g. a sales manager) can be given it.
+  { action: 'assign',            subject: 'Task',          description: 'Assign tasks to other people',                      category: 'Tasks'         },
   // Notifications
   { action: 'read',              subject: 'Notification',  description: 'View own notifications',                            category: 'Notifications' },
   { action: 'update',            subject: 'Notification',  description: 'Mark notifications read/seen',                      category: 'Notifications' },
   { action: 'delete',            subject: 'Notification',  description: 'Dismiss notifications',                             category: 'Notifications' },
+  // Calendar Entries (Slice 01, spec §4) - user-facing "Events". Plumbing only: no table, no
+  // API and no UI reads/writes a CalendarEntry yet (Slice 02+). ADMIN gets these four via the
+  // manage-all bypass, same as every other subject - no ADMIN row anywhere in this catalog.
+  { action: 'read',              subject: 'CalendarEntry', description: 'View events',                                        category: 'Calendar'      },
+  { action: 'create',            subject: 'CalendarEntry', description: 'Create events',                                      category: 'Calendar'      },
+  { action: 'update',            subject: 'CalendarEntry', description: 'Edit events',                                        category: 'Calendar'      },
+  { action: 'delete',            subject: 'CalendarEntry', description: 'Delete events',                                      category: 'Calendar'      },
 ];
 
 export function isCatalogEntry(action: string, subject: string): boolean {

@@ -16,12 +16,30 @@ const weekStart = asWallClock(new Date(2026, 5, 10));
 const TZ = 'America/New_York';
 
 const twoCrewJob: SchedulableEvent = {
-  id: 'job-1',
+  boardId: 'job-1',
+  parentId: 'job-1',
   type: 'job',
   number: 'J00043',
   title: 'Rooftop Unit Swap',
   customer: 'Acme',
   crew: ['m-alice', 'm-bob'],
+  ownerId: null,
+  start: asWallClock(new Date(2026, 5, 10, 9, 0)),
+  end: asWallClock(new Date(2026, 5, 10, 11, 0)),
+  raw: {},
+};
+
+// Slice 06 (calendar-entries spec §3, ADR 0002) — an entry naming Alice as a USER participant,
+// with an empty crew: it must place in Alice's column via `participantUserIds`, not `crew`.
+const entryNamingAlice: SchedulableEvent = {
+  boardId: 'ce-1',
+  parentId: 'entry-1',
+  type: 'calendar-entry',
+  number: '',
+  title: 'Team Lunch',
+  customer: '',
+  crew: [],
+  participantUserIds: ['m-alice'],
   ownerId: null,
   start: asWallClock(new Date(2026, 5, 10, 9, 0)),
   end: asWallClock(new Date(2026, 5, 10, 11, 0)),
@@ -81,8 +99,28 @@ describe('MemberWeekBoard — TG7 interactive member×day cells', () => {
   });
 
   it("a conflicted 2-crew event shows the double-booked treatment in BOTH members' lanes (red-outline parity)", () => {
-    renderBoard([twoCrewJob], vi.fn(), new Set([twoCrewJob.id]));
+    renderBoard([twoCrewJob], vi.fn(), new Set([twoCrewJob.boardId]));
     expect(screen.getAllByText(/double-booked/i)).toHaveLength(2);
+  });
+});
+
+describe('MemberWeekBoard — slice 06 participant column placement (ADR 0002)', () => {
+  it("an entry naming Alice as a participant renders in Alice's lane, not Bob's, on the correct day", () => {
+    renderBoard([entryNamingAlice]);
+    const aliceCell = screen.getByTestId('week-cell-m-alice-2026-06-10');
+    expect(within(aliceCell).getByText('Team Lunch')).toBeInTheDocument();
+    const bobCell = screen.getByTestId('week-cell-m-bob-2026-06-10');
+    expect(within(bobCell).queryByText('Team Lunch')).not.toBeInTheDocument();
+  });
+
+  it('the participant card shows no red fill and no red outline (ADR 0002 — no crew, no conflict)', () => {
+    renderBoard([entryNamingAlice], vi.fn(), new Set([entryNamingAlice.boardId]));
+    const card = screen.getByText('Team Lunch').closest('[data-board-id="ce-1"]');
+    expect(card).not.toBeNull();
+    expect(card!.className).not.toMatch(/bg-danger/);
+    expect(card!.className).not.toMatch(/border-danger/);
+    expect(screen.queryByText('needs crew')).not.toBeInTheDocument();
+    expect(screen.queryByText(/double-booked/i)).not.toBeInTheDocument();
   });
 });
 

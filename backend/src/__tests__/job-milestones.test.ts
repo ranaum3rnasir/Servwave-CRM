@@ -4,11 +4,22 @@ import { milestoneClears, clearsCompletion, type Milestone } from '../lib/job-mi
 const ALL: Milestone[] = ['scheduled', 'on_site', 'started', 'completed'];
 
 describe('milestoneClears', () => {
+  // S8 (RATIFIED, A5): en_route_at/on_site_at DROPPED from `jobs` entirely - only
+  // started_at/completed_at are left to clear at the job level. The VISIT's own
+  // en_route_at/on_site_at (a separate column on a separate table) were never this function's
+  // job and are untouched either way.
   it('clears every later job timestamp when moving back to Scheduled', () => {
     expect(milestoneClears('scheduled')).toEqual({
-      en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+      started_at: null, completed_at: null,
       cancelled_at: null, cancelled_reason: null,
     });
+  });
+
+  it('never names en_route_at or on_site_at — those columns are gone from `jobs` (S8)', () => {
+    for (const m of ALL) {
+      expect(milestoneClears(m)).not.toHaveProperty('en_route_at');
+      expect(milestoneClears(m)).not.toHaveProperty('on_site_at');
+    }
   });
 
   it('clears start and completion when moving back to On Site', () => {

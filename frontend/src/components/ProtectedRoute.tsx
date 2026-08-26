@@ -1,6 +1,6 @@
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth.store';
-import NotAuthorizedPage from '@/pages/NotAuthorizedPage';
+import NotAuthorizedPage from '@/components/NotAuthorizedPage';
 
 interface ProtectedRouteProps {
   allowedRoles?: Array<'ADMIN' | 'SALES' | 'DISPATCHER' | 'TECHNICIAN'>;

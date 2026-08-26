@@ -161,6 +161,20 @@ function mockMultiTransaction(jobFixture: unknown, attachedCount?: number) {
       },
       jobAssignee: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+      // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+      // transaction, so the tx fake has to answer the visit + org delegates.
+      visit: {
+        create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+        update: vi.fn().mockResolvedValue({}),
+        findMany: vi.fn().mockResolvedValue([]),
+        aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+      },
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue([]),
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
     }),
   );
 }
@@ -185,6 +199,20 @@ function mockSingleTransaction(jobFixture: unknown) {
       },
       jobLineItem: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+      // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+      // transaction, so the tx fake has to answer the visit + org delegates.
+      visit: {
+        create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+        update: vi.fn().mockResolvedValue({}),
+        findMany: vi.fn().mockResolvedValue([]),
+        aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+      },
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue([]),
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
     }),
   );
 }
@@ -539,7 +567,7 @@ describe('POST /api/jobs - multi-estimate money path (SERV10X-61 Task 9)', () =>
 
   // SRVW-87 - the standalone create branch already writes `status: 'SCHEDULED'` when a
   // scheduled_start is supplied; both estimate-conversion branches did not, so converting a WON
-  // estimate straight onto the calendar produced a scheduled-but-UNASSIGNED job - the same
+  // estimate straight onto the calendar produced a scheduled-but-UNSCHEDULED job - the same
   // badge-vs-lifecycle-bar disagreement the card is about, from a second producer.
   it('single-estimate conversion with a scheduled_start creates the job as SCHEDULED', async () => {
     mockAuthAs('admin');
@@ -577,7 +605,7 @@ describe('POST /api/jobs - multi-estimate money path (SERV10X-61 Task 9)', () =>
     expect(capturedJobCreateArgs!.data.status).toBe('SCHEDULED');
   });
 
-  it('an estimate conversion with no scheduled_start still defaults to UNASSIGNED', async () => {
+  it('an estimate conversion with no scheduled_start still defaults to UNSCHEDULED', async () => {
     mockAuthAs('admin');
     mockPrisma.estimate.findUnique.mockResolvedValue({ ...ESTIMATE_A, lead: SHARED_LEAD });
     mockSingleTransaction(JOB_FIXTURE);
@@ -588,7 +616,7 @@ describe('POST /api/jobs - multi-estimate money path (SERV10X-61 Task 9)', () =>
       .send({ estimate_ids: [ESTIMATE_A.id] });
 
     expect(res.status).toBe(201);
-    // No status key at all, so Prisma's @default(UNASSIGNED) still applies.
+    // No status key at all, so Prisma's @default(UNSCHEDULED) still applies.
     expect('status' in capturedJobCreateArgs!.data).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ import { Heading } from '@/components/ui/heading';
 import { useAppAbility } from '@/contexts/AbilityContext';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
 import { useHasFeature } from '@/lib/entitlements';
-import { reportCatalog, reportGroupOrder, mainReports, findReport, isReportVisible, type ReportGroup, type ReportVisibilityCtx } from '@/pages/reports/report-catalog';
+import { reportCatalog, reportGroupOrder, mainReports, findReport, isReportVisible, type ReportGroup, type ReportVisibilityCtx } from '@/lib/reports/report-catalog';
 import { ReportCard } from '@/pages/reports/ReportCard';
 
 // "Main" landing tab first, then one tab per category, then "Custom reports".

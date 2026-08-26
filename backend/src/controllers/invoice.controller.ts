@@ -37,10 +37,12 @@ import {
 import { jobLineToInvoiceLineCreate } from '../lib/invoice-lines-from-job';
 import { recomputeInvoiceTotals } from '../lib/invoice-totals';
 import { emit } from '../services/notifications/notificationService';
+import { transitionLeadStatus } from '../services/lead-stage.service';
 import { dispatchAutomationEvent } from '../services/automations/dispatch';
 import { logAudit } from '../lib/audit';
 import { isInvoiceEditable, isSentInvoice } from '../lib/invoice-editable';
 import { getOrgTimezone } from '../lib/timezone';
+import { computeRenumber, applyRenumber, isInvoiceRenumberLocked, type RenumberComputation } from '../lib/record-renumber';
 // Inventory P1 (§4.4/§5.3) — invoice delete/void auto-return SYNCED lines through the shared
 // inv-stock return loop (applyStockMovement stays the only StockBalance write path).
 import { returnSyncedLines } from './inv-stock.controller';
@@ -50,6 +52,7 @@ import { collectAnchoredLoUnwind, applyAnchoredLoUnwind } from '../lib/logisticO
 // SRVW-140 - stripInvoiceCost (moved in from invoice-lines.controller.ts) needs these two.
 import { stripDocumentCost } from '../lib/scopes';
 import { resolveTaxRateForState } from '../lib/tax/resolveTaxRate';
+import { isOnJobCrew } from '../lib/job-crew';
 
 function param(req: Request, name: string): string {
   return req.params[name] as string;
@@ -137,6 +140,15 @@ export const editInvoiceSchema = z.object({
   overhead_mode: z.enum(['PERCENTAGE', 'FIXED']).nullable().optional(),
   overhead_value: z.number().min(0).nullable().optional(),
 });
+
+// Editable record ids (Workiz dual-run, SERV10X record-renumber) - shared by both the preview and
+// the rename endpoint below. Deliberately thin: the charset/length/numeric-cap rules live in
+// validateNumberFormat inside record-renumber.ts (called by computeRenumber), not here - this
+// schema only guarantees `number` is present and a string. Mirrors estimateNumberSchema in
+// estimate.controller.ts.
+export const invoiceNumberSchema = z.object({
+  number: z.string(),
+}).strict();
 
 export const recordPaymentSchema = z.object({
   amount: z.number().positive(),
@@ -379,7 +391,7 @@ export const invoiceDetailSelect = {
       id: true,
       job_number: true,
       status: true,
-      assignees: { select: { user_id: true } },
+      visits: { select: { assignees: { select: { user_id: true } } } },
       customer: {
         select: {
           id: true,
@@ -559,7 +571,7 @@ export async function create(req: Request, res: Response) {
       where: { id: job_id, ...tenantWhere(req) },
       include: {
         customer: { select: { id: true, payment_type: true, tax_exempt: true } },
-        assignees: { select: { user_id: true } },
+        visits: { select: { assignees: { select: { user_id: true } } } },
         // job-owns-tax-discount (E4): tax_rate/discount_amount come straight off the JOB now
         // (plain scalar columns, included automatically) - the estimate is no longer a tax or
         // discount source either, only an id for the deposit-credit union below.
@@ -605,7 +617,7 @@ export async function create(req: Request, res: Response) {
     // grant could not override. Mirrors canAccessRow's "scope {} ⇒ no restriction" fast-path.
     const invoiceScope = await scopeWhereForReq(req, 'Invoice');
     const unconditionalCreator = Object.keys(invoiceScope).length === 0;
-    if (!unconditionalCreator && !job.assignees.some((a) => a.user_id === req.user!.id)) {
+    if (!unconditionalCreator && !isOnJobCrew(job, req.user!.id)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
@@ -1131,7 +1143,7 @@ export async function update(req: Request, res: Response) {
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: param(req, 'id'), ...tenantWhere(req) },
-      select: { id: true, status: true, due_date: true, sent_at: true, job: { select: { assignees: { select: { user_id: true } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
+      select: { id: true, status: true, due_date: true, sent_at: true, job: { select: { visits: { select: { assignees: { select: { user_id: true } } } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
     });
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -1209,7 +1221,7 @@ export async function remove(req: Request, res: Response) {
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: param(req, 'id'), ...tenantWhere(req) },
-      select: { id: true, status: true, invoice_number: true, job_id: true, kind: true, total_amount: true, job: { select: { assignees: { select: { user_id: true } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
+      select: { id: true, status: true, invoice_number: true, job_id: true, kind: true, total_amount: true, job: { select: { visits: { select: { assignees: { select: { user_id: true } } } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
     });
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -1274,6 +1286,189 @@ export async function remove(req: Request, res: Response) {
   }
 }
 
+// ─── Editable record ids (Workiz dual-run, SERV10X record-renumber) ──────
+
+/**
+ * Thrown INSIDE the rename transaction when a fresh, lock-protected `computeRenumber` finds
+ * conflicts, so the controller can respond 409 with the structured computation instead of
+ * guessing at the shape of `applyRenumber`'s own (plain-message) conflict error. Carrying the
+ * computation on the error also means `applyRenumber` - which re-derives and would throw for the
+ * identical reason - is never even called on the conflict path, so nothing is written. Mirrors
+ * estimate.controller.ts's identical class for the same reason.
+ */
+class RenumberConflictError extends Error {
+  constructor(public readonly computation: RenumberComputation) {
+    super(`Cannot rename invoice ${computation.parentId}: number "${computation.newNumber}" has conflicts`);
+  }
+}
+
+/** True for the `Invalid record number: ...` Error validateNumberFormat/computeRenumber throw. */
+function isInvalidNumberError(err: unknown): err is Error {
+  return err instanceof Error && err.message.startsWith('Invalid record number');
+}
+
+/** Fields isInvoiceRenumberLocked (decision #8) reads - a DIFFERENT, stricter check than
+ * isInvoiceEditable: any invoice that has been sent, or has real money collected on it, can no
+ * longer have its number edited, even though it may still be editable in every other respect.
+ *
+ * Payment ROWS, not the money columns: voiding an invoice zeroes amount_due, and the residual
+ * arithmetic then reads that as "the whole total was collected" and locks a voided, never-sent,
+ * never-paid invoice. Voided payments are selected too - the predicate, not the query, decides
+ * which of them count. */
+const RENUMBER_LOCK_SELECT = {
+  id: true,
+  sent_at: true,
+  payments: { select: { voided_at: true } },
+} as const;
+
+const INVOICE_RENUMBER_LOCKED_MESSAGE =
+  'This invoice has been sent or has a payment on it and can no longer have its number edited';
+
+/**
+ * POST /:id/number/preview - read-only, no lock, no writes. Mirrors computeRenumber's own
+ * contract (advisory only): drives the (later-PR) confirmation dialog before the real rename.
+ */
+export async function previewNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.invoice.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: RENUMBER_LOCK_SELECT,
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    // #106 - per-instance ownership (the route guard canDo('renumber') is subject-level only).
+    // Same canAccessRow gate update()/remove()/voidInvoice() already use.
+    if (!(await canAccessRow(req, 'Invoice', prisma.invoice, existing.id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    if (isInvoiceRenumberLocked(existing)) {
+      res.status(400).json({ error: INVOICE_RENUMBER_LOCKED_MESSAGE });
+      return;
+    }
+
+    const computation = await computeRenumber(prisma, 'invoice', id, orgId, req.body.number);
+    res.json(computation);
+  } catch (err) {
+    if (isInvalidNumberError(err)) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error('Preview invoice number error:', err);
+    res.status(500).json({ error: 'Failed to preview invoice number change' });
+  }
+}
+
+/**
+ * PATCH /:id/number - the real rename. Cheap existence/ownership/precondition check OUTSIDE the
+ * transaction first (mirrors update()/remove()'s permission → 404 → ownership → business-
+ * precondition ordering, so a request that's going to 404/403/400 anyway never opens a
+ * transaction). The transaction then locks the parent row `FOR NO KEY UPDATE` - the SAME lock
+ * strength allocateAnchoredNumber already takes on the invoices table when invoice is the
+ * LogisticOrder anchor (numbering.ts), so the two code paths serialize against each other instead
+ * of deadlocking or racing - before computing/applying.
+ */
+export async function renameNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.invoice.findUnique({
+      where: { id, ...tenantWhere(req) },
+      select: RENUMBER_LOCK_SELECT,
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    if (!(await canAccessRow(req, 'Invoice', prisma.invoice, existing.id))) {
+      res.status(403).json({ error: 'Insufficient permissions' });
+      return;
+    }
+
+    if (isInvoiceRenumberLocked(existing)) {
+      res.status(400).json({ error: INVOICE_RENUMBER_LOCKED_MESSAGE });
+      return;
+    }
+
+    let computation: RenumberComputation;
+    try {
+      computation = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT id FROM invoices WHERE id = ${id}::uuid AND organization_id = ${orgId}::uuid FOR NO KEY UPDATE`;
+
+        // Compute fresh, under the lock, BEFORE calling applyRenumber - so a conflict can be
+        // reported with the full structured computation. applyRenumber re-derives this exact
+        // same computation internally and would throw for the identical reason, so skip it
+        // entirely on the conflict path rather than calling it twice.
+        const preview = await computeRenumber(tx, 'invoice', id, orgId, req.body.number);
+        if (preview.hasConflicts) {
+          throw new RenumberConflictError(preview);
+        }
+
+        return applyRenumber(tx, 'invoice', id, orgId, req.body.number);
+      });
+    } catch (err) {
+      if (err instanceof RenumberConflictError) {
+        res.status(409).json({ error: err.message, computation: err.computation });
+        return;
+      }
+      if (isInvalidNumberError(err)) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    // Timeline + audit AFTER the transaction commits - never inside it (a rolled-back attempt
+    // must leave no trace of either).
+    await prisma.timelineEvent.create({
+      data: {
+        organization_id: orgId,
+        entity_type: 'INVOICE',
+        entity_id: id,
+        event_type: 'INVOICE_RENUMBERED',
+        description: `Invoice number changed from ${computation.oldNumber} to ${computation.newNumber}`
+          + ` (${computation.derived.length + computation.labelRefreshes.length} related record(s) updated)`,
+        metadata: {
+          old_number: computation.oldNumber,
+          new_number: computation.newNumber,
+          derived_count: computation.derived.length + computation.labelRefreshes.length,
+        },
+        created_by: req.user!.id,
+      },
+    });
+
+    void logAudit({
+      req,
+      action: 'invoice.renumbered',
+      resourceType: 'Invoice',
+      resourceId: id,
+      metadata: { old_number: computation.oldNumber, new_number: computation.newNumber },
+    });
+
+    // Built from the computation, not a re-SELECT - everything the (later-PR) frontend
+    // confirmation dialog needs, in one round trip.
+    res.json({
+      invoice: { id, invoice_number: computation.newNumber },
+      old_number: computation.oldNumber,
+      new_number: computation.newNumber,
+      derived: computation.derived,
+      label_refreshes: computation.labelRefreshes,
+    });
+  } catch (err) {
+    logger.error('Rename invoice number error:', err);
+    res.status(500).json({ error: 'Failed to change invoice number' });
+  }
+}
+
 // Extracted from send() so bulkSend() (list-level bulk send, Invoices list page) can share the
 // EXACT same guard/PREP/EMAIL/COMMIT sequence without duplicating it. Returns a result instead of
 // writing to `res` directly - send() and bulkSend() each translate that result into their own
@@ -1325,6 +1520,10 @@ async function sendInvoiceInternal(
       customerId: cust?.id,
       jobId: invoice.job?.id,
       jobLabel: invoice.job?.job_number,
+      // The reply anchor: this invoice's send, its reminder and the customer's
+      // reply are one conversation - see lib/reply-token.ts.
+      entityType: 'invoice',
+      entityId: invoice.id,
     },
   });
 
@@ -1468,6 +1667,10 @@ async function resendInvoiceInternal(
       customerId: cust?.id,
       jobId: invoice.job?.id,
       jobLabel: invoice.job?.job_number,
+      // The reply anchor: this invoice's send, its reminder and the customer's
+      // reply are one conversation - see lib/reply-token.ts.
+      entityType: 'invoice',
+      entityId: invoice.id,
     },
   });
 
@@ -1630,7 +1833,7 @@ export async function voidInvoice(req: Request, res: Response) {
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: param(req, 'id'), ...tenantWhere(req) },
-      select: { id: true, status: true, invoice_number: true, kind: true, total_amount: true, job_id: true, organization_id: true, job: { select: { assignees: { select: { user_id: true } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true } } } } } } },
+      select: { id: true, status: true, invoice_number: true, kind: true, total_amount: true, job_id: true, organization_id: true, job: { select: { visits: { select: { assignees: { select: { user_id: true } } } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true } } } } } } },
     });
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
@@ -1819,7 +2022,7 @@ export async function getNotes(req: Request, res: Response) {
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: param(req, 'id'), ...tenantWhere(req) },
-      select: { id: true, job: { select: { assignees: { select: { user_id: true } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
+      select: { id: true, job: { select: { visits: { select: { assignees: { select: { user_id: true } } } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
     });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!(await canAccessRow(req, 'Invoice', prisma.invoice, param(req, 'id')))) {
@@ -1854,13 +2057,13 @@ export async function recordPayment(req: Request, res: Response) {
         amount_due: true,
         total_amount: true,
         // For a kind=DEPOSIT invoice, paying it also approves the estimate + wins the lead.
-        estimate: { select: { id: true, lead_id: true, status: true, estimate_number: true, lead: { select: { commission_owner_id: true } } } },
+        estimate: { select: { id: true, lead_id: true, status: true, estimate_number: true, lead: { select: { commission_owner_id: true, status: true } } } },
         customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
         job: {
           select: {
             id: true,
             job_number: true,
-            assignees: { select: { user_id: true } },
+            visits: { select: { assignees: { select: { user_id: true } } } },
             customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
             estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } }, commission_owner_id: true } } } },
           },
@@ -1962,10 +2165,18 @@ export async function recordPayment(req: Request, res: Response) {
           where: { id: est.id, ...tenantWhere(req) },
           data: { status: 'WON', approved_at: new Date() },
         });
+        // Spec #1751 D6 — the one status writer. It carries the tenant scope itself (it takes
+        // orgId and puts it in the WHERE clause), so the `...tenantWhere(req)` spread this
+        // replaces is preserved rather than dropped.
         if (est.lead_id) {
-          await tx.lead.updateMany({
-            where: { id: est.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] }, ...tenantWhere(req) },
-            data: { status: 'WON' },
+          await transitionLeadStatus(tx, {
+            leadId: est.lead_id,
+            orgId: req.user!.organization_id,
+            to: 'WON',
+            from: est.lead!.status,
+            actorId: req.user?.id ?? null,
+            description: 'Lead won — deposit invoice paid in full',
+            metadata: { estimate_id: est.id, estimate_number: est.estimate_number, invoice_id: invoice.id, via: 'deposit_invoice_paid' },
           });
         }
         await tx.timelineEvent.create({
@@ -2028,6 +2239,8 @@ export async function recordPayment(req: Request, res: Response) {
           customerId: c?.id,
           jobId: invoice.job?.id,
           jobLabel: invoice.job?.job_number,
+          entityType: 'invoice',
+          entityId: invoice.id,
         },
       }).catch(err => logger.error('Failed to send payment received email:', err));
     }
@@ -2363,7 +2576,7 @@ export async function addNote(req: Request, res: Response) {
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id: param(req, 'id'), ...tenantWhere(req) },
-      select: { id: true, job: { select: { assignees: { select: { user_id: true } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
+      select: { id: true, job: { select: { visits: { select: { assignees: { select: { user_id: true } } } }, estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } } } } },
     });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 

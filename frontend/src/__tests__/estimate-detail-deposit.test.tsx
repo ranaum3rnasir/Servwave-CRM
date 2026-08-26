@@ -303,3 +303,23 @@ describe('EstimateWorkspacePage — Waive Deposit gates on ability, not role (#2
     expect(screen.queryByRole('button', { name: /waive deposit/i })).toBeNull();
   });
 });
+
+// Editable record IDs (2026-08-19 plan) - RecordNumberEditor wired into the "Estimate Info"
+// card's Number row, gated on ability.can('renumber', 'Estimate').
+describe('EstimateWorkspacePage - record number editor gating', () => {
+  it('shows the edit affordance for a user with the renumber grant', async () => {
+    setupMocks(FIXTURE_A);
+    renderWithProviders(<EstimateWorkspacePage />, { ability: adminAbility });
+
+    expect(await screen.findByRole('button', { name: /edit id/i })).toBeInTheDocument();
+  });
+
+  it('hides the edit affordance for a user without the renumber grant', async () => {
+    setupMocks(FIXTURE_A);
+    const ability = buildAbility([{ action: 'read', subject: 'Estimate' }]);
+    renderWithProviders(<EstimateWorkspacePage />, { ability });
+
+    await screen.findAllByText('E00185');
+    expect(screen.queryByRole('button', { name: /edit id/i })).toBeNull();
+  });
+});

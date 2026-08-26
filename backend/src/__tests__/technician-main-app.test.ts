@@ -13,9 +13,10 @@ function techAbility() {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ownJob = subject('Job', { assignees: [{ user_id: TECH_ID }] }) as any;
+// S8 (D6): OWN_JOB reaches crew through the job's trips.
+const ownJob = subject('Job', { visits: [{ assignees: [{ user_id: TECH_ID }] }] }) as any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const otherJob = subject('Job', { assignees: [{ user_id: 'someone-else' }] }) as any;
+const otherJob = subject('Job', { visits: [{ assignees: [{ user_id: 'someone-else' }] }] }) as any;
 
 describe('TECHNICIAN in the main app — new Job verbs', () => {
   it('can update, start and arrive at the type level (route-guard check)', () => {
@@ -71,16 +72,19 @@ describe('TECHNICIAN row scope — the assignment conjunct', () => {
   // These two assertions document the Prisma-vs-Mongo matcher hazard that Task 8 works
   // around on the client. On the SERVER the matcher is @casl/prisma, which evaluates
   // `some` correctly, so instance checks DO work here.
+  // `complete` left this list with multi-visit S4 (D15): it is no longer a technician default at
+  // all, so there is no own-scoped grant left to assert the conjunct on. The three that remain are
+  // still per-user toggles carrying OWN_JOB.
   it('permits the verbs on an assigned job', () => {
     const ability = techAbility();
-    for (const verb of ['update', 'start', 'arrive', 'complete'] as const) {
+    for (const verb of ['update', 'start', 'arrive'] as const) {
       expect(ability.can(verb, ownJob)).toBe(true);
     }
   });
 
   it('refuses the verbs on another technician’s job', () => {
     const ability = techAbility();
-    for (const verb of ['update', 'start', 'arrive', 'complete'] as const) {
+    for (const verb of ['update', 'start', 'arrive'] as const) {
       expect(ability.can(verb, otherJob)).toBe(false);
     }
   });

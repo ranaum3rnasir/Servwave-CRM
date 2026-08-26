@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { cn } from "@/ui-kit/lib/utils";
+import { Heading, type HeadingLevel } from "@/ui-kit/components/ui/heading";
 
 /**
  * Compound card. Header lays out on a grid so CardAction can sit top-right
@@ -43,9 +44,31 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+export interface CardTitleProps extends React.ComponentProps<"h3"> {
+  /**
+   * Where the title sits in the document outline. 3 by default: a card sits
+   * under the page `<h1>` that `layout/pageHeader` renders, and usually under
+   * a section heading between the two. Pass a level when the page's outline
+   * says otherwise.
+   */
+  level?: HeadingLevel;
+}
+
+/**
+ * A real heading, not a styled div.
+ *
+ * It rendered a `<div>` until now, which put every card title in the app
+ * outside the document outline - recorded by Dashboard as the one
+ * accessibility difference between the v2 widget shell and the legacy one, and
+ * structurally true of every module with a card header. The typography is
+ * unchanged, so nothing moves visually; `scale="inherit"` is what keeps
+ * Heading's own ramp out of the way.
+ */
+function CardTitle({ className, level = 3, ...props }: CardTitleProps) {
   return (
-    <div
+    <Heading
+      level={level}
+      scale="inherit"
       data-slot="card-title"
       className={cn("text-[15px] font-bold leading-tight tracking-tight", className)}
       {...props}

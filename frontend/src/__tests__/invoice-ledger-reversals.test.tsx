@@ -10,7 +10,7 @@ import {
   buildLedgerEvents,
   deriveInvoiceMoney,
   type LedgerEvent,
-} from '@/pages/InvoiceDetailPage';
+} from '@/lib/invoices/invoiceMoney';
 
 // Minimal InvoiceDetail-shaped fixture - buildLedgerEvents only reads payments[], refunds[],
 // credits[], status/refunded_at/total_refunded and job.estimate.

@@ -31,17 +31,18 @@ const SALES_ID = TEST_USERS.sales.id;
 
 // ─── Anchor fixtures ─────────────────────────────────────────────────────────
 
-const MY_JOB = { id: 'ab000000-0000-0000-0000-00000000000a', assignees: [{ user_id: TECH_ID }] };
-const OTHER_JOB = { id: 'ab000000-0000-0000-0000-00000000000b', assignees: [{ user_id: 'someone-else' }] };
+// S8 (D6): OWN_JOB reaches crew through the job's trips, so these rows carry it there.
+const MY_JOB = { id: 'ab000000-0000-0000-0000-00000000000a', visits: [{ assignees: [{ user_id: TECH_ID }] }] };
+const OTHER_JOB = { id: 'ab000000-0000-0000-0000-00000000000b', visits: [{ assignees: [{ user_id: 'someone-else' }] }] };
 const MY_LEAD = {
   id: 'ac000000-0000-0000-0000-00000000000a',
   lead_assignees: [{ user_id: SALES_ID }],
-  walkthroughs: [{ performers: [{ user_id: TECH_ID }] }],
+  visits: [{ performers: [{ user_id: TECH_ID }] }],
 };
 const OTHER_LEAD = {
   id: 'ac000000-0000-0000-0000-00000000000b',
   lead_assignees: [{ user_id: 'someone-else' }],
-  walkthroughs: [],
+  visits: [],
 };
 
 /** A comm row of any channel, in the anchor shape all four now share. */

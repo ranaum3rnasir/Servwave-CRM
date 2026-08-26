@@ -17,7 +17,15 @@ vi.mock('@/lib/communication/ctmSoftphone', () => ({
 vi.mock('@/lib/communication/officeSoftphone', () => ({
   ensureOfficeSoftphone: vi.fn(),
   isOfficeSoftphoneReady: vi.fn(),
-  subscribeOfficeSoftphoneReady: vi.fn(),
+  // Returns a real unsubscribe fn, like the new fault mock below: the hook's
+  // cleanup CALLS whatever this returns, so a bare vi.fn() only survives because
+  // every setup() here re-arms it. Self-sufficient is one keystroke cheaper than
+  // that dependency.
+  subscribeOfficeSoftphoneReady: vi.fn(() => () => {}),
+  // Slice 3's fault channel. Healthy by default so every pre-existing case in
+  // this file keeps exercising exactly the state it was written for.
+  getOfficeSoftphoneFault: vi.fn(() => null),
+  subscribeOfficeSoftphoneFault: vi.fn(() => () => {}),
 }));
 vi.mock('@/lib/entitlements', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/entitlements')>()),

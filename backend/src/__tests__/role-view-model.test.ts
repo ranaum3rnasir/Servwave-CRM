@@ -8,10 +8,10 @@ import {
 } from '../lib/permissions/roleViewModel';
 
 describe('roleViewModel', () => {
-  it('exposes 18 CRUD modules (SRVW-139) and 4 scope entities', () => {
+  it('exposes 19 CRUD modules (SRVW-139 + Calendar Entries slice 01) and 4 scope entities', () => {
     expect(MODULES.map((m) => m.subject)).toEqual([
       'Customer', 'Lead', 'Estimate', 'Job', 'Invoice', 'Inventory', 'PurchaseOrder', 'Vendor', 'ServicePlan', 'LogisticOrder',
-      'Communication', 'Task', 'PriceBook', 'Attachment', 'User', 'Department', 'Location', 'Automation',
+      'Communication', 'Task', 'PriceBook', 'Attachment', 'User', 'Department', 'Location', 'Automation', 'CalendarEntry',
     ]);
     expect(SCOPE_ENTITIES.map((e) => e.subject)).toEqual(['Lead', 'Job', 'Estimate', 'Invoice']);
   });
@@ -61,6 +61,31 @@ describe('roleViewModel', () => {
     expect(vm.sensitive.viewReports).toBe(false);
   });
 
+  // Editable record IDs (2026-08-19 plan, decision #7) - the third sensitive bundle. Mirrors
+  // seeFinancials/managePayments: ALL 5 renumber grants (Customer/Lead/Estimate/Job/Invoice) must
+  // be present for the bundle to read as on.
+  it('editRecordIds reads true only when ALL 5 renumber grants are present', () => {
+    const full = assembleRoleViewModel('DISPATCHER', [
+      { action: 'renumber', subject: 'Customer', conditions: null },
+      { action: 'renumber', subject: 'Lead', conditions: null },
+      { action: 'renumber', subject: 'Estimate', conditions: null },
+      { action: 'renumber', subject: 'Job', conditions: null },
+      { action: 'renumber', subject: 'Invoice', conditions: null },
+    ]);
+    expect(full.sensitive.editRecordIds).toBe(true);
+  });
+
+  it('editRecordIds reads false when even one subject is missing', () => {
+    const partial = assembleRoleViewModel('DISPATCHER', [
+      { action: 'renumber', subject: 'Customer', conditions: null },
+      { action: 'renumber', subject: 'Lead', conditions: null },
+      { action: 'renumber', subject: 'Estimate', conditions: null },
+      { action: 'renumber', subject: 'Job', conditions: null },
+      // Invoice missing
+    ]);
+    expect(partial.sensitive.editRecordIds).toBe(false);
+  });
+
   it('round-trips matrix + sensitive + scope to grants', () => {
     const vm = {
       role: 'SALES',
@@ -68,8 +93,8 @@ describe('roleViewModel', () => {
         Customer: { read: true, create: false, update: false, delete: false },
         Lead: { read: true, create: false, update: false, delete: false },
       },
-      sensitive: { seeFinancials: true, managePayments: false, viewReports: false },
-      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: true, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: { Lead: 'Team' as const },
       general: { description: '' },
     };
@@ -93,8 +118,8 @@ describe('roleViewModel', () => {
     const vm = {
       role: 'DISPATCHER',
       matrix: { Invoice: { read: true, create: false, update: false, delete: false } },
-      sensitive: { seeFinancials: true, managePayments: false, viewReports: true },
-      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: true, managePayments: false, viewReports: true, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: { Invoice: 'Owned' as const },
       general: { description: '' },
     };
@@ -105,8 +130,41 @@ describe('roleViewModel', () => {
     // last in putRolePermissions' in-order upsert and silently widen the role's data scope.
     const invoiceReads = grants.filter((g) => g.action === 'read' && g.subject === 'Invoice');
     expect(invoiceReads).toEqual([
-      { action: 'read', subject: 'Invoice', conditions: { job: { assignees: { some: { user_id: '{{userId}}' } } } } },
+      { action: 'read', subject: 'Invoice', conditions: { job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } } },
     ]);
+  });
+
+  it('editRecordIds true emits exactly the 5 renumber grants, unconditional', () => {
+    const vm = {
+      role: 'DISPATCHER',
+      matrix: {},
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: true },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
+      scope: {},
+      general: { description: '' },
+    };
+    const grants = viewModelToGrants(vm);
+    const renumberGrants = grants.filter((g) => g.action === 'renumber');
+    expect(renumberGrants).toEqual([
+      { action: 'renumber', subject: 'Customer', conditions: null },
+      { action: 'renumber', subject: 'Lead', conditions: null },
+      { action: 'renumber', subject: 'Estimate', conditions: null },
+      { action: 'renumber', subject: 'Job', conditions: null },
+      { action: 'renumber', subject: 'Invoice', conditions: null },
+    ]);
+  });
+
+  it('editRecordIds false emits none of the renumber grants', () => {
+    const vm = {
+      role: 'DISPATCHER',
+      matrix: {},
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
+      scope: {},
+      general: { description: '' },
+    };
+    const grants = viewModelToGrants(vm);
+    expect(grants.filter((g) => g.action === 'renumber')).toEqual([]);
   });
 
   it('persists the owner condition onto read + update + delete when scope=Owned (#106a)', () => {
@@ -118,8 +176,8 @@ describe('roleViewModel', () => {
       matrix: {
         Lead: { read: true, create: true, update: true, delete: true },
       },
-      sensitive: { seeFinancials: false, managePayments: false, viewReports: false },
-      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: { Lead: 'Owned' as const },
       general: { description: '' },
     };
@@ -134,13 +192,17 @@ describe('roleViewModel', () => {
   });
 });
 
-// SRVW-139 - five toggle bundles for actions the CRUD matrix can't host: Dashboard/Notification
+// SRVW-139 - toggle bundles for actions the CRUD matrix can't host: Dashboard/Notification
 // have no create action (a matrix row would be permanently unusable), and reopen/cancel Job are
 // single lifecycle verbs, not a CRUD cell. Same on/off mechanism as the SENSITIVE bundles.
+// Multi-visit close-out (Q9) added the five milestone-verb toggles below the original five.
 describe('roleViewModel - SRVW-139 toggle bundles', () => {
-  it('exposes exactly the 5 named toggles', () => {
+  it('exposes exactly the 10 named toggles', () => {
     expect(Object.keys(TOGGLES).sort()).toEqual(
-      ['accountSettings', 'cancelJobs', 'dashboard', 'modifyDoneJobs', 'notifications'].sort(),
+      [
+        'accountSettings', 'cancelJobs', 'dashboard', 'modifyDoneJobs', 'notifications',
+        'enRouteJobs', 'arriveJobs', 'startJobs', 'completeJobs', 'rescheduleJobs',
+      ].sort(),
     );
   });
 
@@ -179,8 +241,8 @@ describe('roleViewModel - SRVW-139 toggle bundles', () => {
     const vm = {
       role: 'SALES',
       matrix: {},
-      sensitive: { seeFinancials: false, managePayments: false, viewReports: false },
-      toggles: { dashboard: true, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: true, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: {},
       general: { description: '' },
     };
@@ -192,8 +254,8 @@ describe('roleViewModel - SRVW-139 toggle bundles', () => {
     const vm = {
       role: 'DISPATCHER',
       matrix: {},
-      sensitive: { seeFinancials: false, managePayments: false, viewReports: false },
-      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: true, cancelJobs: true },
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: true, cancelJobs: true, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: {},
       general: { description: '' },
     };
@@ -210,8 +272,8 @@ describe('roleViewModel - SRVW-139 toggle bundles', () => {
     const vm = {
       role: 'SALES',
       matrix: {},
-      sensitive: { seeFinancials: false, managePayments: false, viewReports: false },
-      toggles: { dashboard: false, accountSettings: false, notifications: true, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: true, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: {},
       general: { description: '' },
     };
@@ -228,12 +290,81 @@ describe('roleViewModel - SRVW-139 toggle bundles', () => {
     const vm = {
       role: 'SALES',
       matrix: {},
-      sensitive: { seeFinancials: false, managePayments: false, viewReports: false },
-      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false },
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: { dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false, enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false },
       scope: {},
       general: { description: '' },
     };
     const grants = viewModelToGrants(vm);
     expect(grants).toHaveLength(0);
+  });
+});
+
+// Multi-visit close-out (Q9). Before this, `en_route`/`arrive`/`start`/`complete`/`reschedule` on
+// Job had NO cell anywhere in matrix/sensitive/toggles - confirmed by grepping this same file
+// before the change - so the Roles & Permissions page could not show or grant D15's technician
+// `complete Job` capability at all (it only ever existed on the per-user Permissions page).
+describe('roleViewModel - Q9 Job milestone-verb toggles', () => {
+  it('exposes all 5 milestone-verb toggles, one per verb', () => {
+    expect(TOGGLES.enRouteJobs).toEqual([{ action: 'en_route', subject: 'Job', conditions: expect.any(Object) }]);
+    expect(TOGGLES.arriveJobs).toEqual([{ action: 'arrive', subject: 'Job', conditions: expect.any(Object) }]);
+    expect(TOGGLES.startJobs).toEqual([{ action: 'start', subject: 'Job', conditions: expect.any(Object) }]);
+    expect(TOGGLES.completeJobs).toEqual([{ action: 'complete', subject: 'Job', conditions: expect.any(Object) }]);
+    expect(TOGGLES.rescheduleJobs).toEqual([{ action: 'reschedule', subject: 'Job', conditions: expect.any(Object) }]);
+  });
+
+  it('assembles completeJobs as on when the org holds an OWN_JOB-scoped complete:Job grant (the real TECHNICIAN shape)', () => {
+    const vm = assembleRoleViewModel('TECHNICIAN', [
+      { action: 'complete', subject: 'Job', conditions: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } },
+    ]);
+    expect(vm.toggles.completeJobs).toBe(true);
+  });
+
+  it('assembles completeJobs as on when the org holds complete:Job UNCONDITIONALLY (the real DISPATCHER shape)', () => {
+    const vm = assembleRoleViewModel('DISPATCHER', [{ action: 'complete', subject: 'Job', conditions: null }]);
+    expect(vm.toggles.completeJobs).toBe(true);
+  });
+
+  it('an org where the grant is absent renders the toggle as off, not omitted', () => {
+    const vm = assembleRoleViewModel('TECHNICIAN', []);
+    expect(vm.toggles.completeJobs).toBe(false);
+    expect(vm.toggles.enRouteJobs).toBe(false);
+    expect(vm.toggles.arriveJobs).toBe(false);
+    expect(vm.toggles.startJobs).toBe(false);
+    expect(vm.toggles.rescheduleJobs).toBe(false);
+  });
+
+  it('round-trips each milestone toggle to its Job grant, seeded OWN_JOB for a brand-new row', () => {
+    const vm = {
+      role: 'TECHNICIAN',
+      matrix: {},
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: {
+        dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false,
+        enRouteJobs: true, arriveJobs: true, startJobs: true, completeJobs: true, rescheduleJobs: true,
+      },
+      scope: {},
+      general: { description: '' },
+    };
+    const grants = viewModelToGrants(vm);
+    const ownJob = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } };
+    for (const action of ['en_route', 'arrive', 'start', 'complete', 'reschedule']) {
+      expect(grants).toContainEqual({ action, subject: 'Job', conditions: ownJob });
+    }
+  });
+
+  it('a milestone toggle left off emits none of its grant', () => {
+    const vm = {
+      role: 'TECHNICIAN',
+      matrix: {},
+      sensitive: { seeFinancials: false, managePayments: false, viewReports: false, editRecordIds: false },
+      toggles: {
+        dashboard: false, accountSettings: false, notifications: false, modifyDoneJobs: false, cancelJobs: false,
+        enRouteJobs: false, arriveJobs: false, startJobs: false, completeJobs: false, rescheduleJobs: false,
+      },
+      scope: {},
+      general: { description: '' },
+    };
+    expect(viewModelToGrants(vm)).toHaveLength(0);
   });
 });

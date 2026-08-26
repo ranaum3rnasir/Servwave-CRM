@@ -3,13 +3,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/axios';
 import { createJobInvoice } from '@/lib/api/jobs';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
+import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -178,218 +172,223 @@ export function RecordPaymentDialog({
     }
   };
 
+  // The deposit guard replaces the whole form, so it replaces the footer too:
+  // there is nothing to record from this state, only a way out of it.
+  const depositBlocked = invoiceId === null && hasUnspentDeposit;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>Record Payment</DialogTitle>
-          <DialogDescription>
-            {isNoInvoice
-              ? 'Record a payment for this job.'
-              : `Record a payment for invoice ${invoiceNumber}.`}
-          </DialogDescription>
-        </DialogHeader>
+    <Modal
+      open={open}
+      onClose={() => onOpenChange(false)}
+      title="Record Payment"
+      subtitle={
+        isNoInvoice
+          ? 'Record a payment for this job.'
+          : `Record a payment for invoice ${invoiceNumber}.`
+      }
+      width="xs"
+      footer={
+        depositBlocked ? (
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+        ) : (
+          <>
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              aria-describedby={isOverpay && !overpayAcknowledged ? 'record-payment-overpay-warning' : undefined}
+              disabled={
+                !amount || amount <= 0 || !paidAt || (isOverpay && !overpayAcknowledged) || isPending
+              }
+            >
+              {isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                'Record Payment'
+              )}
+            </Button>
+          </>
+        )
+      }
+    >
+      {depositBlocked && (
+        <div className="space-y-3 rounded-card border border-warning/30 bg-warning/10 p-4">
+          <p className="text-sm text-text-primary">
+            This customer has a paid deposit on this job. Creating an invoice here would spend
+            that deposit against it, which can make a real collection look like an overpayment.
+          </p>
+          <p className="text-sm text-text-secondary">
+            Create the invoice from the Items tab first, then record the payment against it.
+          </p>
+        </div>
+      )}
 
-        {invoiceId === null && hasUnspentDeposit && (
-          <div className="space-y-3 rounded-card border border-warning/30 bg-warning/10 p-4">
-            <p className="text-sm text-text-primary">
-              This customer has a paid deposit on this job. Creating an invoice here would spend
-              that deposit against it, which can make a real collection look like an overpayment.
-            </p>
+      {!depositBlocked && (
+        <div className="space-y-4">
+          {invoiceId === null && !hasUnspentDeposit && (
             <p className="text-sm text-text-secondary">
-              Create the invoice from the Items tab first, then record the payment against it.
+              This job has no invoice yet. Recording a payment will create an invoice for this
+              amount, send it to the customer, and mark it paid.
             </p>
-            <div className="flex justify-end">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Close
-              </Button>
-            </div>
-          </div>
-        )}
+          )}
 
-        {!(invoiceId === null && hasUnspentDeposit) && (
-          <div className="space-y-4">
-            {invoiceId === null && !hasUnspentDeposit && (
-              <p className="text-sm text-text-secondary">
-                This job has no invoice yet. Recording a payment will create an invoice for this
-                amount, send it to the customer, and mark it paid.
+          <div>
+            <FormField label="Amount *" htmlFor="record-payment-amount">
+            <Input
+              type="number"
+              value={amount}
+              onChange={(e) => {
+                // An empty field yields NaN from parseFloat; coerce to 0 so the controlled input
+                // never receives NaN (which renders as a blank the user cannot tell from unset).
+                const v = parseFloat(e.target.value);
+                setAmount(Number.isNaN(v) ? 0 : v);
+                // Re-arm the acknowledgement whenever the amount changes.
+                setOverpayAcknowledged(false);
+              }}
+              min={0.01}
+              // No max: the API accepts an overpayment and flags it (OVERPAYMENT_FLAGGED).
+              // Capping here refuses a true statement about money that changed hands - the
+              // acknowledgement gate below makes it deliberate instead of silent.
+              step={0.01}
+            />
+            </FormField>
+            {/* No balance to state on the composite path - the invoice does not exist yet. */}
+            {!isNoInvoice && (
+              <p className="mt-1 text-xs text-text-secondary">
+                Balance due: {formatCurrency(amountDue)}
               </p>
             )}
 
-            <div>
-              <FormField label="Amount *" htmlFor="record-payment-amount">
-              <Input
-                type="number"
-                value={amount}
-                onChange={(e) => {
-                  // An empty field yields NaN from parseFloat; coerce to 0 so the controlled input
-                  // never receives NaN (which renders as a blank the user cannot tell from unset).
-                  const v = parseFloat(e.target.value);
-                  setAmount(Number.isNaN(v) ? 0 : v);
-                  // Re-arm the acknowledgement whenever the amount changes.
-                  setOverpayAcknowledged(false);
-                }}
-                min={0.01}
-                // No max: the API accepts an overpayment and flags it (OVERPAYMENT_FLAGGED).
-                // Capping here refuses a true statement about money that changed hands - the
-                // acknowledgement gate below makes it deliberate instead of silent.
-                step={0.01}
-              />
-              </FormField>
-              {/* No balance to state on the composite path - the invoice does not exist yet. */}
-              {!isNoInvoice && (
-                <p className="mt-1 text-xs text-text-secondary">
-                  Balance due: {formatCurrency(amountDue)}
-                </p>
-              )}
-
-              {isOverpay && (
-                <div
-                  id="record-payment-overpay-warning"
-                  role="alert"
-                  className="mt-2 rounded-card border border-warning-border bg-warning-surface p-2.5"
-                >
-                  <div className="flex items-start gap-2 text-xs text-warning-text">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    <span>
-                      This is more than the {formatCurrency(amountDue)} balance due. The extra{' '}
-                      {formatCurrency(overpayment)} will be recorded as an overpayment you may need
-                      to refund.
-                    </span>
-                  </div>
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-warning-text">
-                    <Checkbox
-                      checked={overpayAcknowledged}
-                      onCheckedChange={(v) => setOverpayAcknowledged(v === true)}
-                    />
-                    Record anyway - overpayment of {formatCurrency(overpayment)}
-                  </label>
-                </div>
-              )}
-            </div>
-
-            {/* D1 — shown for every payment method, unconditionally. No per-method conditional
-                rendering, no hiding it for bank transfer. Nothing preselected, no "No tip" chip -
-                same treatment as PublicInvoicePage. */}
-            <div className="space-y-2">
-              <Label size="sm">Add a tip? (optional)</Label>
-              <ToggleGroup
-                type="single"
-                variant="pill"
-                value={tipSelection}
-                onValueChange={(v) => setTipSelection(v)}
-                aria-label="Tip percentage"
+            {isOverpay && (
+              <div
+                id="record-payment-overpay-warning"
+                role="alert"
+                className="mt-2 rounded-card border border-warning-border bg-warning-surface p-2.5"
               >
-                {TIP_PRESET_PCT.map((pct) => {
-                  const dollars = Math.round(amount * (pct / 100) * 100) / 100;
-                  return (
-                    <ToggleGroupItem
-                      key={pct}
-                      value={String(pct)}
-                      variant="pill"
-                      className="inline-flex min-h-11 flex-col items-center justify-center gap-0 px-4 py-1.5"
-                    >
-                      <span>{pct}%</span>
-                      <span className="text-xs opacity-80">{formatCurrency(dollars)}</span>
-                    </ToggleGroupItem>
-                  );
-                })}
-                <ToggleGroupItem value="other" variant="pill" className="min-h-11 px-4">
-                  Other
-                </ToggleGroupItem>
-              </ToggleGroup>
-              {tipSelection === 'other' && (
-                <div className="max-w-[10rem] space-y-1">
-                  <Label htmlFor="record-payment-tip-other" size="sm">Tip amount</Label>
-                  <Input
-                    id="record-payment-tip-other"
-                    type="number"
-                    min={0}
-                    step={0.01}
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    value={tipOtherValue}
-                    onChange={(e) => setTipOtherValue(e.target.value)}
+                <div className="flex items-start gap-2 text-xs text-warning-text">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>
+                    This is more than the {formatCurrency(amountDue)} balance due. The extra{' '}
+                    {formatCurrency(overpayment)} will be recorded as an overpayment you may need
+                    to refund.
+                  </span>
+                </div>
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-warning-text">
+                  <Checkbox
+                    checked={overpayAcknowledged}
+                    onCheckedChange={(v) => setOverpayAcknowledged(v === true)}
                   />
-                </div>
-              )}
-            </div>
-
-            {/* Not a FormField: SelectField's props are a closed list (value /
-                onValueChange / options / placeholder / disabled / className /
-                aria-label) with no id or aria-* passthrough, so the id FormField
-                generates would be dropped on the floor and the label would point
-                at nothing. Wiring it needs a change to SelectField, not to this
-                call site - same documented exception as
-                RecordEstimatePaymentDialog's Payment method field. */}
-            <div>
-              <Label>Payment method *</Label>
-              <SelectField
-                aria-label="Payment method"
-                value={method}
-                onValueChange={setMethod}
-                className="w-full h-9"
-                // R5b (2026-07-22) — derived from the shared list (was a hand-maintained duplicate)
-                // so D3's +4 values reach this dialog too, not just the ones someone remembered.
-                options={PAYMENT_METHOD_ORDER.map((value) => ({ value, label: PAYMENT_METHOD_LABELS[value] }))}
-              />
-            </div>
-
-            {/* Not converted to FormField: DateTimePicker has no id prop of its own
-                to receive fieldProps. */}
-            <div>
-              <Label>Date *</Label>
-              <DateTimePicker value={paidAt} onChange={setPaidAt} className="mt-1" />
-            </div>
-
-            <FormField label="Reference number">
-              <Input
-                type="text"
-                value={referenceNumber}
-                onChange={(e) => setReferenceNumber(e.target.value)}
-                placeholder="Check #, transaction ID, etc."
-              />
-            </FormField>
-
-            <FormField label="Notes">
-              <Textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={2}
-                placeholder="Optional notes..."
-              />
-            </FormField>
-
-            {error && (
-              <p className="text-sm text-danger">
-                {extractApiError(error, 'Failed to record payment')}
-              </p>
+                  Record anyway - overpayment of {formatCurrency(overpayment)}
+                </label>
+              </div>
             )}
-
-            <div className="flex justify-end gap-3">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleSubmit}
-                aria-describedby={isOverpay && !overpayAcknowledged ? 'record-payment-overpay-warning' : undefined}
-                disabled={
-                  !amount || amount <= 0 || !paidAt || (isOverpay && !overpayAcknowledged) || isPending
-                }
-              >
-                {isPending ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Processing...
-                  </>
-                ) : (
-                  'Record Payment'
-                )}
-              </Button>
-            </div>
           </div>
-        )}
-      </DialogContent>
-    </Dialog>
+
+          {/* D1 — shown for every payment method, unconditionally. No per-method conditional
+              rendering, no hiding it for bank transfer. Nothing preselected, no "No tip" chip -
+              same treatment as PublicInvoicePage. */}
+          <div className="space-y-2">
+            <Label size="sm">Add a tip? (optional)</Label>
+            <ToggleGroup
+              type="single"
+              variant="pill"
+              value={tipSelection}
+              onValueChange={(v) => setTipSelection(v)}
+              aria-label="Tip percentage"
+            >
+              {TIP_PRESET_PCT.map((pct) => {
+                const dollars = Math.round(amount * (pct / 100) * 100) / 100;
+                return (
+                  <ToggleGroupItem
+                    key={pct}
+                    value={String(pct)}
+                    variant="pill"
+                    className="inline-flex min-h-11 flex-col items-center justify-center gap-0 px-4 py-1.5"
+                  >
+                    <span>{pct}%</span>
+                    <span className="text-xs opacity-80">{formatCurrency(dollars)}</span>
+                  </ToggleGroupItem>
+                );
+              })}
+              <ToggleGroupItem value="other" variant="pill" className="min-h-11 px-4">
+                Other
+              </ToggleGroupItem>
+            </ToggleGroup>
+            {tipSelection === 'other' && (
+              <div className="max-w-[10rem] space-y-1">
+                <Label htmlFor="record-payment-tip-other" size="sm">Tip amount</Label>
+                <Input
+                  id="record-payment-tip-other"
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={tipOtherValue}
+                  onChange={(e) => setTipOtherValue(e.target.value)}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Not a FormField: SelectField's props are a closed list (value /
+              onValueChange / options / placeholder / disabled / className /
+              aria-label) with no id or aria-* passthrough, so the id FormField
+              generates would be dropped on the floor and the label would point
+              at nothing. Wiring it needs a change to SelectField, not to this
+              call site - same documented exception as
+              RecordEstimatePaymentDialog's Payment method field. */}
+          <div>
+            <Label>Payment method *</Label>
+            <SelectField
+              aria-label="Payment method"
+              value={method}
+              onValueChange={setMethod}
+              className="w-full h-9"
+              // R5b (2026-07-22) — derived from the shared list (was a hand-maintained duplicate)
+              // so D3's +4 values reach this dialog too, not just the ones someone remembered.
+              options={PAYMENT_METHOD_ORDER.map((value) => ({ value, label: PAYMENT_METHOD_LABELS[value] }))}
+            />
+          </div>
+
+          {/* Not converted to FormField: DateTimePicker has no id prop of its own
+              to receive fieldProps. */}
+          <div>
+            <Label>Date *</Label>
+            <DateTimePicker value={paidAt} onChange={setPaidAt} className="mt-1" />
+          </div>
+
+          <FormField label="Reference number">
+            <Input
+              type="text"
+              value={referenceNumber}
+              onChange={(e) => setReferenceNumber(e.target.value)}
+              placeholder="Check #, transaction ID, etc."
+            />
+          </FormField>
+
+          <FormField label="Notes">
+            <Textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="Optional notes..."
+            />
+          </FormField>
+
+          {error && (
+            <p className="text-sm text-danger">
+              {extractApiError(error, 'Failed to record payment')}
+            </p>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }

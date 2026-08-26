@@ -129,7 +129,16 @@ export interface DomainEnumSource {
 export const DOMAIN_ENUM_SOURCE: Partial<Record<StatusDomain, DomainEnumSource>> = {
   lead: { enums: ['LeadStatus'] },
   estimate: { enums: ['EstimateStatus'] },
-  job: { enums: ['JobStatus'] },
+  // Multi-visit S4 (D17): EN_ROUTE and ON_SITE retired from JobStatus and live on VisitStatus.
+  // They stay KEYS of the `job` registry block on purpose - that block is what the per-visit
+  // chips render through, and a visit really can be en route or on site - so they are declared
+  // here rather than deleted. `clientOnly` is read by the guard as "a registry key genuinely
+  // absent from THIS domain's enum", which is exactly true of both.
+  //
+  // Sourcing the domain from ['JobStatus', 'VisitStatus'] instead was REJECTED: the same map
+  // drives the copilot's advertised job-filter vocabulary, and a union would tell the model to
+  // filter JOBS by the six VisitStatus values, half of which the jobs facet 400s on.
+  job: { enums: ['JobStatus'], clientOnly: ['EN_ROUTE', 'ON_SITE'] },
   // OVERDUE is computed client-side from due_date + status; it is not a column value.
   invoice: { enums: ['InvoiceStatus'], clientOnly: ['OVERDUE'] },
   task: { enums: ['TaskStatus'] },

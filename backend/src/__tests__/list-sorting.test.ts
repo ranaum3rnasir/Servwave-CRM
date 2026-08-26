@@ -89,10 +89,14 @@ describe('previously-broken columns now sort on the right data', () => {
     ]);
   });
 
-  it('GET /api/jobs?sortBy=scheduled&sortDir=asc orders by scheduled_start', async () => {
+  // A1 (multi-visit S8 §4, RATIFIED): NOT scheduled_start - that column is the forward-looking
+  // mirror and reads null for any job whose last live visit has already been worked, which
+  // staging measured at 7,492 jobs including nearly the whole of the biggest org. first_visit_
+  // start is the backward-looking span start (A2+); see sortFields.ts's own comment.
+  it('GET /api/jobs?sortBy=scheduled&sortDir=asc orders by first_visit_start', async () => {
     const res = await request(app).get('/api/jobs?sortBy=scheduled&sortDir=asc').set(authHeader('admin'));
     expect(res.status).toBe(200);
-    expect(mockPrisma.job.findMany.mock.calls[0][0].orderBy).toEqual([{ scheduled_start: 'asc' }]);
+    expect(mockPrisma.job.findMany.mock.calls[0][0].orderBy).toEqual([{ first_visit_start: 'asc' }]);
   });
 
   it('GET /api/estimates?sortBy=total&sortDir=desc orders by total_amount', async () => {

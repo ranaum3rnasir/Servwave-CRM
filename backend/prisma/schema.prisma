@@ -38,7 +38,7 @@ model User {
   headed_departments          Department[]          @relation("DepartmentHead")
   uploaded_attachments        Attachment[]          @relation("AttachmentUploadedBy")
   created_estimates           Estimate[]            @relation("EstimateCreatedBy")
-  cancelled_walkthroughs      Walkthrough[]         @relation("WalkthroughCancelledBy")
+  cancelled_visits            Visit[]               @relation("VisitCancelledBy")
   created_notes               Note[]                @relation("NoteCreatedBy")
   collected_payments          Payment[]             @relation("PaymentCollectedBy")
   timeline_events             TimelineEvent[]       @relation("TimelineCreatedBy")
@@ -77,21 +77,23 @@ model User {
   logistic_orders_processed LogisticOrder[] @relation("LogisticOrderProcessedBy")
 
   // --- Scheduler redesign: assignment M2M back-relations (additive) ---
-  job_crew_memberships         JobAssignee[]              @relation("JobAssigneeUser")
-  lead_crew_memberships        LeadAssignee[]             @relation("LeadAssigneeUser")
-  walkthrough_crew_memberships LeadWalkthroughPerformer[] @relation("LeadWalkthroughPerformerUser")
-  commission_owned_leads       Lead[]                     @relation("LeadCommissionOwner")
-  created_jobs                 Job[]                      @relation("JobCreator")
-  dispatched_jobs              Job[]                      @relation("JobDispatcher")
-  jobs_as_salesperson          Job[]                      @relation("JobSalesperson")
+  lead_crew_memberships  LeadAssignee[]  @relation("LeadAssigneeUser")
+  visit_assignments      VisitAssignee[] @relation("VisitAssigneeUser")
+  commission_owned_leads Lead[]          @relation("LeadCommissionOwner")
+  created_jobs           Job[]           @relation("JobCreator")
+  dispatched_jobs        Job[]           @relation("JobDispatcher")
+  jobs_as_salesperson    Job[]           @relation("JobSalesperson")
   // --- Creator tracking back-relations (audit only; nothing reads them for authorization) ---
-  created_leads                Lead[]                     @relation("LeadCreator")
-  created_invoices             Invoice[]                  @relation("InvoiceCreator")
-  created_customers            Customer[]                 @relation("CustomerCreator")
-  created_payments             Payment[]                  @relation("PaymentCreator")
-  created_attachments          Attachment[]               @relation("AttachmentCreator")
+  created_leads          Lead[]          @relation("LeadCreator")
+  // Back-relation for the hand-set contact correction (spec #1751 D5) — audit only, like the
+  // creator relations around it. See Lead.contacted_set_by for why the relation is declared.
+  leads_contact_set      Lead[]          @relation("LeadContactSetter")
+  created_invoices       Invoice[]       @relation("InvoiceCreator")
+  created_customers      Customer[]      @relation("CustomerCreator")
+  created_payments       Payment[]       @relation("PaymentCreator")
+  created_attachments    Attachment[]    @relation("AttachmentCreator")
   // --- Service Plans ---
-  service_plans_sold           ServicePlan[]              @relation("ServicePlanSoldBy")
+  service_plans_sold     ServicePlan[]   @relation("ServicePlanSoldBy")
 
   // --- Timeclock module ---
   time_entries         TimeEntry[]         @relation("TimeEntryUser")
@@ -104,7 +106,6 @@ model User {
   permission_overrides UserPermissionOverride[] @relation("UserPermissionOverrideUser")
 
   // --- Tasks module ---
-  tasks_owned   Task[] @relation("TaskOwner")
   tasks_created Task[] @relation("TaskCreatedBy")
 
   // --- Automation Center ---
@@ -161,22 +162,6 @@ model Department {
   @@map("departments")
 }
 
-model JobAssignee {
-  id              String       @id @default(uuid()) @db.Uuid
-  job_id          String       @db.Uuid
-  user_id         String       @db.Uuid
-  organization_id String       @db.Uuid
-  created_at      DateTime     @default(now())
-  job             Job          @relation(fields: [job_id], references: [id], onDelete: Cascade)
-  user            User         @relation("JobAssigneeUser", fields: [user_id], references: [id], onDelete: Cascade)
-  organization    Organization @relation(fields: [organization_id], references: [id])
-
-  @@unique([job_id, user_id])
-  @@index([user_id])
-  @@index([organization_id])
-  @@map("job_assignees")
-}
-
 model LeadAssignee {
   id              String       @id @default(uuid()) @db.Uuid
   lead_id         String       @db.Uuid
@@ -193,33 +178,32 @@ model LeadAssignee {
   @@map("lead_assignees")
 }
 
-// Walkthrough-as-entity redesign. PR-A2 (2026-07-28) added walkthrough_id ADDITIVELY (nullable,
-// backfilled) alongside the existing lead_id. PR-B2 (this migration: 20260729090000) completes the
-// LOAD-BEARING half of the repoint: walkthrough_id is now required and the unique constraint keys
-// on (walkthrough_id, user_id) instead of (lead_id, user_id), so the same performer can be assigned
-// to a SECOND visit on the same lead (D1 - a lead has many walkthroughs; the old constraint
-// rejected exactly that). lead_id itself is KEPT (not dropped) - every controller still reading
-// Lead's `walkthrough_performers` back-relation (job/dashboard/estimate/attachment controllers)
-// keeps working unmodified; PR-B2's own lead-controller code, which now cares which WALKTHROUGH a
-// performer belongs to, reads/writes via walkthrough_id instead. lead_id, its FK, and those
-// remaining call sites are removed together in PR-D2.
-model LeadWalkthroughPerformer {
+// Multi-visit spec slice S1 (D6): the walkthrough-performer join, renamed to visit_assignees and
+// repointed at `visits`. This is the table the JOB-assignee join folds into in slice S3, at which
+// point "the job's crew" becomes a derived union over its visits.
+//
+// `lead_id` is GONE as of slice S8, alongside the job_assignees drop. S3 kept it because seven
+// select sites read Lead's `visit_assignees` back-relation directly - two of them (in
+// attachment.controller) being ACCESS decisions rather than rendering - and dropping it before
+// they moved would have been a permission hole. All seven now traverse `lead.visits[].assignees`,
+// and the projected wire key `visit_assignees` on the lead payload is unchanged.
+//
+// The unique constraint keys on (visit_id, user_id), NOT (lead_id, user_id): the same person can
+// be on a SECOND visit for the same lead, which is precisely the shape multi-visit needs.
+model VisitAssignee {
   id              String       @id @default(uuid()) @db.Uuid
-  lead_id         String       @db.Uuid
   user_id         String       @db.Uuid
   organization_id String       @db.Uuid
-  walkthrough_id  String       @db.Uuid
+  visit_id        String       @db.Uuid
   created_at      DateTime     @default(now())
-  lead            Lead         @relation(fields: [lead_id], references: [id], onDelete: Cascade)
-  user            User         @relation("LeadWalkthroughPerformerUser", fields: [user_id], references: [id], onDelete: Cascade)
+  user            User         @relation("VisitAssigneeUser", fields: [user_id], references: [id], onDelete: Cascade)
   organization    Organization @relation(fields: [organization_id], references: [id])
-  walkthrough     Walkthrough  @relation(fields: [walkthrough_id], references: [id], onDelete: Cascade)
+  visit           Visit        @relation(fields: [visit_id], references: [id], onDelete: Cascade)
 
-  @@unique([walkthrough_id, user_id])
+  @@unique([visit_id, user_id])
   @@index([user_id])
   @@index([organization_id])
-  @@index([lead_id])
-  @@map("lead_walkthrough_performers")
+  @@map("visit_assignees")
 }
 
 model Location {
@@ -251,6 +235,9 @@ model Location {
 model Customer {
   id                  String   @id @default(uuid()) @db.Uuid
   customer_number     String   @db.VarChar(20)
+  // Editable record IDs (Workiz dual-run) — see numbering.ts self-heal + rename transaction.
+  number_is_custom    Boolean  @default(false)
+  original_number     String?
   estimate_seq        Int      @default(0) // SERV10X-61 - per-customer estimate container counter (C00010-1)
   email               String?
   phone               String?
@@ -340,10 +327,10 @@ model Customer {
 }
 
 model CustomerEmail {
-  id          String   @id @default(uuid()) @db.Uuid
-  customer_id String   @db.Uuid
-  email       String   @db.VarChar(255)
-  label       String?  @db.VarChar(50)
+  id              String   @id @default(uuid()) @db.Uuid
+  customer_id     String   @db.Uuid
+  email           String   @db.VarChar(255)
+  label           String?  @db.VarChar(50)
   // Does this secondary address receive the org's AUTOMATED customer mail (Automation
   // Center: walkthrough confirmation/reminder, job scheduled, ...)? The scalar
   // Customer.email always receives and has no equivalent flag. Manual sends (Send
@@ -351,9 +338,9 @@ model CustomerEmail {
   // Defaults true so an address added from now on receives, matching the intent of
   // adding it; the migration backfills every PRE-EXISTING row to false so no live org
   // starts mailing an address nobody opted in. -> services/automations/recipients.ts
-  receives_emails Boolean @default(true)
-  created_at  DateTime @default(now())
-  customer    Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
+  receives_emails Boolean  @default(true)
+  created_at      DateTime @default(now())
+  customer        Customer @relation(fields: [customer_id], references: [id], onDelete: Cascade)
 
   @@index([customer_id])
   @@map("customer_emails")
@@ -400,55 +387,133 @@ model ServiceLocation {
 }
 
 model Lead {
-  id                           String           @id @default(uuid()) @db.Uuid
-  lead_number                  String
-  estimate_seq                 Int              @default(0) // SERV10X-61 - per-lead estimate container counter (L00005-1)
-  customer_id                  String           @db.Uuid
-  status                       LeadStatus       @default(NEW)
-  service_request              String
-  contacted_at                 DateTime?
-  contacted_note               String?
-  notes                        String?
-  lost_at                      DateTime?
-  lost_reason                  String?
-  cancelled_at                 DateTime?
-  cancelled_reason             String?
-  created_at                   DateTime         @default(now())
-  updated_at                   DateTime         @updatedAt
-  job_type                     String?
-  source                       String?
-  scheduled_end                DateTime?
-  scheduled_start              DateTime?
+  id                             String            @id @default(uuid()) @db.Uuid
+  lead_number                    String
+  // Editable record IDs (Workiz dual-run) — see numbering.ts self-heal + rename transaction.
+  number_is_custom               Boolean           @default(false)
+  original_number                String?
+  estimate_seq                   Int               @default(0) // SERV10X-61 - per-lead estimate container counter (L00005-1)
+  customer_id                    String            @db.Uuid
+  status                         LeadStatus        @default(NEW)
+  service_request                String
+  // --- Lead stage clocks (spec #1751) --------------------------------------------------------
+  // `contacted_at` predates them and keeps its name and its meaning: the FIRST human-originated
+  // outbound touch. D5 finally gives it writers - until then the only writer anywhere in the
+  // product was the demo seeder, which is why the dashboard's "needs follow-up" tile equals the
+  // open-lead count on every real org.
+  contacted_at                   DateTime?
+  contacted_note                 String?
+  // Who set contacted_at BY HAND, null when the automatic detection set it. D5 ratifies a human
+  // correction door, and an anonymous correction is not auditable.
+  //
+  // The relation is DECLARED, not merely implied by the column. The migration creates a real
+  // `leads_contacted_set_by_fkey` -> users(id) ON DELETE SET NULL; a bare scalar here would leave
+  // the schema and the catalog disagreeing, and the next `prisma migrate diff` would emit a DROP
+  // CONSTRAINT for a foreign key nobody asked to remove. `prisma migrate status` cannot catch
+  // that — it compares the ledger to the migrations directory, never the schema to the catalog.
+  // Same shape as created_by_id / creator below, onDelete: SetNull included: deleting a user must
+  // not delete the lead, only forget who made the correction. No @@index, deliberately — nothing
+  // queries leads BY this column, and adding one would put the schema and the migration out of
+  // sync in the other direction.
+  contacted_set_by               String?           @db.Uuid
+  contact_setter                 User?             @relation("LeadContactSetter", fields: [contacted_set_by], references: [id], onDelete: SetNull)
+  // D3, the central decision: there are THREE different questions about walkthrough completion,
+  // so there are three different fields. One field cannot answer all three without lying to two.
+  //
+  //   "did this lead ever finish one?"     -> walkthrough_first_completed_at  (MONOTONIC)
+  //   "is the phase open right now?"       -> NOBODY ASKS - see below
+  //   "is anything outstanding as of now?" -> last_visit_completed_at         (RE-ANCHORS)
+  //
+  // The middle question was to be answered by asking a person ("are more visits needed?") each
+  // time a trip finished. The product owner rejected that: at the moment a trip ends the
+  // salesperson usually does not yet know, so the prompt collects a guess and the SLA is then
+  // anchored on the guess. The phase is therefore never declared closed at all, and the estimate
+  // clock counts from last_visit_completed_at, which every completion re-anchors.
+  //
+  // Deliberately NOT named walkthrough_scheduled_at / walkthrough_completed_at: the legacy
+  // projection (services/walkthrough.service.ts) already puts those two WIRE keys on the lead,
+  // derived from the lead's CURRENT visit, and the current-visit rule prefers any live visit
+  // over a finished one. Booking a second visit flips that projection's completion back to null
+  // - correct for a page hero, unusable as the anchor of an SLA. Reusing the names would collide.
+  //
+  // BOOKED, not SCHEDULED, and the distinction is the whole measurement. This is the instant the
+  // booking ACTION happened, not the instant the walkthrough is due to happen. The owner's policy
+  // is "every lead gets a walkthrough BOOKED within a day or two of first contact", so the clock
+  // has to stop when the salesperson booked it - an appointment set for three weeks out was still
+  // booked on time. Naming it `..._scheduled_at` would read as the appointment instant, which is
+  // what the legacy wire key of that name already means.
+  walkthrough_first_booked_at    DateTime?
+  // MONOTONIC. Set once, on the first completion, and never cleared or overwritten - not when a
+  // later visit is booked, not when every visit is cancelled. A deadline that was missed stays
+  // missed; booking a late visit must not erase evidence that the company was late (ratified by
+  // the product owner). This is the funnel's "furthest stage reached" high-water mark.
+  //
+  // NOTHING READS THIS YET, and that is deliberate rather than a leftover. It is the only durable
+  // record of when site work first happened - last_visit_completed_at overwrites that on the
+  // second trip - so the funnel report D10 builds needs it, and it costs one nullable timestamp
+  // to keep the fact rather than reconstruct it later from visit rows that may have been
+  // cancelled since. It is a ledger column by intent. It is NOT the SLA anchor; see below.
+  walkthrough_first_completed_at DateTime?
+  // RE-ANCHORS: MAX(completed_at) over the lead's non-cancelled visits, rewritten on every
+  // completion. Answers "is there anything outstanding right now", which is what alerting needs
+  // and what the monotonic field above deliberately cannot say. Same name and same maintenance
+  // rule as the JOB side's mirror (multi-visit slice S8) - the same idea applied to the other
+  // parent of the same `visits` table.
+  //
+  // THE SLA ANCHOR for "walkthrough done -> estimate sent" (services/automations/anchors.ts,
+  // key `lead.last_visit_completed_at`). Because the automation engine keys an occurrence on the
+  // anchor's own value, moving this column mints a NEW occurrence: a second completed trip
+  // supersedes the alert still pending from the first rather than letting it fire against a
+  // deadline the business has stopped holding anyone to. Only a COMPLETION moves it - a visit
+  // that is booked, moved or cancelled does not - so removing a trip that turned out to be
+  // unnecessary costs nothing, and no clock ever depends on a visit that has not happened yet.
+  last_visit_completed_at        DateTime?
+  // First touch only. A resend, or a second estimate on the same lead, must not move it: the
+  // owner's metric is "how long until the salesperson sent an estimate", asked once.
+  first_estimate_sent_at         DateTime?
+  // The lead-side twin of lost_at / cancelled_at, which already exist. Its absence is why
+  // time-to-close is inferred today from `updated_at`, a value any unrelated edit moves.
+  won_at                         DateTime?
+  notes                          String?
+  lost_at                        DateTime?
+  lost_reason                    String?
+  cancelled_at                   DateTime?
+  cancelled_reason               String?
+  created_at                     DateTime          @default(now())
+  updated_at                     DateTime          @updatedAt
+  job_type                       String?
+  source                         String?
+  scheduled_end                  DateTime?
+  scheduled_start                DateTime?
   // --- Entity-redesign §3: lead anchored to one ServiceLocation. service_address_* below are @deprecated — backfilled into ServiceLocation, then dropped in Phase D ---
-  service_location_id          String?          @db.Uuid
-  service_address_line1        String?
-  service_address_line2        String?
-  service_city                 String?
-  service_state                String?
-  service_zip                  String?
+  service_location_id            String?           @db.Uuid
+  service_address_line1          String?
+  service_address_line2          String?
+  service_city                   String?
+  service_state                  String?
+  service_zip                    String?
   // --- Custom Fields (SRVW-114): { "<definition-uuid>": <scalar> } ---
-  custom_fields                Json              @default("{}")
-  estimates                    Estimate[]
-  call_sessions                CallSession[]    @relation("LeadCallSessions")
-  message_threads              MessageThread[]  @relation("LeadMessageThreads")
-  messages                     Message[]        @relation("LeadMessages")
-  whatsapp_chats               WhatsAppChat[]   @relation("LeadWhatsAppChats")
-  whatsapp_messages            WhatsAppMessage[] @relation("LeadWhatsAppMessages")
-  emails                       Email[]          @relation("LeadEmails")
-  lead_tags                    LeadTag[]
-  customer                     Customer         @relation(fields: [customer_id], references: [id], onDelete: Restrict)
-  service_location             ServiceLocation? @relation(fields: [service_location_id], references: [id])
+  custom_fields                  Json              @default("{}")
+  estimates                      Estimate[]
+  call_sessions                  CallSession[]     @relation("LeadCallSessions")
+  message_threads                MessageThread[]   @relation("LeadMessageThreads")
+  messages                       Message[]         @relation("LeadMessages")
+  whatsapp_chats                 WhatsAppChat[]    @relation("LeadWhatsAppChats")
+  whatsapp_messages              WhatsAppMessage[] @relation("LeadWhatsAppMessages")
+  emails                         Email[]           @relation("LeadEmails")
+  lead_tags                      LeadTag[]
+  customer                       Customer          @relation(fields: [customer_id], references: [id], onDelete: Restrict)
+  service_location               ServiceLocation?  @relation(fields: [service_location_id], references: [id])
 
   // --- Scheduler redesign: assignment M2M spine (legacy assigned_to/walkthrough_assigned_to dropped in TG7) ---
-  commission_owner_id                String?                    @db.Uuid
-  commission_owner                   User?                      @relation("LeadCommissionOwner", fields: [commission_owner_id], references: [id])
-  lead_assignees                     LeadAssignee[]
-  walkthrough_performers             LeadWalkthroughPerformer[]
+  commission_owner_id String?         @db.Uuid
+  commission_owner    User?           @relation("LeadCommissionOwner", fields: [commission_owner_id], references: [id])
+  lead_assignees      LeadAssignee[]
   // --- Logistic Orders ---
-  logistic_orders                    LogisticOrder[]            @relation("LogisticOrderLead")
+  logistic_orders     LogisticOrder[] @relation("LogisticOrderLead")
 
-  // --- Walkthrough-as-entity redesign, PR-A2 (2026-07-28): table only, nothing reads it yet ---
-  walkthroughs Walkthrough[]
+  // --- Multi-visit S1: a lead holds MANY live visits (purpose WALKTHROUGH) ---
+  visits Visit[]
 
   // --- Creator tracking (audit only). NOTHING reads these for authorization. ---
   // Immutable, written once at create. Same shape and rationale as Job - see that model. Distinct
@@ -470,40 +535,105 @@ model Lead {
   @@index([service_location_id])
   @@index([commission_owner_id])
   @@index([organization_id])
+  // The date-anchor sweep runs every minute, per org, per registered anchor, and selects on
+  // exactly these pairs. Without them each tick is a full scan of `leads` per automation.
+  @@index([organization_id, created_at])
+  @@index([organization_id, contacted_at])
+  // last_visit_completed_at, not walkthrough_first_completed_at: the estimate SLA anchors on the
+  // re-anchoring clock, so that is the column candidatesForAnchor sweeps once a minute per org.
+  @@index([organization_id, last_visit_completed_at])
   @@map("leads")
 }
 
-// Walkthrough-as-entity redesign, PR-A2 (spec md_files/specs/leads/2026-07-28-walkthrough-as-entity.md,
-// plan md_files/plans/leads/2026-07-28-walkthrough-as-entity-phase-2.md): a lead has MANY walkthroughs
-// (site visits), each with its own lifecycle - shaped on PlanVisit, the house template for a
-// tenant-scoped child with its own status enum. Nothing reads this table yet in PR-A2; the nine
-// Lead.walkthrough_* columns remain the source of truth until PR-B2 repoints reads/writes here and
-// PR-D2 drops them.
-model Walkthrough {
-  id                     String            @id @default(uuid()) @db.Uuid
-  organization_id        String            @db.Uuid
-  lead_id                String            @db.Uuid
-  status                 WalkthroughStatus @default(REQUESTED)
+// Multi-visit spec (md_files/specs/scheduling/2026-08-17-multi-visit.md), slice S1.
+//
+// A VISIT is one occurrence of people going to a site, for either purpose. It belongs to exactly
+// one parent - a Lead (purpose WALKTHROUGH) or a Job (purpose WORK) - and carries a time, a crew,
+// a status and notes. It never carries money, an address of its own, or a signature: the invoice,
+// the estimate and the deposit stay anchored on the Job (D4). That boundary is what keeps the
+// declined Projects grouping (SRVW-181) declined rather than reopened by accident.
+//
+// This is the renamed and widened `walkthroughs` table. D5: ONE table with nullable job_id and
+// lead_id plus a DB CHECK that exactly one is set - NOT a polymorphic parent_type/parent_id pair,
+// which would give up FK integrity and cascade and make the tenant-scoping joins painful.
+//
+// S1 populates the lead side only; job_id stays unwritten until slice S2. The column and its CHECK
+// land now so the unified table is real from day one rather than a promise - running two parallel
+// visit implementations for weeks is exactly the drift #1551 spent a PR undoing.
+//
+// (The previous comment here claimed nothing read this table. That was stale from PR-A2: five
+// controllers and the visit service read it. Fixed while renaming, per the spec's open items.)
+model Visit {
+  id                     String       @id @default(uuid()) @db.Uuid
+  organization_id        String       @db.Uuid
+  // Exactly one of the two is set - enforced by a DB CHECK (see the S1 migration), which Prisma
+  // cannot express. Both are nullable here so the client type allows either parent.
+  lead_id                String?      @db.Uuid
+  job_id                 String?      @db.Uuid
+  // Derivable from whichever parent is set; stored for query clarity and so a visit can be
+  // filtered by purpose without joining its parent.
+  purpose                VisitPurpose
+  // D13: stable per-parent creation-order number, driving the "Visit 2" label. Mirrors the
+  // existing J00007-1 estimate-sequence idiom. Sort by TIME everywhere, label by CREATION order -
+  // this number appears in customer email, so renumbering when an earlier trip is inserted would
+  // rewrite history the customer has already received.
+  visit_seq              Int          @default(1)
+  status                 VisitStatus  @default(SCHEDULED)
+  // The start of the visit. Named `scheduled_at` because that is the column S1 inherited from the
+  // walkthrough shape; renaming it to `scheduled_start` is a pure cross-tree sweep with no
+  // behaviour change (lead side, projectLegacyWalkthroughFields, frontend/src/lib/visits.ts) and
+  // belongs with S8's tidy.
   scheduled_at           DateTime?
+  // S2: a job's schedule is a WINDOW plus an all-day flag, which the walkthrough shape had no way
+  // to hold - a lead walkthrough never had an end or an all-day concept. Without these two,
+  // Job.is_all_day has nowhere to live and the end has to be re-derived from a duration, so every
+  // all-day job would round-trip to a 60-minute one on the first visit-driven write.
+  scheduled_end          DateTime?
+  is_all_day             Boolean      @default(false)
+  // Kept alongside scheduled_end: the lead-shaped readers and detectPerformerConflicts still
+  // reason in minutes. Every S2 write sets both from the same span.
   duration_minutes       Int?
+  // S4 (D7): the milestone stamps move to the VISIT - a trip is what is en route, on site and
+  // under way, not the job. Job.en_route_at / on_site_at / started_at stay as a mirror of the
+  // earliest non-null across the set. S5 repointed the lifecycle bar off en_route_at and
+  // on_site_at, so those two now have NO reader anywhere; their DROP is S8's. started_at is NOT
+  // symmetric and must survive S8: deriveJobStatusFromVisits opens with
+  // `if (jobStartedAt != null) return 'IN_PROGRESS'` for the urgent workflow, and complete()
+  // backfills it so duration reporting never sees a null start.
+  en_route_at            DateTime?
+  on_site_at             DateTime?
+  started_at             DateTime?
   completed_at           DateTime?
   notes                  String?
   cancelled_at           DateTime?
   cancelled_reason       String?
-  cancelled_by           String?           @db.Uuid
+  cancelled_by           String?      @db.Uuid
   customer_email_sent_at DateTime?
-  created_at             DateTime          @default(now())
-  updated_at             DateTime          @updatedAt
+  created_at             DateTime     @default(now())
+  updated_at             DateTime     @updatedAt
 
-  lead         Lead                       @relation(fields: [lead_id], references: [id], onDelete: Cascade)
-  canceller    User?                      @relation("WalkthroughCancelledBy", fields: [cancelled_by], references: [id], onDelete: SetNull)
-  organization Organization               @relation(fields: [organization_id], references: [id])
-  performers   LeadWalkthroughPerformer[]
+  lead         Lead?           @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+  job          Job?            @relation(fields: [job_id], references: [id], onDelete: Cascade)
+  canceller    User?           @relation("VisitCancelledBy", fields: [cancelled_by], references: [id], onDelete: SetNull)
+  organization Organization    @relation(fields: [organization_id], references: [id])
+  assignees    VisitAssignee[]
 
+  // D13 - the number ships in the customer's email subject, so it has to be unique per
+  // parent. NULLs compare distinct in a Postgres unique index, so each of these
+  // constrains only the rows that actually have that parent - the same split
+  // visits_exactly_one_parent already enforces (section 4.4 of the multi-visit QA run).
+  @@unique([job_id, visit_seq])
+  @@unique([lead_id, visit_seq])
   @@index([lead_id])
+  @@index([job_id])
   @@index([organization_id])
   @@index([organization_id, status])
-  @@map("walkthroughs")
+  // Multi-visit S6: the board's date window is a relation filter on this column now, not on the
+  // `Job.scheduled_start` mirror. Prisma renders it as an uncorrelated `job_id IN (SELECT ...)`
+  // whose only selective predicate is `scheduled_at`, so without this index the planner drives
+  // from `jobs` and nested-loops every candidate row (41x slower / 350x the I/O on staging).
+  @@index([scheduled_at])
+  @@map("visits")
 }
 
 model Estimate {
@@ -526,6 +656,17 @@ model Estimate {
   // pointing at the same job — no need to foreclose that here.
   job_id                 String?                   @db.Uuid
   estimate_number        String
+  // Editable record IDs (Workiz dual-run) — see numbering.ts self-heal + rename transaction.
+  number_is_custom       Boolean                   @default(false)
+  original_number        String?
+  // Which container minted this estimate's number and this estimate's seq WITHIN that
+  // container (SERV10X-61's `estimate_seq` lives on the parent row, not here). Nullable: a
+  // legacy flat `E00001` number or a bare Workiz-imported number has no container. Backfilled
+  // once by scripts/estimate-container-backfill.ts for every existing container-style number
+  // (`<container_number>-<seq>`); set going forward at create time (step 2) and never re-derived
+  // by string-matching again — see "Why the estimate columns are mandatory" in the plan.
+  container_kind         EstimateContainerKind?
+  container_seq          Int?
   status                 EstimateStatus            @default(DRAFT)
   sent_at                DateTime?
   approved_at            DateTime?
@@ -656,23 +797,23 @@ model ScopePreset {
 }
 
 model EstimateLineItem {
-  id                 String            @id @default(uuid()) @db.Uuid
-  estimate_id        String            @db.Uuid
+  id                 String                  @id @default(uuid()) @db.Uuid
+  estimate_id        String                  @db.Uuid
   sequence           Int
   description        String
-  quantity           Decimal           @db.Decimal(10, 2)
-  unit_price         Decimal           @db.Decimal(12, 2)
-  is_taxable         Boolean           @default(true)
-  line_total         Decimal           @db.Decimal(12, 2)
-  price_book_item_id String?           @db.Uuid
-  unit_cost          Decimal?          @db.Decimal(12, 2)
-  markup_percent     Decimal?          @db.Decimal(5, 2)
+  quantity           Decimal                 @db.Decimal(10, 2)
+  unit_price         Decimal                 @db.Decimal(12, 2)
+  is_taxable         Boolean                 @default(true)
+  line_total         Decimal                 @db.Decimal(12, 2)
+  price_book_item_id String?                 @db.Uuid
+  unit_cost          Decimal?                @db.Decimal(12, 2)
+  markup_percent     Decimal?                @db.Decimal(5, 2)
   discount_type      DiscountType?
-  discount_value     Decimal?          @db.Decimal(12, 2)
-  discount_amount    Decimal           @default(0) @db.Decimal(12, 2)
-  item_type          PriceBookItemType @default(SERVICE)
-  estimate           Estimate          @relation(fields: [estimate_id], references: [id], onDelete: Cascade)
-  price_book_item    PriceBookItem?    @relation(fields: [price_book_item_id], references: [id])
+  discount_value     Decimal?                @db.Decimal(12, 2)
+  discount_amount    Decimal                 @default(0) @db.Decimal(12, 2)
+  item_type          PriceBookItemType       @default(SERVICE)
+  estimate           Estimate                @relation(fields: [estimate_id], references: [id], onDelete: Cascade)
+  price_book_item    PriceBookItem?          @relation(fields: [price_book_item_id], references: [id])
   // R5f (2026-07-22) — photos attached to this line item. Line items always get a fresh id on
   // duplicate()/revise() (unlike Estimate.scopes' JSON blocks), so onDelete: Cascade on the FK
   // alone is sufficient here — no compound key needed the way EstimateScopePhoto requires.
@@ -688,16 +829,16 @@ model EstimateLineItem {
 // resolveEstimatePhotoUrls / estimate-photos.controller.ts's per-upload response), never a
 // persisted signed/public URL.
 model EstimateLineItemPhoto {
-  id                     String   @id @default(uuid()) @db.Uuid
-  estimate_line_item_id  String   @db.Uuid
-  storage_path           String   @db.Text
-  mime_type              String
-  caption                String?
-  uploaded_at            DateTime
-  uploaded_by            String
-  size_bytes             Int?
-  created_at             DateTime @default(now())
-  updated_at             DateTime @updatedAt
+  id                    String   @id @default(uuid()) @db.Uuid
+  estimate_line_item_id String   @db.Uuid
+  storage_path          String   @db.Text
+  mime_type             String
+  caption               String?
+  uploaded_at           DateTime
+  uploaded_by           String
+  size_bytes            Int?
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
 
   line_item EstimateLineItem @relation(fields: [estimate_line_item_id], references: [id], onDelete: Cascade)
 
@@ -782,63 +923,106 @@ model CtmEvent {
 }
 
 model Job {
-  id                       String              @id @default(uuid()) @db.Uuid
-  job_number               String
-  estimate_seq             Int                 @default(0) // SERV10X-61 - per-job estimate container counter (J00007-1)
-  customer_id              String              @db.Uuid
-  service_location_id      String              @db.Uuid
-  estimate_id              String?             @unique @db.Uuid
-  status                   JobStatus           @default(UNASSIGNED)
+  id                      String              @id @default(uuid()) @db.Uuid
+  job_number              String
+  // Editable record IDs (Workiz dual-run) — see numbering.ts self-heal + rename transaction.
+  number_is_custom        Boolean             @default(false)
+  original_number         String?
+  estimate_seq            Int                 @default(0) // SERV10X-61 - per-job estimate container counter (J00007-1)
+  customer_id             String              @db.Uuid
+  service_location_id     String              @db.Uuid
+  estimate_id             String?             @unique @db.Uuid
+  status                  JobStatus           @default(UNSCHEDULED)
   // SRVW-112 - the org-defined label UNDER the fixed parent status (Workiz parity). Always
   // parented: the setter rejects a sub-status whose parent differs from this job's status, and
   // every status-writing handler nulls it when the status actually moves (lib/job-sub-status.ts).
-  sub_status_id            String?             @db.Uuid
-  scheduled_start          DateTime?
-  scheduled_end            DateTime?
-  is_all_day               Boolean             @default(false)
-  scope_notes              String?
-  scopes                   Json?
+  sub_status_id           String?             @db.Uuid
+  // --- Multi-visit S8 §2/§3 (D14, A5 RATIFIED): the FORWARD-looking schedule mirror is DROPPED.
+  // scheduled_start / scheduled_end / is_all_day used to live here, maintained by
+  // syncJobFromVisits as a write-through cache of the job's next upcoming live visit. They are
+  // GONE as stored columns (S8's own DROP migration) - the three wire keys survive on READ ONLY,
+  // computed fresh off `visits[]` by lib/job-schedule-projection.ts (backend/src), using the
+  // identical "next upcoming live visit, fallback to earliest non-cancelled visit, zero visits ->
+  // null" rule this column used to encode on write. New code should read `visits[]` directly;
+  // #1696 tracks the eventual visits[]-native migration of the ~10 pre-existing flat-scalar
+  // consumers (job detail hero, jobs list + CSV, dashboard widgets, invoices list, customer
+  // detail, copilot tools) this projection exists to keep working unmodified in the meantime.
+  //
+  // en_route_at / on_site_at (the job-level milestone mirror) are ALSO DROPPED here, with NO
+  // read-time replacement: S5 already repointed every reader of those two names onto the VISIT's
+  // own columns, so by the time S8 runs they are write-only dead weight. jobs.started_at is NOT
+  // symmetric and SURVIVES - deriveJobStatusFromVisits' urgent-workflow branch
+  // (`if (jobStartedAt != null) return 'IN_PROGRESS'`) still reads it, and it is the ACTUAL-start
+  // half of the duration span below.
+  //
+  // --- Multi-visit S8 §4 (D14(i), A2+): the BACKWARD-LOOKING duration span. -------------------
+  // Three columns, stored and maintained by syncJobFromVisits (walkthrough.service.ts) in the
+  // same transaction as every visit write, plus a one-time backfill in the S8 §4 migration.
+  // Together they answer "how long did this job take", as TWO DIFFERENT pairs - do not read
+  // first_visit_start/last_visit_end as actual stamps, and do not read last_visit_completed_at
+  // as anything but the ACTUAL half:
+  //     PLANNED span = first_visit_start        -> last_visit_end
+  //     ACTUAL  span = jobs.started_at (existing, mirrorMilestone('started_at')) -> last_visit_completed_at
+  // All three are computed over NON-CANCELLED visits only (D19: a cancelled trip is kept as
+  // history and must not be read as evidence of planned or actual work) and are NULL when the
+  // job has no qualifying visit. Unlike the now-DROPPED scheduled_start mirror (which nulled out
+  // the moment the last live visit was worked), these never go back to null once a visit has
+  // ever existed - they are a record of what happened, not of what is next.
+  //
+  // first_visit_start - MIN(visits.scheduled_at) over non-cancelled visits.        [PLANNED start]
+  first_visit_start       DateTime?
+  // last_visit_end - MAX(visits.scheduled_end) over non-cancelled visits. This is the PLANNED
+  // end of the last trip's WINDOW - it is set the moment a visit is booked, whether or not that
+  // visit, or any visit, has actually happened yet. It is NOT when work finished; do not confuse
+  // it with last_visit_completed_at below, which is the only one of these three built from an
+  // ACTUAL stamp.                                                                  [PLANNED end]
+  last_visit_end          DateTime?
+  // last_visit_completed_at - MAX(visits.completed_at) over non-cancelled visits. The ACTUAL
+  // stamp of when the last trip was marked done - null until at least one non-cancelled visit on
+  // this job has been completed, and paired with jobs.started_at (not with first_visit_start) to
+  // read the job's real, worked duration.                                          [ACTUAL end]
+  last_visit_completed_at DateTime?
+  scope_notes             String?
+  scopes                  Json?
   // --- Custom Fields (SRVW-114): { "<definition-uuid>": <scalar> } ---
-  custom_fields            Json                @default("{}")
-  job_type                 String?
-  completed_at             DateTime?
-  cancelled_at             DateTime?
-  cancelled_reason         String?
-  started_at               DateTime?
-  en_route_at              DateTime?
-  on_site_at               DateTime?
-  estimated_duration       Int?
-  completion_notes         String?
-  signature_data           String?
-  signature_ip             String?
-  signature_at             DateTime?
-  created_at               DateTime            @default(now())
-  updated_at               DateTime            @updatedAt
+  custom_fields           Json                @default("{}")
+  job_type                String?
+  completed_at            DateTime?
+  cancelled_at            DateTime?
+  cancelled_reason        String?
+  started_at              DateTime?
+  estimated_duration      Int?
+  completion_notes        String?
+  signature_data          String?
+  signature_ip            String?
+  signature_at            DateTime?
+  created_at              DateTime            @default(now())
+  updated_at              DateTime            @updatedAt
   // --- Entity-redesign §5: cached amount-invoiced-vs-estimate tracking ---
-  amount_invoiced          Decimal             @default(0) @db.Decimal(12, 2)
+  amount_invoiced         Decimal             @default(0) @db.Decimal(12, 2)
   // E1/E2 (2026-08-04) - the JOB owns its tax rate and discount; it no longer borrows them from an
   // attached estimate. Same shape Estimate carries, deliberately: Estimate / Job / Invoice must
   // render one identical money breakdown. tax_rate is stamped from the service location's state at
   // create. discount_amount is RESOLVED and stored, never re-derived from discount_value against a
   // changing item set - ServiceTitan documents that drift as their top billing-support driver.
   // -> md_files/plans/jobs/2026-08-04-job-owns-its-tax-and-discount-workiz-parity.md
-  tax_rate                 Decimal             @default(0) @db.Decimal(6, 5)
-  discount_type            DiscountType?
-  discount_value           Decimal?            @db.Decimal(12, 2)
-  discount_amount          Decimal             @default(0) @db.Decimal(12, 2)
+  tax_rate                Decimal             @default(0) @db.Decimal(6, 5)
+  discount_type           DiscountType?
+  discount_value          Decimal?            @db.Decimal(12, 2)
+  discount_amount         Decimal             @default(0) @db.Decimal(12, 2)
   // R3b (2026-07-21) — cost model (D2/D8/D18), same shape as Estimate's. Nullable — null means
   // "use org default" (Organization.labor_rate/overhead_mode/overhead_value). Copied from the
   // source Estimate on conversion (job.controller.ts create()); org-default fallback only when a
   // Job is created from scratch (no estimate_id).
-  labor_hours              Decimal?            @db.Decimal(8, 2)
-  overhead_mode            DepositDefaultType?
-  overhead_value           Decimal?            @db.Decimal(12, 2)
-  invoices                 Invoice[]
-  customer                 Customer            @relation(fields: [customer_id], references: [id], onDelete: Restrict)
+  labor_hours             Decimal?            @db.Decimal(8, 2)
+  overhead_mode           DepositDefaultType?
+  overhead_value          Decimal?            @db.Decimal(12, 2)
+  invoices                Invoice[]
+  customer                Customer            @relation(fields: [customer_id], references: [id], onDelete: Restrict)
   // "JobPrimaryEstimate" — see Estimate.job's comment. Named because R6 adds a second,
   // independent Job<->Estimate relation (Estimate.job_id / linked_estimates below).
-  estimate                 Estimate?           @relation("JobPrimaryEstimate", fields: [estimate_id], references: [id], onDelete: Restrict)
-  service_location         ServiceLocation     @relation(fields: [service_location_id], references: [id])
+  estimate                Estimate?           @relation("JobPrimaryEstimate", fields: [estimate_id], references: [id], onDelete: Restrict)
+  service_location        ServiceLocation     @relation(fields: [service_location_id], references: [id])
 
   // --- Emanuel inventory/comms unified back-relations ---
   purchase_orders       PurchaseOrder[]
@@ -850,7 +1034,8 @@ model Job {
   stock_movements       StockMovement[]       @relation("StockMovementJob")
 
   // --- Scheduler redesign: crew M2M spine (legacy assigned_to dropped in TG7) ---
-  assignees                        JobAssignee[]
+  // --- Multi-visit S1: relation lands now; slice S2 hangs job visits off it ---
+  visits                           Visit[]
   customer_scheduled_email_sent_at DateTime?
   // --- Demo widget: dispatcher attribution (dispatch scoreboard) ---
   dispatcher_id                    String?           @db.Uuid
@@ -899,10 +1084,10 @@ model Job {
   // --- Logistic Orders ---
   logistic_orders                  LogisticOrder[]   @relation("LogisticOrderJob")
   // R6 (2026-07-22) — M4 back-relation: estimates whose Estimate.job_id points at this job.
-  linked_estimates                  Estimate[]        @relation("EstimateJobLink")
+  linked_estimates                 Estimate[]        @relation("EstimateJobLink")
   // SRVW-112 - SetNull, not Restrict: deleting a sub-status from the settings editor must not be
   // blocked by historical jobs that still hold it. The label simply disappears off those jobs.
-  sub_status                        JobSubStatus?     @relation(fields: [sub_status_id], references: [id], onDelete: SetNull)
+  sub_status                       JobSubStatus?     @relation(fields: [sub_status_id], references: [id], onDelete: SetNull)
 
   organization_id String       @db.Uuid
   organization    Organization @relation(fields: [organization_id], references: [id])
@@ -911,7 +1096,12 @@ model Job {
   @@index([customer_id])
   @@index([status])
   @@index([sub_status_id])
-  @@index([scheduled_start])
+  // A1: JOB_SORT_FIELDS.scheduled now orders by this column (sortFields.ts) - the Jobs list's
+  // Scheduled sort runs through it on every request. The old `@@index([scheduled_start])` is
+  // DROPPED with the column itself (S8, RATIFIED) - dropping a column drops its index too, but
+  // the migration names the DROP INDEX explicitly anyway, matching this file's own house style
+  // (see the S8 §4 migration's comment on why a named drop keeps the ledger honest).
+  @@index([first_visit_start])
   @@index([estimate_id])
   @@index([source_plan_id])
   @@index([dispatcher_id])
@@ -922,7 +1112,6 @@ model Job {
 
 /**
  * SRVW-112 - per-org sub-status catalog, one level under the FIXED JobStatus enum.
- *
  * `parent` reuses the JobStatus enum as a USAGE, not a new declaration - enum JobStatus is
  * deliberately not widened (that would change the copilot's advertised status vocabulary, every
  * report bucket and the registry schema guard). Workiz's "Pending" / "Done pending approval" are
@@ -973,6 +1162,9 @@ model LeadStatusOverride {
 model Invoice {
   id                     String        @id @default(uuid()) @db.Uuid
   invoice_number         String
+  // Editable record IDs (Workiz dual-run) — see numbering.ts self-heal + rename transaction.
+  number_is_custom       Boolean       @default(false)
+  original_number        String?
   job_id                 String?       @db.Uuid
   status                 InvoiceStatus @default(DRAFT)
   subtotal               Decimal       @db.Decimal(12, 2)
@@ -1356,34 +1548,34 @@ model DepositCreditApplication {
 }
 
 model Payment {
-  id                       String             @id @default(uuid()) @db.Uuid
-  invoice_id               String             @db.Uuid
-  amount                   Decimal            @db.Decimal(12, 2)
-  method                   PaymentMethod
-  paid_at                  DateTime
-  collected_by             String?            @db.Uuid
-  stripe_payment_intent_id String?
-  stripe_fee_amount             Decimal? @db.Decimal(12, 2)
-  platform_fee_amount           Decimal? @db.Decimal(12, 2)
-  service_fee_amount            Decimal? @db.Decimal(12, 2) // customer-paid card service fee; NULL on every non-card and pre-feature payment. Never part of Payment.amount or invoice totals.
-  tip_amount                    Decimal? @db.Decimal(12, 2) // customer-paid pay-time tip (D10); NULL when none given. Rides on the payment, not Invoice.tip - never part of Payment.amount or invoice totals.
-  net_amount                    Decimal? @db.Decimal(12, 2)
+  id                            String             @id @default(uuid()) @db.Uuid
+  invoice_id                    String             @db.Uuid
+  amount                        Decimal            @db.Decimal(12, 2)
+  method                        PaymentMethod
+  paid_at                       DateTime
+  collected_by                  String?            @db.Uuid
+  stripe_payment_intent_id      String?
+  stripe_fee_amount             Decimal?           @db.Decimal(12, 2)
+  platform_fee_amount           Decimal?           @db.Decimal(12, 2)
+  service_fee_amount            Decimal?           @db.Decimal(12, 2) // customer-paid card service fee; NULL on every non-card and pre-feature payment. Never part of Payment.amount or invoice totals.
+  tip_amount                    Decimal?           @db.Decimal(12, 2) // customer-paid pay-time tip (D10); NULL when none given. Rides on the payment, not Invoice.tip - never part of Payment.amount or invoice totals.
+  net_amount                    Decimal?           @db.Decimal(12, 2)
   stripe_balance_transaction_id String?
-  stripe_account_id             String?  // which Stripe account the charge lives on; NULL = legacy platform-account
-  reference_number         String?
-  notes                    String?
-  refunded_at              DateTime?
-  refunded_amount          Decimal?           @db.Decimal(12, 2)
-  created_at               DateTime           @default(now())
+  stripe_account_id             String? // which Stripe account the charge lives on; NULL = legacy platform-account
+  reference_number              String?
+  notes                         String?
+  refunded_at                   DateTime?
+  refunded_amount               Decimal?           @db.Decimal(12, 2)
+  created_at                    DateTime           @default(now())
   // --- Entity-redesign §8: void-payment (involuntary; never deletes — audit) ---
-  voided_at                DateTime?
-  voided_reason            String?
-  voided_by                String?            @db.Uuid
-  void_category            VoidPaymentReason?
-  collector                User?              @relation("PaymentCollectedBy", fields: [collected_by], references: [id])
-  voided_by_user           User?              @relation("PaymentVoidedBy", fields: [voided_by], references: [id])
-  invoice                  Invoice            @relation(fields: [invoice_id], references: [id], onDelete: Restrict)
-  refunds                  Refund[]
+  voided_at                     DateTime?
+  voided_reason                 String?
+  voided_by                     String?            @db.Uuid
+  void_category                 VoidPaymentReason?
+  collector                     User?              @relation("PaymentCollectedBy", fields: [collected_by], references: [id])
+  voided_by_user                User?              @relation("PaymentVoidedBy", fields: [voided_by], references: [id])
+  invoice                       Invoice            @relation(fields: [invoice_id], references: [id], onDelete: Restrict)
+  refunds                       Refund[]
 
   // --- Creator tracking (audit only). NOTHING reads these for authorization. ---
   // Immutable, written once at create. Same shape and rationale as Job - see that model.
@@ -1559,6 +1751,7 @@ model PriceBookItem {
   model_number         String?
   upc                  String?
   brand_id             String?           @db.Uuid
+  finish_id            String?           @db.Uuid
   trade                String?
   kind                 String?
   uom                  String?
@@ -1582,6 +1775,7 @@ model PriceBookItem {
 
   category           PriceBookCategory? @relation(fields: [category_id], references: [id])
   brand              Brand?             @relation(fields: [brand_id], references: [id])
+  finish             Finish?            @relation(fields: [finish_id], references: [id])
   vendor             Vendor?            @relation(fields: [vendor_id], references: [id])
   line_items         EstimateLineItem[]
   invoice_line_items InvoiceLineItem[]
@@ -1604,6 +1798,7 @@ model PriceBookItem {
   @@unique([organization_id, sku])
   @@index([category_id])
   @@index([brand_id])
+  @@index([finish_id])
   @@index([vendor_id])
   @@index([type])
   @@index([organization_id])
@@ -1711,13 +1906,31 @@ enum LeadStatus {
   CANCELLED
 }
 
-// Walkthrough-as-entity redesign, PR-C2. WALKTHROUGH_SCHEDULED / WALKTHROUGH_COMPLETED left
-// LeadStatus in this PR - all walkthrough state now lives on this table instead.
-enum WalkthroughStatus {
-  REQUESTED
+// Multi-visit D22: ONE shared status for both purposes. EN_ROUTE / ON_SITE / IN_PROGRESS are
+// added here because they are properties of a TRIP, not of a job - they retire from JobStatus in
+// slice S4, where Job.status becomes derived. S1 only ever writes SCHEDULED / COMPLETED /
+// CANCELLED, matching what the lead side does today.
+//
+// REQUESTED is RETIRED (D22a). It encoded "this lead needs a visit booked", which is not a state
+// of a visit at all - it is the ABSENCE of one. Keeping it forced a placeholder row to be minted
+// with every lead and re-minted after every cancellation, and it cannot survive multi-visit: with
+// several live visits per lead there is no single row for the placeholder to be. The three
+// needs-scheduling queries flip from "has a REQUESTED visit" to "has no live visit".
+enum VisitStatus {
   SCHEDULED
+  EN_ROUTE
+  ON_SITE
+  IN_PROGRESS
   COMPLETED
   CANCELLED
+}
+
+// D3: a visit is a visit; only the parent and the purpose differ. This is what retires the word
+// "walkthrough" from the platform (closing SRVW-57) - a lead's visit is one whose purpose is
+// WALKTHROUGH, a job's is one whose purpose is WORK.
+enum VisitPurpose {
+  WORK
+  WALKTHROUGH
 }
 
 enum EstimateStatus {
@@ -1740,11 +1953,18 @@ enum LostReason {
   OTHER
 }
 
+// D12/D17 (multi-visit S4): UNSCHEDULED = no live visits, SCHEDULED = visits exist and none has
+// started, IN_PROGRESS = any visit started. Those three are DERIVED server-side from the visit set
+// (lib/job-status.ts) and written as a cache in the same transaction as any visit write; COMPLETED
+// and CANCELLED are explicit, human-set, and never derived. Spec B1's unordered rule survives -
+// every status stays reachable from every other.
+//
+// EN_ROUTE and ON_SITE RETIRED here: being on the way and being on site are properties of a TRIP,
+// not of a job, and they live on VisitStatus. Existing rows in those two states migrated to
+// IN_PROGRESS in 20260819120000_visit_lifecycle_multi_visit_s4.
 enum JobStatus {
-  UNASSIGNED
+  UNSCHEDULED
   SCHEDULED
-  EN_ROUTE
-  ON_SITE
   IN_PROGRESS
   COMPLETED
   CANCELLED
@@ -1915,6 +2135,14 @@ enum DepositDefaultType {
   FIXED
 }
 
+// Editable record IDs (Workiz dual-run) — which container minted a container-style estimate
+// number (`L00005-1`/`C00010-1`/`J00007-1`, SERV10X-61). See Estimate.container_kind.
+enum EstimateContainerKind {
+  LEAD
+  CUSTOMER
+  JOB
+}
+
 // --- Custom Fields (SRVW-114) ---
 enum CustomFieldType {
   TEXT
@@ -1945,53 +2173,53 @@ enum Plan {
 ///   DEMO_ORG_ID = '00000000-0000-0000-0000-000000000001'
 
 model Organization {
-  id                       String   @id @db.Uuid
-  name                     String   @db.VarChar(200)
-  legal_name               String?  @db.VarChar(200)
-  address_line1            String   @db.VarChar(200)
-  address_line2            String?  @db.VarChar(200)
-  city                     String   @db.VarChar(100)
-  state                    String   @db.VarChar(50)
-  postal_code              String   @db.VarChar(20)
-  country                  String   @default("US") @db.VarChar(2)
-  timezone                 String?  @default("America/New_York") @db.VarChar(64) // IANA tz for server-side date rendering (emails/PDFs). Nullable: ServWave shares the staging DB and created this column nullable; code falls back to DEFAULT_TIMEZONE. See lib/timezone.ts. VarChar(64) matches the live staging column (org_settings migration created it 64; the idempotent B&G migration's VARCHAR(50) ADD COLUMN IF NOT EXISTS no-op'd).
-  email                    String   @db.VarChar(200)
-  phone                    String?  @db.VarChar(50)
-  website                  String?  @db.VarChar(200)
-  logo_url                 String?  @db.Text
-  brand_color              String   @default("#242424") @db.VarChar(7)
-  estimate_template        String   @default("alpha-classic") @db.VarChar(50)
-  estimate_terms           String   @db.Text
-  estimate_notes           String   @db.Text
-  estimate_payment_terms   String   @db.Text
-  invoice_terms            String   @default("") @db.Text
-  invoice_notes            String   @default("") @db.Text
-  invoice_payment_terms    String   @default("") @db.Text
+  id                       String    @id @db.Uuid
+  name                     String    @db.VarChar(200)
+  legal_name               String?   @db.VarChar(200)
+  address_line1            String    @db.VarChar(200)
+  address_line2            String?   @db.VarChar(200)
+  city                     String    @db.VarChar(100)
+  state                    String    @db.VarChar(50)
+  postal_code              String    @db.VarChar(20)
+  country                  String    @default("US") @db.VarChar(2)
+  timezone                 String?   @default("America/New_York") @db.VarChar(64) // IANA tz for server-side date rendering (emails/PDFs). Nullable: ServWave shares the staging DB and created this column nullable; code falls back to DEFAULT_TIMEZONE. See lib/timezone.ts. VarChar(64) matches the live staging column (org_settings migration created it 64; the idempotent B&G migration's VARCHAR(50) ADD COLUMN IF NOT EXISTS no-op'd).
+  email                    String    @db.VarChar(200)
+  phone                    String?   @db.VarChar(50)
+  website                  String?   @db.VarChar(200)
+  logo_url                 String?   @db.Text
+  brand_color              String    @default("#242424") @db.VarChar(7)
+  estimate_template        String    @default("alpha-classic") @db.VarChar(50)
+  estimate_terms           String    @db.Text
+  estimate_notes           String    @db.Text
+  estimate_payment_terms   String    @db.Text
+  invoice_terms            String    @default("") @db.Text
+  invoice_notes            String    @default("") @db.Text
+  invoice_payment_terms    String    @default("") @db.Text
   stripe_account_id        String? // null = no Stripe capability; set after Connect onboarding (9C2). Doubles as the gate: orgs without this cannot have CARD in accepted_payment_methods.
-  stripe_charges_enabled   Boolean @default(false) // real CARD gate (replaces "is stripe_account_id set")
-  stripe_payouts_enabled   Boolean @default(false) // drives the connect-your-bank nudge
-  stripe_details_submitted Boolean @default(false) // finished the first onboarding pass
-  stripe_requirements_due  Json    @default("[]")  // requirements.currently_due → "action needed"
+  stripe_charges_enabled   Boolean   @default(false) // real CARD gate (replaces "is stripe_account_id set")
+  stripe_payouts_enabled   Boolean   @default(false) // drives the connect-your-bank nudge
+  stripe_details_submitted Boolean   @default(false) // finished the first onboarding pass
+  stripe_requirements_due  Json      @default("[]") // requirements.currently_due → "action needed"
   stripe_disabled_reason   String? // requirements.disabled_reason (restricted/rejected/paused)
-  platform_fee_bps         Int     @default(50)    // per-org platform fee, bps (50 = 0.5%); support-only knob. Card payments no longer use it - it survives as the disclosed_fee_bps written onto a TermsAcceptance.
+  platform_fee_bps         Int       @default(50) // per-org platform fee, bps (50 = 0.5%); support-only knob. Card payments no longer use it - it survives as the disclosed_fee_bps written onto a TermsAcceptance.
   // NOTE: there is deliberately NO card-service-fee column. Paying by card always carries the
   // card service fee, so it has no per-org switch; the RATE is the CARD_SERVICE_FEE_BPS constant.
-  ctm_account_id           String?  @unique // CTM sub-account id ("596375"); null = phone module not connected. UNIQUE = claim-jack guard across orgs.
-  ctm_sms_ready            Boolean  @default(false) // A2P campaign approved on the CTM side — gates outbound SMS.
-  accepted_payment_methods Json     @default("[]") // §4.5: array of PaymentMethod strings (CARD, EXTERNAL_CARD, BANK_TRANSFER, CHECK, CASH). Pre-fills Send Estimate modal + filters public estimate/invoice pages.
-  source_options           Json     @default("[\"Google\",\"Referral\",\"Facebook\",\"Instagram\",\"Yelp\",\"Direct Mail\",\"Door Hanger\",\"Other\"]")
-  job_type_options         Json     @default("[\"HVAC Service\",\"HVAC Install\",\"Plumbing\",\"Electrical\",\"General Maintenance\",\"Other\"]")
-  billing_terms_options    Json     @default("[\"Net 15\",\"Net 30\",\"Net 60\",\"Due on Receipt\"]")
+  ctm_account_id           String?   @unique // CTM sub-account id ("596375"); null = phone module not connected. UNIQUE = claim-jack guard across orgs.
+  ctm_sms_ready            Boolean   @default(false) // A2P campaign approved on the CTM side — gates outbound SMS.
+  accepted_payment_methods Json      @default("[]") // §4.5: array of PaymentMethod strings (CARD, EXTERNAL_CARD, BANK_TRANSFER, CHECK, CASH). Pre-fills Send Estimate modal + filters public estimate/invoice pages.
+  source_options           Json      @default("[\"Google\",\"Referral\",\"Facebook\",\"Instagram\",\"Yelp\",\"Direct Mail\",\"Door Hanger\",\"Other\"]")
+  job_type_options         Json      @default("[\"HVAC Service\",\"HVAC Install\",\"Plumbing\",\"Electrical\",\"General Maintenance\",\"Other\"]")
+  billing_terms_options    Json      @default("[\"Net 15\",\"Net 30\",\"Net 60\",\"Due on Receipt\"]")
   // Demo org flag: when true the org keeps the mock-first surfaces (e.g. the
   // not-yet-backed Reports) so sales can show the full vision to prospects. Real
   // orgs (false) only ever see DB-backed reports — never fabricated data.
   // Surfaced on the /api/auth/me + login payloads as user.org_is_demo.
-  is_demo                  Boolean  @default(false)
-  plan                     Plan     @default(STARTER)
+  is_demo                  Boolean   @default(false)
+  plan                     Plan      @default(STARTER)
   trial_ends_at            DateTime?
-  feature_overrides        Json     @default("{}")
-  created_at               DateTime @default(now())
-  updated_at               DateTime @updatedAt
+  feature_overrides        Json      @default("{}")
+  created_at               DateTime  @default(now())
+  updated_at               DateTime  @updatedAt
 
   // Per-org numbering configuration (industry standard — Xero/Zoho/QBO)
   lead_prefix              String    @default("L") @db.VarChar(10)
@@ -2033,27 +2261,34 @@ model Organization {
   default_inventory_location_id String? @db.Uuid
 
   // Org Settings — extended company profile
-  display_name          String? @db.VarChar(200)
-  tax_id                String? @db.VarChar(50)
-  business_type         String? @db.VarChar(50)
-  industry              Json    @default("[]")
-  support_email         String? @db.VarChar(200)
-  billing_email         String? @db.VarChar(200)
-  currency              String  @default("USD") @db.VarChar(3)
-  date_format           String  @default("MM/DD/YYYY") @db.VarChar(20)
-  mailing_same_as_hq    Boolean @default(true)
-  mailing_address_line1 String? @db.VarChar(200)
-  mailing_address_line2 String? @db.VarChar(200)
-  mailing_city          String? @db.VarChar(100)
-  mailing_state         String? @db.VarChar(50)
-  mailing_postal_code   String? @db.VarChar(20)
-  mailing_country       String? @db.VarChar(2)
-  mfa_sms_enabled       Boolean @default(false)
-  mfa_email_enabled     Boolean @default(false)
+  display_name            String? @db.VarChar(200)
+  tax_id                  String? @db.VarChar(50)
+  business_type           String? @db.VarChar(50)
+  industry                Json    @default("[]")
+  support_email           String? @db.VarChar(200)
+  billing_email           String? @db.VarChar(200)
+  currency                String  @default("USD") @db.VarChar(3)
+  date_format             String  @default("MM/DD/YYYY") @db.VarChar(20)
+  mailing_same_as_hq      Boolean @default(true)
+  mailing_address_line1   String? @db.VarChar(200)
+  mailing_address_line2   String? @db.VarChar(200)
+  mailing_city            String? @db.VarChar(100)
+  mailing_state           String? @db.VarChar(50)
+  mailing_postal_code     String? @db.VarChar(20)
+  mailing_country         String? @db.VarChar(2)
+  mfa_sms_enabled         Boolean @default(false)
+  mfa_email_enabled       Boolean @default(false)
   // Org-wide kill switch for outgoing business email (invoices, estimates, job
   // updates, etc.). Login/account-security email (MFA OTP, user invite) always
   // sends regardless — see dispatchEmail() in lib/email.ts.
-  email_sending_enabled Boolean @default(true)
+  //
+  // OFF for every NEW org, matching phone (`/onboard-org` writes
+  // `feature_overrides: {"phone": false}` on every onboard regardless of plan).
+  // Speaking to an org's customers under its own name is a deliberate step, not
+  // something acquired by being created. EXISTING rows keep whatever they hold
+  // - a column default never rewrites them - so this flips no org that is
+  // already sending. See migration 20260809031000.
+  email_sending_enabled   Boolean @default(false)
   // The string before the `@` in this org's business From address. The domain
   // half is always the shared env.EMAIL_FROM_BUSINESS one and is never an org
   // choice. NULL means "derive it from `name`" - both the default and the
@@ -2066,7 +2301,12 @@ model Organization {
   email_sender_local_part String? @unique
   // Org-wide kill switch for outgoing SMS (automations + Communication module
   // sends). Distinct from ctm_sms_ready (A2P approval, not a panic switch).
-  sms_sending_enabled   Boolean @default(true)
+  sms_sending_enabled     Boolean @default(true)
+  // Exempts the org from the included calling/texting allowance (lib/comm-usage.ts).
+  // The Phone meters then report usage with no limit, no percentage and no
+  // "approaching limit" banner, and any future enforcement skips the org. For
+  // house orgs (the demo tenant, Alpha) and any org sold an uncapped deal.
+  comm_usage_uncapped     Boolean @default(false)
 
   // Inventory D7: false = warn-and-allow on over-draw; true = hard-block (409 SHORTAGE).
   block_negative_stock Boolean @default(false)
@@ -2126,6 +2366,8 @@ model Organization {
 
   // --- Inventory module ---
   brands                     Brand[]
+  finishes                   Finish[]
+  uom_options                UomOption[]
   vendors                    Vendor[]
   vendor_contacts            VendorContact[]
   inventory_locations        InventoryLocation[]
@@ -2170,7 +2412,6 @@ model Organization {
   email_read_states         EmailReadState[]
   email_groups              EmailGroup[]
   email_forward_rules       EmailForwardRule[]
-  email_domain              OrganizationDomain?
   reply_tokens              ReplyToken[]
   call_flows                CallFlow[]
   call_groups               CallGroup[]
@@ -2182,9 +2423,8 @@ model Organization {
   pending_call_attributions PendingCallAttribution[]
 
   // --- Scheduler redesign: assignment M2M back-relations (additive) ---
-  job_assignees                    JobAssignee[]
   lead_assignees                   LeadAssignee[]
-  lead_walkthrough_performers      LeadWalkthroughPerformer[]
+  visit_assignees                  VisitAssignee[]
   // --- Service Plans ---
   service_plans                    ServicePlan[]
   service_plan_line_items          ServicePlanLineItem[]
@@ -2212,8 +2452,8 @@ model Organization {
   // R5c (2026-07-22) -- org-level custom tax rates.
   org_tax_rates OrgTaxRate[]
 
-  // --- Walkthrough-as-entity redesign, PR-A2 (2026-07-28) ---
-  walkthroughs Walkthrough[]
+  // --- Multi-visit S1 ---
+  visits Visit[]
 
   // --- SRVW-112: per-org job sub-status catalog ---
   job_sub_statuses JobSubStatus[]
@@ -2319,6 +2559,50 @@ model Brand {
   @@index([organization_id])
   @@index([default_vendor_id])
   @@map("brands")
+}
+
+// Finish mirrors Brand: a per-org catalog entity the Add/Edit Item dialog can
+// extend inline. The item points at it by FK - the column is brand new, so
+// there is no data to backfill and nothing downstream reads a finish string.
+model Finish {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  // BHMA code (e.g. "626"). Optional - trades outside door hardware have none.
+  code       String?
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  items PriceBookItem[]
+
+  organization_id String       @db.Uuid
+  organization    Organization @relation(fields: [organization_id], references: [id])
+
+  @@unique([organization_id, name])
+  @@index([organization_id])
+  @@map("finishes")
+}
+
+// UomOption supplies the unit-of-measure DROPDOWN only - deliberately not a
+// foreign key. `PriceBookItem.uom` stays a string because the same value is
+// already carried on PO lines, stock movements, job stage lines and
+// reservation lines; converting it would be a cross-table backfill, which is
+// a separate project. Items keep storing the code, so nothing downstream
+// changes.
+model UomOption {
+  id         String   @id @default(uuid()) @db.Uuid
+  code       String
+  label      String?
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  organization_id String       @db.Uuid
+  organization    Organization @relation(fields: [organization_id], references: [id])
+
+  @@unique([organization_id, code])
+  @@index([organization_id])
+  @@map("uom_options")
 }
 
 model Vendor {
@@ -3190,7 +3474,8 @@ model CallSession {
   answered_by        Json
   agent_id           String?  @db.Uuid
   started_at         DateTime
-  duration_sec       Int?
+  duration_sec       Int? // CTM talk_time - conversation only. What the Calls list shows.
+  connected_sec      Int? // CTM duration - ring + queue + IVR + talk. What CTM bills, and what the usage allowance meters.
   customer_id        String?  @db.Uuid
   job_id             String?  @db.Uuid
   lead_id            String?  @db.Uuid
@@ -3350,28 +3635,28 @@ model MessageThread {
 }
 
 model Message {
-  id         String   @id @default(uuid()) @db.Uuid
-  thread_id  String   @db.Uuid
-  direction  String
-  body       String   @db.Text
-  ts         DateTime
+  id            String   @id @default(uuid()) @db.Uuid
+  thread_id     String   @db.Uuid
+  direction     String
+  body          String   @db.Text
+  ts            DateTime
   // queued (row written, nothing has confirmed a send yet) -> sent (CTM accepted
   // the POST) -> delivered (carrier confirmed via the status_change webhook), or
   // skipped (deliberately not delivered) / failed. Never write `sent` before
   // something outside this process confirms it.
-  status     String?
+  status        String?
   // WHY a row is skipped or failed: a CtmSmsFailureReason (lib/ctm/sendSms.ts).
   // Null on every other status.
   status_reason String?
-  automated  Boolean? @default(false)
+  automated     Boolean? @default(false)
   // Communication ↔ Jobs: per-message attribution (thread stays customer-scoped)
-  job_id     String?  @db.Uuid
-  job_label  String?
+  job_id        String?  @db.Uuid
+  job_label     String?
   // Communication ↔ Leads: per-message attribution, mirrors job_id (full job-parity ruling, 2026-07-22)
-  lead_id    String?  @db.Uuid
-  ctm_sms_id String?  @unique // CTM message id ("MSG…") — webhook upsert key
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
+  lead_id       String?  @db.Uuid
+  ctm_sms_id    String?  @unique // CTM message id ("MSG…") — webhook upsert key
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
 
   thread MessageThread @relation(fields: [thread_id], references: [id], onDelete: Cascade)
   job    Job?          @relation("JobMessages", fields: [job_id], references: [id], onDelete: SetNull)
@@ -3588,22 +3873,22 @@ enum InboundAuthVerdict {
 }
 
 model Email {
-  id                String   @id @default(uuid()) @db.Uuid
-  account           String
-  from              Json
-  to                String
-  subject           String
-  snippet           String   @db.Text
-  body              Json
-  at                String
+  id                     String               @id @default(uuid()) @db.Uuid
+  account                String
+  from                   Json
+  to                     String
+  subject                String
+  snippet                String               @db.Text
+  body                   Json
+  at                     String
   // epoch-ms; BigInt because epoch-ms overflows INT4 (serializers must Number() it)
-  ts                BigInt
-  unread            Boolean  @default(true)
-  starred           Boolean  @default(false)
-  folder            String
-  labels            Json?
-  has_attachment    Boolean? @default(false)
-  attachments       Json?
+  ts                     BigInt
+  unread                 Boolean              @default(true)
+  starred                Boolean              @default(false)
+  folder                 String
+  labels                 Json?
+  has_attachment         Boolean?             @default(false)
+  attachments            Json?
   // Email slice 8b: a real FK to EmailThread, not the bare Gmail-era string it
   // used to be (there was no Gmail thread behind it any more, and nothing
   // wrote it - see EmailThread's own comment). NULLABLE ON PURPOSE, not
@@ -3615,28 +3900,28 @@ model Email {
   // also mint/attach a thread - a much bigger blast radius than 8b asked for.
   // Only the compose/reply send path (sendEmail) and the one-time backfill
   // migration populate this column today.
-  thread_id         String?  @db.Uuid
-  important         Boolean? @default(false)
-  snoozed_until     String?
-  customer_id       String?  @db.Uuid
-  lead_id           String?  @db.Uuid
-  vendor_id         String?  @db.Uuid
+  thread_id              String?              @db.Uuid
+  important              Boolean?             @default(false)
+  snoozed_until          String?
+  customer_id            String?              @db.Uuid
+  lead_id                String?              @db.Uuid
+  vendor_id              String?              @db.Uuid
   // Communication ↔ Jobs: per-message attribution (transactional sends stamp at origin)
-  job_id            String?  @db.Uuid
-  job_label         String?
+  job_id                 String?              @db.Uuid
+  job_label              String?
   // Message metadata - null on prototype/system rows. body_html currently has
   // NO writer at all: the Gmail ingest that used to populate it (and sanitize it
   // first) was deleted in email slice 0. The rule it enforced still stands and
   // is now unenforced by any code - whoever restores an inbound path must run
   // lib/email-html.ts's sanitizeEmailHtml before storing, because the inbox
   // renders this column through dangerouslySetInnerHTML with no client-side pass.
-  direction         String? // in | out (canonical comm vocab - never inbound/outbound)
+  direction              String? // in | out (canonical comm vocab - never inbound/outbound)
   // Resend's own id for the accepted message - the correlation key a delivery
   // webhook arrives with, and the ONLY thing tying an event back to this row.
   // Unique so a replayed webhook updates instead of duplicating; the unique
   // index is also the lookup the webhook handler reads by, so no separate
   // @@index is added for it.
-  provider_message_id String? @unique
+  provider_message_id    String?              @unique
   // Delivery lifecycle. NULLABLE rather than defaulted: null means "nothing has
   // ever reported on this row", which is the truth for every row written before
   // this column existed - defaulting those to QUEUED would assert tracking that
@@ -3653,46 +3938,74 @@ model Email {
   // bounce.type Permanent/Temporary and we map that onto our own hard/soft
   // vocabulary. Carried now so acting on a bounce needs no second migration.
   bounce_kind            EmailBounceKind?
-  rfc822_message_id String?
-  in_reply_to       String?
-  references_header String?  @db.Text
-  cc                String?
-  bcc               String?
-  body_html         String?  @db.Text
+  // Provenance. The SMS channel's `messages.automated` is the precedent this copies (spec #1751
+  // D5): the lead contact clock must count a salesperson's own email and must NOT count the
+  // appointment confirmation the platform sends on the company's behalf, so the two have to be
+  // distinguishable by a value the writer states outright.
+  //
+  // The tempting alternative is rejected explicitly. Transactional mirrors happen to be written
+  // with no `thread_id` while the compose path always populates one, which looks like a free
+  // provenance test. It is a CONSEQUENCE of which code path writes the row - documented as such
+  // on `thread_id` above - not a contract. The first person to give transactional mail a thread
+  // would silently mark every lead in the system contacted.
+  //
+  // Nullable-with-default, exactly like messages.automated. HISTORICAL ROWS ARE NOT RECOVERABLE
+  // FROM THIS COLUMN, and the reading is the PERMISSIVE one rather than the safe one - stated
+  // plainly here because an earlier version of this comment claimed the opposite.
+  //
+  // `ADD COLUMN ... DEFAULT false` backfilled every row that already existed to `false`, and
+  // `isHumanOutboundTouch` (services/lead-contact.service.ts) treats `automated !== true` as
+  // HUMAN. So every pre-#1751 email - transactional mirrors included - now reads as
+  // human-originated on this column alone. Nothing distinguishes them.
+  //
+  // There is no live consequence, for two reasons that both have to hold. Only rows created by
+  // the two writers that state their provenance outright are ever fed to that filter, and each
+  // states it at the write site rather than leaning on this default. And the provenance test is
+  // not `automated` alone: `direction === 'out'` is required too, which every pre-slice-8b row
+  // fails outright (they carry a null direction, and an UNKNOWN direction is not outreach).
+  // Reconstructing contact from historical mail is out of scope by D10 and is not attemptable
+  // from here; a backfill that wanted it would have to re-derive provenance from `account`.
+  automated              Boolean?             @default(false)
+  rfc822_message_id      String?
+  in_reply_to            String?
+  references_header      String?              @db.Text
+  cc                     String?
+  bcc                    String?
+  body_html              String?              @db.Text
   // Email slice 8b: who sent it, stamped once at send by the compose path
   // (req.user!.id) and never changed after. NULLABLE - inbound mail and every
   // system/transactional row (persistTransactionalEmail) has no ServWave
   // sender to stamp, and existing rows predating this column have no reliable
   // source of truth to backfill from (left NULL deliberately, not guessed).
-  sent_by_user_id   String?  @db.Uuid
+  sent_by_user_id        String?              @db.Uuid
   // Email slice 6 (inbound reply capture) - see InboundMatchState's own comment
   // for why this is stored rather than re-derived. NULL on every outbound row.
-  inbound_match     InboundMatchState?
+  inbound_match          InboundMatchState?
   // The reply token this inbound message arrived on, when it carried a valid
   // one. Kept even for UNMATCHED_SENDER - that is precisely the case where the
   // token resolved but we refused to trust the sender, so retaining it is what
   // turns manual linking into one click instead of a search. NULL when no
   // token was present or it did not resolve.
-  reply_token       String?
+  reply_token            String?
   // Email slice 6: the DMARC verdict on this inbound message's From header, see
   // InboundAuthVerdict. NULL on every outbound row. Deliberately NOT storing the
   // raw Authentication-Results string alongside it - the verdict is what drives
   // both behaviour and display, and the raw header stays re-fetchable from
   // Resend's Received Emails API by provider_message_id, so a second column
   // would be write-only.
-  inbound_auth      InboundAuthVerdict?
-  created_at        DateTime @default(now())
-  updated_at        DateTime @updatedAt
+  inbound_auth           InboundAuthVerdict?
+  created_at             DateTime             @default(now())
+  updated_at             DateTime             @updatedAt
 
-  customer Customer?    @relation(fields: [customer_id], references: [id])
-  lead     Lead?        @relation("LeadEmails", fields: [lead_id], references: [id])
-  vendor   Vendor?      @relation("VendorEmails", fields: [vendor_id], references: [id])
-  job      Job?         @relation("JobEmails", fields: [job_id], references: [id], onDelete: SetNull)
-  thread   EmailThread? @relation(fields: [thread_id], references: [id], onDelete: SetNull)
-  sent_by  User?        @relation("EmailSentBy", fields: [sent_by_user_id], references: [id], onDelete: SetNull)
+  customer         Customer?    @relation(fields: [customer_id], references: [id])
+  lead             Lead?        @relation("LeadEmails", fields: [lead_id], references: [id])
+  vendor           Vendor?      @relation("VendorEmails", fields: [vendor_id], references: [id])
+  job              Job?         @relation("JobEmails", fields: [job_id], references: [id], onDelete: SetNull)
+  thread           EmailThread? @relation(fields: [thread_id], references: [id], onDelete: SetNull)
+  sent_by          User?        @relation("EmailSentBy", fields: [sent_by_user_id], references: [id], onDelete: SetNull)
   // ON DELETE SET NULL, not Cascade: revoking or pruning a token must never
   // delete the customer's actual message.
-  arrived_on_token ReplyToken? @relation("ReplyTokenInbound", fields: [reply_token], references: [token], onDelete: SetNull)
+  arrived_on_token ReplyToken?  @relation("ReplyTokenInbound", fields: [reply_token], references: [token], onDelete: SetNull)
 
   // Real uploaded files on a human-composed send (email slice 7) - distinct from
   // the legacy `attachments` Json column above, which only ever carried
@@ -3767,11 +4080,10 @@ model EmailThread {
 
   organization_id String       @db.Uuid
   organization    Organization @relation(fields: [organization_id], references: [id])
+  reply_tokens    ReplyToken[]
 
   @@index([organization_id])
   @@index([assigned_to_user_id])
-  reply_tokens ReplyToken[]
-
   @@map("email_threads")
 }
 
@@ -3805,8 +4117,8 @@ model ReplyToken {
   // 22-char base64url, 128 bits CSPRNG. The PK *is* the secret - there is no
   // separate id, because every lookup is by token and a second key would only
   // create a way for the two to disagree.
-  token           String    @id
-  organization_id String    @db.Uuid
+  token              String    @id
+  organization_id    String    @db.Uuid
   // NULLABLE on purpose. The compose/reply path (email slice 8b) always has a
   // thread, but `persistTransactionalEmail` - every system-generated estimate/
   // invoice/PO notice - creates Email rows with no thread at all, and slice 8b
@@ -3814,20 +4126,20 @@ model ReplyToken {
   // entity with no thread yet; the inbound handler mints the thread on first
   // reply rather than forcing that deep "never throws" module to mint one on
   // every send.
-  thread_id       String?   @db.Uuid
+  thread_id          String?   @db.Uuid
   // What the customer was mailed ABOUT: estimate | invoice | job | lead | customer.
-  entity_type     String?
-  entity_id       String?   @db.Uuid
-  customer_id     String?   @db.Uuid
+  entity_type        String?
+  entity_id          String?   @db.Uuid
+  customer_id        String?   @db.Uuid
   // The address we actually sent to, normalized (lowercased, trimmed). The
   // inbound `From` is compared against THIS - see InboundMatchState.
   // UNMATCHED_SENDER. The token authenticates the THREAD, not the person:
   // anyone who can read the email can reply, so a mismatch must route to the
   // manual queue rather than to silent trust.
-  expected_from   String
+  expected_from      String
   // Carries assignment attribution into the reply (email slice 8b) - a reply
   // lands with the original sender as its natural owner.
-  created_by_user_id String? @db.Uuid
+  created_by_user_id String?   @db.Uuid
   // Server-side policy column, NOT baked into the address, so the rule can
   // change without invalidating live addresses already sitting in customers'
   // mailboxes. SETTLED 2026-08-05 (Ran): tokens never expire, so nothing sets
@@ -3836,14 +4148,14 @@ model ReplyToken {
   // decision that access does not expire when a job closes. An expired or
   // revoked token routes to the unmatched queue; it must NEVER hard-bounce at
   // the customer.
-  expires_at      DateTime?
-  revoked_at      DateTime?
-  created_at      DateTime  @default(now())
+  expires_at         DateTime?
+  revoked_at         DateTime?
+  created_at         DateTime  @default(now())
 
-  thread       EmailThread? @relation(fields: [thread_id], references: [id], onDelete: SetNull)
-  organization Organization @relation(fields: [organization_id], references: [id])
+  thread         EmailThread? @relation(fields: [thread_id], references: [id], onDelete: SetNull)
+  organization   Organization @relation(fields: [organization_id], references: [id])
   // Inbound messages that arrived addressed to this token.
-  inbound_emails Email[]    @relation("ReplyTokenInbound")
+  inbound_emails Email[]      @relation("ReplyTokenInbound")
 
   // NO unique constraint on (thread, expected_from), deliberately. Reuse is
   // enforced in the minting helper instead: Postgres treats NULLs as DISTINCT
@@ -3916,12 +4228,12 @@ model EmailAttachment {
 // event id (the svix-id header) is the dedupe key so a redelivered webhook
 // updates once instead of double-applying.
 model ResendEvent {
-  id               String   @id @default(uuid()) @db.Uuid
-  resend_event_id  String   @unique
-  event_type       String
-  payload          Json?
-  processed_at     DateTime @default(now())
-  created_at       DateTime @default(now())
+  id              String   @id @default(uuid()) @db.Uuid
+  resend_event_id String   @unique
+  event_type      String
+  payload         Json?
+  processed_at    DateTime @default(now())
+  created_at      DateTime @default(now())
 
   @@map("resend_events")
 }
@@ -3988,47 +4300,6 @@ model EmailForwardRule {
   @@index([to_group_id])
   @@index([to_member_id])
   @@map("email_forward_rules")
-}
-
-// Email slice 10 (guided domain verification) — an org's OWN sending domain,
-// verified via Resend's domain API (CNAME/TXT/MX records, checked in `records`)
-// as an opt-in, additive alternative to the shared env.EMAIL_FROM_BUSINESS
-// domain that stays the default for every org that never sets this up
-// (decision 16). One row per org (organization_id is UNIQUE) — this slice does
-// not support multiple custom domains for one org.
-//
-// `status` mirrors Resend's own DomainStatus vocabulary verbatim (pending |
-// verified | failed | not_started | partially_verified | partially_failed) —
-// a plain String, not a Prisma enum, so a new value Resend adds later never
-// needs a migration to store. `records` is the raw DomainRecords[] array
-// Resend returned on the last create/get/webhook — refreshed on every read so
-// the UI always shows the actual DNS records to add, not a stale snapshot.
-// `detected_dns_provider` is our OWN best-effort dns.resolveNs() lookup
-// (lib/dns-provider.ts) — Resend's SDK has no nameserver-detection field on
-// the real Domain/GetDomainResponse type despite a DomainNameservers type
-// existing in it (verified against node_modules/resend/dist/index.d.mts).
-// `verified_at` is set the FIRST time status transitions into 'verified'
-// (resend-webhook.controller.ts) — it gates the one-time "domain verified"
-// notification email so a redundant domain.updated for an already-verified
-// domain never re-sends it.
-model OrganizationDomain {
-  id                     String    @id @default(uuid()) @db.Uuid
-  organization_id        String    @unique @db.Uuid
-  domain_name            String
-  // UNIQUE — the webhook (resend-webhook.controller.ts) and the "check now"
-  // controller path both correlate a live Resend event/response back to a row
-  // via this id (mirrors emails.provider_message_id's unique index).
-  resend_domain_id       String    @unique
-  status                 String
-  records                Json
-  detected_dns_provider  String?
-  verified_at            DateTime?
-  created_at             DateTime  @default(now())
-  updated_at             DateTime  @updatedAt
-
-  organization Organization @relation(fields: [organization_id], references: [id])
-
-  @@map("organization_domains")
 }
 
 model CallFlow {
@@ -4368,6 +4639,7 @@ enum TaskStatus {
   IN_PROGRESS
   BLOCKED
   DONE
+  CANCELLED
 }
 
 enum TaskPriority {
@@ -4398,7 +4670,9 @@ model Task {
   description        String       @default("")
   status             TaskStatus   @default(TODO)
   priority           TaskPriority @default(MEDIUM)
-  owner_id           String?      @db.Uuid
+  // Flat set of people doing the task. No primary/accountable-one by design.
+  // Invariant enforced in the API layer, not the DB: a live task always has >= 1.
+  assignee_ids       String[]     @default([]) @db.Uuid
   due_at             DateTime?
   linked_entity_type TaskEntity?
   linked_entity_id   String?      @db.Uuid
@@ -4412,7 +4686,10 @@ model Task {
   completed_at       DateTime?
   organization_id    String       @db.Uuid
 
-  owner        User?         @relation("TaskOwner", fields: [owner_id], references: [id], onDelete: SetNull)
+  // No relation for assignee_ids/watcher_ids: Postgres arrays carry no FK, so nothing in
+  // the DATABASE removes a deactivated user's id from either. lib/tasks/deactivation.ts
+  // does it in the application layer on the `is_active -> false` transition; readers still
+  // resolve names by id lookup and tolerate a miss, for the rows a sweep could not repair.
   creator      User          @relation("TaskCreatedBy", fields: [created_by], references: [id])
   organization Organization  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   subtasks     TaskSubtask[]
@@ -4420,7 +4697,9 @@ model Task {
   @@unique([organization_id, task_number])
   @@index([organization_id])
   @@index([linked_entity_type, linked_entity_id])
-  @@index([owner_id])
+  // GIN: every visibility query filters `assignee_ids has me OR watcher_ids has me`.
+  @@index([assignee_ids], type: Gin)
+  @@index([watcher_ids], type: Gin)
   @@map("tasks")
 }
 
@@ -4435,6 +4714,67 @@ model TaskSubtask {
 
   @@index([task_id])
   @@map("task_subtasks")
+}
+
+// --- Calendar Entries (Slice 02, spec §2/§4/§7/§8; user-facing "Events") ---
+// A CalendarEntry is scheduler content that is not work: a pre-lead customer meeting, an
+// org-wide notice ("Dave is off Thursday"). It joins nothing (ADR 0002) - no lead/job/estimate
+// FK, no crew, no record number (SchedulableEvent.number is satisfied by '' in the board
+// adapter, Slice 03). organization_id and created_by are plain columns with no Prisma relation
+// (mirrors TimeClockOtReview.reviewed_by) to keep this table self-contained and avoid widening
+// User/Organization with back-relation arrays for a subject with no ownership chain.
+//
+// rrule/recurrence_until are RESERVED: written null, never read, never accepted by the create/
+// update zod schemas and never selected into a response (see calendar-entry.controller.ts).
+// Two nullable columns now make recurrence an additive change later instead of a migration
+// against live rows (spec §2, §8 - recurrence expansion is permanently out).
+model CalendarEntry {
+  id               String    @id @default(uuid()) @db.Uuid
+  organization_id  String    @db.Uuid // plain column, RLS-scoped; no relation - see header note
+  title            String
+  description      String    @default("")
+  start            DateTime
+  end              DateTime
+  is_all_day       Boolean   @default(false)
+  rrule            String? // RESERVED - see header note; never read, never API-writable
+  recurrence_until DateTime? // RESERVED - see header note; never read, never API-writable
+  created_by       String    @db.Uuid // creator user id; plain column, no relation - the creator is NOT a participant (spec §2)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  participants CalendarEntryParticipant[]
+
+  @@index([organization_id])
+  @@index([organization_id, start, end])
+  @@map("calendar_entries")
+}
+
+enum CalendarParticipantKind {
+  USER
+  CUSTOMER
+}
+
+// Participants are optional and mixed (0..N users, 0..N customers); a zero-participant entry
+// is normal and expected (spec §2). Carries its own organization_id - not derivable at the row
+// level without a join, and the tenant_isolation RLS backstop is per-table - mirroring
+// NotificationRecipient, which carries organization_id for the same reason. user_id/customer_id
+// are plain columns with no Prisma relation (also mirrors NotificationRecipient.recipient_id);
+// the controller verifies both belong to the caller's org before insert (org-validated FK
+// guard, same pattern as inv-stages.controller.ts's validateJobAndCustomer).
+model CalendarEntryParticipant {
+  id                String                  @id @default(uuid()) @db.Uuid
+  organization_id   String                  @db.Uuid // plain column - see header note
+  calendar_entry_id String                  @db.Uuid
+  kind              CalendarParticipantKind
+  user_id           String?                 @db.Uuid // plain column, no relation - see header note
+  customer_id       String?                 @db.Uuid // plain column, no relation - see header note
+  notified_at       DateTime? // unwritten in this slice - Slice 07 (notifications)
+
+  calendar_entry CalendarEntry @relation(fields: [calendar_entry_id], references: [id], onDelete: Cascade)
+
+  @@index([organization_id])
+  @@index([calendar_entry_id])
+  @@map("calendar_entry_participants")
 }
 
 /// Per-week overtime approval, one row per (user, ISO-week) period.
@@ -4530,19 +4870,19 @@ model NotificationRecipient {
 // user deletion. organization_id is a plain column keyed by the tenant_isolation
 // RLS policy. Written by POST /api/auth/accept-invite (runs unscoped → bypass RLS).
 model TermsAcceptance {
-  id              String   @id @default(uuid()) @db.Uuid
-  user_id         String   @db.Uuid
-  user_email      String
-  organization_id String   @db.Uuid
-  terms_version   String
-  terms_url       String
-  privacy_url     String
-  context         String   @default("invite_acceptance")
-  ip_address      String?
-  user_agent      String?
-  disclosed_fee_bps Int?     // rate snapshot the admin saw at acceptance (payments_onboarding only)
-  authority_attested Boolean @default(false) // "I'm authorized to bind {org}" checkbox
-  accepted_at     DateTime @default(now()) @db.Timestamptz(6)
+  id                 String   @id @default(uuid()) @db.Uuid
+  user_id            String   @db.Uuid
+  user_email         String
+  organization_id    String   @db.Uuid
+  terms_version      String
+  terms_url          String
+  privacy_url        String
+  context            String   @default("invite_acceptance")
+  ip_address         String?
+  user_agent         String?
+  disclosed_fee_bps  Int? // rate snapshot the admin saw at acceptance (payments_onboarding only)
+  authority_attested Boolean  @default(false) // "I'm authorized to bind {org}" checkbox
+  accepted_at        DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([organization_id])
   @@index([user_id])

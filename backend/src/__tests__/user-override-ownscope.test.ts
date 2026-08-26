@@ -27,12 +27,13 @@ const tech = { id: TECH_ID, role: 'TECHNICIAN' };
 // that SQL enforcement consumes) instead of calling the throwing in-memory matcher.
 const ownLead = { lead_assignees: [{ user_id: TECH_ID }] };
 const otherLead = { lead_assignees: [{ user_id: 'someone-else' }] };
-const ownJob = { assignees: [{ user_id: TECH_ID }] };
-const otherJob = { assignees: [{ user_id: 'someone-else' }] };
+// S8 (D6): OWN_JOB reaches crew through the trips, so the fixture row does too.
+const ownJob = { visits: [{ assignees: [{ user_id: TECH_ID }] }] };
+const otherJob = { visits: [{ assignees: [{ user_id: 'someone-else' }] }] };
 
 // Substituted own-condition shapes the emitted rules should carry (what SQL enforcement reads).
 const ESTIMATE_OWN = { lead: { lead_assignees: { some: { user_id: TECH_ID } } } };
-const INVOICE_OWN = { job: { assignees: { some: { user_id: TECH_ID } } } };
+const INVOICE_OWN = { job: { visits: { some: { assignees: { some: { user_id: TECH_ID } } } } } };
 
 function ruleConds(ability: ReturnType<typeof defineAbilityFor>, action: string, subj: string) {
   return ability.rules.find((r) => r.subject === subj && r.action === action && !r.inverted)?.conditions;
@@ -120,7 +121,7 @@ describe('per-user ALLOW override — fixed own-scope (Phase B)', () => {
       // role grants en_route Job (own); a deny override revokes it entirely.
       const ability = defineAbilityFor(
         tech,
-        [{ action: 'en_route', subject: 'Job', conditions: { assignees: { some: { user_id: '{{userId}}' } } } }],
+        [{ action: 'en_route', subject: 'Job', conditions: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } }],
         [{ action: 'en_route', subject: 'Job', effect: 'deny' }],
       );
       expect(ability.can('en_route', 'Job')).toBe(false);

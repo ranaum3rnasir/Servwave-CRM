@@ -43,7 +43,7 @@ const leadRow = (walkthroughAt: Date | null) => ({
   lead_number: 'L00042',
   status: 'CONTACTED',
   service_request: 'Leaking kitchen faucet',
-  walkthroughs: walkthroughAt
+  visits: walkthroughAt
     ? [{
         id: 'w0000000-0000-0000-0000-000000000001', status: 'SCHEDULED', scheduled_at: walkthroughAt,
         duration_minutes: 60, completed_at: null, cancelled_at: null, cancelled_reason: null,
@@ -207,11 +207,29 @@ describe('rearmAnchoredWaits — job entity', () => {
   const OLD_START = new Date('2026-08-01T13:00:00.000Z');
   const JOB_ENR_ID = 'e0000000-0000-0000-0000-00000000000c';
 
-  const jobRow = (scheduledStart: Date | null) => ({
+  // S8 §2 (A4, RATIFIED): the anchored-WAIT resolver now reads context.ts's
+  // resolveNextJobVisit(isLiveVisit subset) instead of a flat Job.scheduled_start column — the
+  // fixture carries a `visits` array (what `include: { visits: {...} }` would return) rather
+  // than a bare scheduled_start. `jobRow(scheduledStart)` is the single-visit convenience form
+  // every pre-existing scenario here uses (a single live visit makes "upcoming vs not"
+  // irrelevant — one item always wins regardless); `jobRowWithVisits` below is the multi-visit
+  // form the new "re-parks when the NEXT visit changes" scenario needs.
+  type JobVisitFixture = {
+    id: string;
+    status: string;
+    scheduled_at: Date | null;
+    scheduled_end?: Date | null;
+    created_at: Date;
+    assignees: { user: { id: string; email: string; first_name: string; last_name: string } }[];
+  };
+  const JOB_TECH = { user: { id: 'tech-1', email: 'mike@org.com', first_name: 'Mike', last_name: 'Torres' } };
+  function jobLiveVisit(id: string, scheduledAt: Date, createdAt = new Date('2026-07-01T00:00:00.000Z')): JobVisitFixture {
+    return { id, status: 'SCHEDULED', scheduled_at: scheduledAt, scheduled_end: null, created_at: createdAt, assignees: [JOB_TECH] };
+  }
+  const jobRowWithVisits = (visits: JobVisitFixture[]) => ({
     id: JOB_ID,
     job_number: 'J00042',
     status: 'SCHEDULED',
-    scheduled_start: scheduledStart,
     job_type: 'HVAC Service',
     completed_at: null,
     customer: {
@@ -222,8 +240,10 @@ describe('rearmAnchoredWaits — job entity', () => {
       phone: '+15551234567',
     },
     service_location: { address_line1: '18 Maple Ave', address_line2: null, city: 'Richmond', state: 'VA', zip: '23220' },
-    assignees: [{ user: { id: 'tech-1', email: 'mike@org.com', first_name: 'Mike', last_name: 'Torres' } }],
+    visits,
   });
+  const jobRow = (scheduledStart: Date | null) =>
+    jobRowWithVisits(scheduledStart ? [jobLiveVisit('visit-1', scheduledStart)] : []);
 
   const jobAnchoredWaitStep = (position: number) => ({
     position,
@@ -298,6 +318,56 @@ describe('rearmAnchoredWaits — job entity', () => {
     await rearmAnchoredWaits('job', JOB_ID);
 
     expect(mockPrisma.workflowEnrollment.updateMany).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('leaves the enrollment as-is when EVERY visit on the job is CANCELLED — same as no visits at all', async () => {
+    mockPrisma.workflowEnrollment.findMany.mockResolvedValueOnce([jobEnrollmentRow()]);
+    mockPrisma.job.findFirst.mockResolvedValueOnce(
+      jobRowWithVisits([
+        { id: 'visit-1', status: 'CANCELLED', scheduled_at: OLD_START, created_at: new Date('2026-07-01'), assignees: [] },
+      ]),
+    );
+
+    await rearmAnchoredWaits('job', JOB_ID);
+
+    expect(mockPrisma.workflowEnrollment.updateMany).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  // S8 §2 (A4, RATIFIED): "re-parks when that one moves" — the multi-visit half of the WAIT
+  // contract. The enrollment was originally pinned to visit-1's date (occurrence_key =
+  // OLD_START), but by the time this job's reschedule fires rearmAnchoredWaits, visit-1 has
+  // been pushed WAY out and a DIFFERENT visit (visit-2) is now the soonest upcoming one. Because
+  // context.ts re-resolves resolveNextJobVisit over the live set on every load (never persists
+  // "which visit"), rearm must re-park against visit-2 — proving the anchor tracks whichever
+  // visit is next, not whichever visit was next when the enrollment was created.
+  //
+  // resolveNextJobVisit's "upcoming" filter has no injectable clock (defaults to `new Date()`,
+  // exactly like syncJobFromVisits's own caller) — so the visits that must win the "upcoming"
+  // race are built off REAL Date.now(), matching the established convention for this exact
+  // constraint (job-visits.test.ts's past/future fixtures; enrollment.anchoredWait.test.ts's
+  // multi-visit park test above).
+  it('re-parks against a DIFFERENT visit than the one it was pinned to when that visit is now the soonest upcoming one', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const pastVisit = new Date(Date.now() - 2 * DAY_MS); // visit-3: already elapsed
+    const pushedOut = new Date(Date.now() + 30 * DAY_MS); // visit-1: originally pinned, now pushed out
+    const newSoonest = new Date(Date.now() + 5 * DAY_MS); // visit-2: now the soonest upcoming
+    mockPrisma.workflowEnrollment.findMany.mockResolvedValueOnce([jobEnrollmentRow()]);
+    mockPrisma.job.findFirst.mockResolvedValueOnce(
+      jobRowWithVisits([
+        jobLiveVisit('visit-1', pushedOut),
+        jobLiveVisit('visit-2', newSoonest),
+        jobLiveVisit('visit-3', pastVisit),
+      ]),
+    );
+
+    await rearmAnchoredWaits('job', JOB_ID);
+
+    expect(mockPrisma.workflowEnrollment.updateMany).toHaveBeenCalledTimes(1);
+    const call = mockPrisma.workflowEnrollment.updateMany.mock.calls[0][0];
+    expect(call.data.resume_at.getTime()).toBe(newSoonest.getTime() - OFFSET * 60_000);
+    expect(call.data.occurrence_key).toBe(newSoonest.toISOString());
     expect(mockExecute).not.toHaveBeenCalled();
   });
 });

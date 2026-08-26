@@ -19,7 +19,7 @@ import { screen, waitFor } from '@testing-library/react';
 import api from '@/lib/axios';
 import { useAuthStore } from '@/stores/auth.store';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { buildAbility } from '@/lib/ability';
 
 const JOB_ID = 'j0000000-0000-0000-0000-000000000001';
@@ -43,7 +43,7 @@ const adminAbility = buildAbility([{ action: 'manage', subject: 'all' }]);
 const BASE_JOB = {
   id: JOB_ID,
   job_number: 'J00042',
-  status: 'UNASSIGNED',
+  status: 'UNSCHEDULED',
   scope_notes: null,
   estimated_duration: null,
   completion_notes: null,

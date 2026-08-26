@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import type { ReportDef } from './report-catalog';
+import type { ReportDef } from '@/lib/reports/report-catalog';
 
 /**
  * One report tile in the Reports landing grid. Routes to its stub page.

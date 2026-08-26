@@ -28,7 +28,9 @@ import {
   shortTime,
 } from "@/components/communication/phone/shared";
 import { CallDetailDrawer } from "@/components/communication/phone/CallsView";
+import { agentMatchesId } from "@/components/communication/phone/useCallsPipeline";
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 export function PerformanceView({
   calls,
@@ -158,7 +160,7 @@ export function PerformanceView({
         </table>
         <div className="border-t border-border bg-background-light px-3 py-2 text-[10px] italic text-text-secondary">
           Human CSRs and the AI receptionist are scored on one yardstick — booking
-          rate, sentiment, script adherence, and attributed revenue — per PRD §4 / R05.
+          rate, sentiment, script adherence, and attributed revenue.
         </div>
       </section>
 
@@ -199,8 +201,12 @@ function AgentDetailDrawer({
   onToast: (m: string) => void;
 }) {
   const { data: customers = [] } = usePhoneCustomers();
+  const tz = useScheduleTimezone();
+  // A real call's answeredBy.id is the ServWave USER id, not this row's own
+  // primary key - comparing them directly is why this drawer listed zero calls
+  // for every agent regardless of what ingest resolved.
   const handled = calls
-    .filter((c) => c.answeredBy.id === agent.id)
+    .filter((c) => agentMatchesId(agent, c.answeredBy.id))
     .sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
 
   return (
@@ -282,7 +288,7 @@ function AgentDetailDrawer({
                             {cust?.name ?? fmtPhone(partyNumber(c))}
                           </span>
                           <span className="block truncate text-[11px] text-text-secondary">
-                            {dayLabel(c.startedAt)} · {shortTime(c.startedAt)}
+                            {dayLabel(c.startedAt, tz)} · {shortTime(c.startedAt, tz)}
                             {c.disposition
                               ? ` · ${DISPOSITION_LABELS[c.disposition]}`
                               : ""}

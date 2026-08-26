@@ -266,7 +266,7 @@ export const WiderDialog: Story = {
     icon: 'calendar',
     title: 'Reschedule Job J00042?',
     description: 'J00042',
-    confirmLabel: 'Confirm & Notify',
+    confirmLabel: 'Confirm reschedule',
     className: 'max-w-md',
     children: (
       <div className="rounded-lg bg-background-light p-4">

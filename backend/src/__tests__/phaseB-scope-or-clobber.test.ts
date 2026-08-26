@@ -91,7 +91,7 @@ describe('GET /api/leads (LIST) — multi-read scope OR survives a search OR (Is
     expect(res.status).toBe(200);
     const where = whereOf(mockLead.lead.findMany);
     // The scope's two ownership arms must BOTH still be present somewhere in the tree…
-    expect(deepHas(where, 'walkthroughs')).toBe(true);
+    expect(deepHas(where, 'visits')).toBe(true);
     expect(deepHas(where, 'lead_assignees')).toBe(true);
     // …AND the search clauses must also be present (proving neither OR clobbered the other).
     expect(deepHas(where, 'service_request')).toBe(true);
@@ -101,7 +101,7 @@ describe('GET /api/leads (LIST) — multi-read scope OR survives a search OR (Is
     if (Array.isArray(where.OR)) {
       const topOr = where.OR as Record<string, unknown>[];
       const isPureSearch = topOr.every((c) => 'service_request' in c || 'customer' in c);
-      expect(isPureSearch && !deepHas({ AND: where.AND }, 'walkthroughs')).toBe(false);
+      expect(isPureSearch && !deepHas({ AND: where.AND }, 'visits')).toBe(false);
     }
   });
 
@@ -117,7 +117,7 @@ describe('GET /api/leads (LIST) — multi-read scope OR survives a search OR (Is
     const where = whereOf(mockLead.lead.findMany);
     // No search → scope OR stays as the plain top-level OR (the cheap path).
     expect(Array.isArray(where.OR)).toBe(true);
-    expect(deepHas(where, 'walkthroughs')).toBe(true);
+    expect(deepHas(where, 'visits')).toBe(true);
     expect(deepHas(where, 'lead_assignees')).toBe(true);
   });
 });

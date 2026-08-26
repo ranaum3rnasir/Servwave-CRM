@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_CUSTOMERS_SORTING, columns } from '@/pages/CustomersPage';
+import { columns } from '@/pages/CustomersPage';
+import { DEFAULT_CUSTOMERS_SORTING } from '@/lib/customers/customersSorting';
 
 // Issue #420: Customers list must default to NEWEST customers first.
 // The default sort token must also match the backend allowlist

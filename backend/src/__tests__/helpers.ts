@@ -133,6 +133,12 @@ export function mockAuthAs(userKey: TestUserKey, orgOverrides: Partial<typeof TE
   // exercises overrides re-mocks userPermissionOverride.findMany itself.
   (prisma.userPermissionOverride.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
+  // Multi-visit S1: booking a visit allocates its number via MAX(visit_seq). Same reasoning as the
+  // override default above - a suite whose beforeEach calls vi.resetAllMocks() wipes setup.ts's
+  // implementation, and an aggregate resolving to undefined 500s every scheduling route instead of
+  // failing somewhere legible. "No visits yet" is the right default for a fresh fixture.
+  (prisma.visit.aggregate as ReturnType<typeof vi.fn>).mockResolvedValue({ _max: { visit_seq: null } });
+
   return { user };
 }
 
@@ -298,14 +304,14 @@ export const LEAD_FIXTURE = {
   commission_owner_id: TEST_USERS.sales.id,
   commission_owner: { id: TEST_USERS.sales.id, first_name: 'Test', last_name: 'Sales', email: 'sales@test.com' },
   lead_assignees: [{ user_id: TEST_USERS.sales.id }],
-  walkthrough_performers: [],
+  visit_assignees: [],
   walkthrough_customer_email_sent_at: null,
   // Walkthrough-as-entity redesign, PR-B2: defensive default for the leadListSelect/
   // leadDetailSelect `walkthroughs` relation the SELECT-site fix now reads (resolveCurrentWalkthrough
   // treats an absent/empty array as "no current visit", same as a fresh pre-redesign lead with every
   // legacy walkthrough_* column null). Individual tests override with real Walkthrough rows via
-  // `mockPrisma.walkthrough.findFirst`/`findMany` as needed - this is only a safe empty default.
-  walkthroughs: [],
+  // `mockPrisma.visit.findFirst`/`findMany` as needed - this is only a safe empty default.
+  visits: [],
   estimates: [],
 };
 
@@ -421,7 +427,7 @@ export const JOB_FIXTURE = {
   service_location_id: LOCATION_FIXTURE.id,
   estimate_id: ESTIMATE_APPROVED_FIXTURE.id,
   amount_invoiced: 0,
-  status: 'UNASSIGNED',
+  status: 'UNSCHEDULED',
   scope_notes: null,
   scheduled_start: null,
   scheduled_end: null,
@@ -441,7 +447,11 @@ export const JOB_FIXTURE = {
     email: 'john@doe.com',
     phone: '5551234567',
   },
+  // Multi-visit S8 (D6): crew lives on the VISIT. `assignees` survives as the payload key the
+  // controller DERIVES from `visits`, so both are present here - reads of the wire key keep
+  // working, and any select that asks for the relation gets the relation.
   assignees: [],
+  visits: [] as Array<Record<string, unknown>>,
   service_location: {
     id: LOCATION_FIXTURE.id,
     address_line1: '123 Main St',

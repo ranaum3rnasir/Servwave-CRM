@@ -33,8 +33,7 @@ import { ArrowLeft } from 'lucide-react';
 import { formatPhoneInput, extractApiError } from '@/lib/utils';
 import { buildCreateJobPayload } from '@/lib/job-create-payload';
 import { createJobFormSchema, type CreateJobFormData as CreateFormData } from '@/lib/job-create-schema';
-import { TimeCombobox } from '@/components/form/TimeCombobox';
-import { DatePicker } from '@/components/form/DatePicker';
+import { ScheduleTimeFields } from '@/components/schedule/ScheduleTimeFields';
 import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 // ─── Types ───────────────────────────────────────────
@@ -425,44 +424,22 @@ function CreateJobForm({
               </div>
 
               {showSchedule && (
-                <>
-                  <div className="flex gap-3">
-                    <FormField label="Start Date">
-                      <DatePicker
-                        aria-label="Start Date"
-                        className="w-[180px]"
-                        value={form.watch('scheduled_date') || ''}
-                        onChange={(v) => form.setValue('scheduled_date', v, { shouldDirty: true })}
-                      />
-                    </FormField>
-                    <FormField label="Start Time">
-                      <TimeCombobox
-                        aria-label="Start Time"
-                        className="w-[140px]"
-                        value={form.watch('scheduled_time') || ''}
-                        onChange={(v) => form.setValue('scheduled_time', v, { shouldDirty: true })}
-                      />
-                    </FormField>
-                  </div>
-                  <div className="flex gap-3">
-                    <FormField label="End Date">
-                      <DatePicker
-                        aria-label="End Date"
-                        className="w-[180px]"
-                        value={form.watch('scheduled_end_date') || ''}
-                        onChange={(v) => form.setValue('scheduled_end_date', v, { shouldDirty: true })}
-                      />
-                    </FormField>
-                    <FormField label="End Time">
-                      <TimeCombobox
-                        aria-label="End Time"
-                        className="w-[140px]"
-                        value={form.watch('scheduled_end_time') || ''}
-                        onChange={(v) => form.setValue('scheduled_end_time', v, { shouldDirty: true })}
-                      />
-                    </FormField>
-                  </div>
-                </>
+                /* Same fields, same wording as the scheduler board and the job dialog -
+                   the four form values are just where this page stores them. */
+                <ScheduleTimeFields
+                  value={{
+                    date: form.watch('scheduled_date') || '',
+                    startTime: form.watch('scheduled_time') || '',
+                    endDate: form.watch('scheduled_end_date') || '',
+                    endTime: form.watch('scheduled_end_time') || '',
+                  }}
+                  onChange={(next) => {
+                    form.setValue('scheduled_date', next.date, { shouldDirty: true });
+                    form.setValue('scheduled_time', next.startTime, { shouldDirty: true });
+                    form.setValue('scheduled_end_date', next.endDate, { shouldDirty: true });
+                    form.setValue('scheduled_end_time', next.endTime, { shouldDirty: true });
+                  }}
+                />
               )}
             </div>
           </div>

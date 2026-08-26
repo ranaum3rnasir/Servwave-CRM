@@ -537,7 +537,7 @@ describe('POST /api/invoices/:id/line-items — RBAC (manage_lines)', () => {
       { action: 'read', subject: 'Invoice', conditions: OWN_VIA_JOB },
       { action: 'manage_lines', subject: 'Invoice', conditions: OWN_VIA_JOB },
     ] as any);
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null); // canAccessRow → false
     const res = await request(app)
       .post(`/api/invoices/${INVOICE_ID}/line-items`)
@@ -561,7 +561,7 @@ describe('POST /api/invoices/:id/line-items — RBAC (manage_lines)', () => {
 
   it('SALES gets 403 on a FOREIGN invoice, never mutates', async () => {
     mockAuthAs('sales');
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ salesId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ salesId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null);
     const res = await request(app)
       .post(`/api/invoices/${INVOICE_ID}/line-items`)
@@ -656,7 +656,7 @@ describe('DELETE /api/invoices/:id/line-items/:lineId — delete (manage_lines)'
     setupTransaction();
     mockAuthAs('technician');
     grantTech();
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null);
     res = await request(app)
       .delete(`/api/invoices/${INVOICE_ID}/line-items/${LINE_ID}`)
@@ -680,7 +680,7 @@ describe('DELETE /api/invoices/:id/line-items/:lineId — delete (manage_lines)'
     clearPermissionCache();
     setupTransaction();
     mockAuthAs('sales');
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ salesId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ salesId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null);
     res = await request(app)
       .delete(`/api/invoices/${INVOICE_ID}/line-items/${LINE_ID}`)
@@ -806,7 +806,7 @@ describe('PATCH /api/invoices/:id/line-items/:lineId — edit line (update Invoi
       { action: 'read', subject: 'Invoice', conditions: OWN_VIA_JOB },
       { action: 'update', subject: 'Invoice', conditions: OWN_VIA_JOB },
     ] as any);
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null); // canAccessRow → false
 
     const res = await request(app)
@@ -1357,7 +1357,7 @@ describe('PATCH /api/invoices/:id/line-items/reorder — reorder (update Invoice
       { action: 'read', subject: 'Invoice', conditions: OWN_VIA_JOB },
       { action: 'update', subject: 'Invoice', conditions: OWN_VIA_JOB },
     ] as any);
-    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99555555-0224-9999-9999-995555550224' }));
+    mockPrisma.invoice.findUnique.mockResolvedValue(invoiceRow({ techId: '99999999-9999-9999-9999-999999999999' }));
     mockPrisma.invoice.findFirst.mockResolvedValue(null); // canAccessRow → false
 
     const res = await request(app)

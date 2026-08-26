@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
 import { buildAbility } from '@/lib/ability';
-import SchedulePage from '@/pages/SchedulePage';
+import SchedulePage from '@/pages/v2/schedule/SchedulePage';
 
 // Issue #369 — the Schedule tab's department filter dropdown gains a
 // "+ Add department" option (ADMIN-gated, mirrors POST /api/departments) that

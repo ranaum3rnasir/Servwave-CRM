@@ -17,11 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import type { AppAction, AppSubject } from '@/lib/ability';
 
-export interface SettingsSaver {
-  save: () => Promise<void> | void;
-  discard: () => void;
-  isDirty: boolean;
-}
+import type { SettingsSaver } from '@/lib/settings/types';
 
 interface SettingsCtx {
   registerSaver: (fns: SettingsSaver) => void;

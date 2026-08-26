@@ -28,7 +28,7 @@ import { ChartCard } from '@/components/charts';
 import { token } from '@/design-system';
 import { formatCurrencyWhole } from '@/lib/utils';
 import { exportCsvFile } from '@/lib/csv';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { ReportToolbar } from './_shared';
 

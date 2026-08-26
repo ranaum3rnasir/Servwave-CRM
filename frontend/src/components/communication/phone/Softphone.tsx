@@ -21,6 +21,7 @@ import {
 import type { Contact, PhoneCustomer } from "@/lib/api/communication";
 import type { DialerEntityContext } from "@/stores/dialer.store";
 import { useCtmSoftphone, type IncomingCallInfo } from "@/lib/communication/useCtmSoftphone";
+import type { SoftphoneFault } from "@/lib/communication/ctmSoftphone";
 import { BROWSER_INBOUND_ANSWER_ENABLED } from "@/lib/communication/ctmSoftphone";
 import { useMyOutboundNumber } from "@/lib/api/myOutboundNumber";
 import { IncomingCallCard } from "@/pages/phone/IncomingCallCard";
@@ -43,7 +44,7 @@ import { IncomingCallCard } from "@/pages/phone/IncomingCallCard";
 //    `IncomingCallCard` (Task C2) and answers/hangs up on the ACTUAL CTM
 //    device, not local state. `Softphone` stays the sole call site allowed to
 //    boot the device (Task A4's regression guard), so this lives here rather
-//    than in a second `useCtmSoftphone` instance in `PhoneShell`.
+//    than in a second `useCtmSoftphone` instance in `PhoneTabPage`.
 
 type CallState = "idle" | "dialing" | "ringing_in" | "active" | "placed";
 
@@ -110,7 +111,7 @@ type Props = {
   /** Fired when the call ends (hang up / decline) — lets a host popup close. */
   onEnded?: () => void;
   /** Device-boot surface (Task A3 — passed through verbatim to
-   *  `useCtmSoftphone`). The dedicated `/phone` tab (`PhoneShell`) is the
+   *  `useCtmSoftphone`). The dedicated `/phone` tab (`PhoneTabPage`) is the
    *  ONLY caller that passes `'phone-tab'`, making it the sole CTM device
    *  owner; every other host (the main-app GlobalDialer popup,
    *  ActiveCallPopup) omits this, defaulting to `'inline'` — unchanged,
@@ -118,11 +119,29 @@ type Props = {
   surface?: 'phone-tab' | 'inline';
   /** Task B3 — a per-call caller-ID override (the `/phone` tab's from-number
    *  picker). A CTM `ctm_number_id` ("TPN…") the caller explicitly picked
-   *  from PhoneShell's allow-list; when set (non-empty), it wins over the
-   *  resolved default (Task B2) for the NEXT call only. `PhoneShell` is the
+   *  from PhoneTabPage's allow-list; when set (non-empty), it wins over the
+   *  resolved default (Task B2) for the NEXT call only. `PhoneTabPage` is the
    *  sole caller that passes this — every other host omits it, keeping the
    *  resolved-default behavior unchanged. */
   callerIdOverride?: string;
+};
+
+/**
+ * The one place a device fault becomes words. Every string is ServWave's own —
+ * the naming boundary in CLAUDE.md means the telephony vendor is never named in
+ * anything a user can see, so these describe the SYMPTOM and the REMEDY, never
+ * the provider or its internals ("station check", "device lock", an account id).
+ * Each says what the user can actually do about it:
+ *   locked-out    → the other tab is theirs; closing it is the whole fix.
+ *   station-check → the browser wants a microphone check we cannot surface
+ *                   inside our own UI, so a reload into the vendor-free path is
+ *                   the honest ask.
+ *   unknown       → we genuinely do not know; say so rather than guess.
+ */
+const SOFTPHONE_FAULT_TEXT: Record<SoftphoneFault, string> = {
+  "locked-out": "Phone active in another tab",
+  "station-check": "Audio check required",
+  unknown: "Phone unavailable — reload to retry",
 };
 
 export function Softphone({
@@ -209,6 +228,21 @@ export function Softphone({
   // nothing. No-op on the bridge/tel path (officeSoftphone null).
   const softphoneConnecting = !!officeSoftphone && !officeSoftphone.ready;
 
+  // Slice 3 — why it is not ready, when that is knowable. Null on the bridge/tel
+  // path (no handle) and null while the device is merely still booting, so
+  // "Connecting…" remains the normal pre-ready state and a fault only ever
+  // REPLACES it once one exists.
+  const softphoneFault: SoftphoneFault | null = officeSoftphone?.fault ?? null;
+
+  // Every "can we dial?" gate reads this rather than `softphoneConnecting`.
+  // The `!!softphoneFault` half is REDUNDANT TODAY and kept on purpose:
+  // officeSoftphone.ts guarantees ready and fault are never both set, so a
+  // faulted handle already reports ready=false and is already blocked. It is
+  // defence-in-depth against that invariant being broken two modules away —
+  // the failure it prevents (a Call button that looks live while the pill says
+  // the phone is unavailable) is worse than the line costs.
+  const softphoneBlocked = softphoneConnecting || !!softphoneFault;
+
   // Task C2 — subscribe to the REAL device ring (Task C1's onIncoming).
   // Depends on `hasOfficeSoftphone` (a stable boolean), not `officeSoftphone`
   // itself: the hook returns a fresh object every render, so depending on the
@@ -242,7 +276,7 @@ export function Softphone({
     resolvedOutboundNumber && !("none" in resolvedOutboundNumber)
       ? resolvedOutboundNumber.ctm_number_id
       : undefined;
-  // Task B3 — an explicit per-call pick (PhoneShell's caller-ID picker) wins
+  // Task B3 - an explicit per-call pick (PhoneTabPage's caller-ID picker) wins
   // over the resolved default; falls back to it when unset (every other host
   // of <Softphone/> never passes callerIdOverride, so this is a no-op there).
   const fromTpnId = callerIdOverride || resolvedFromTpnId;
@@ -479,13 +513,14 @@ export function Softphone({
   /** Place a REAL outbound call (CTM click-to-call). The webhook is the source
    *  of truth for the CallSession row — success lands in the terminal "placed"
    *  state (your phone rings first); there is no polling and no fake connect.
-   *  Fix B: guarded by `softphoneConnecting` so EVERY entry point (Call button,
+   *  Fix B: guarded by `softphoneBlocked` so EVERY entry point (Call button,
    *  autoCallNumber, global/keyboard Enter) is honestly blocked while the
-   *  shared device is still booting — not just the Call button's `disabled`
-   *  prop, which a keyboard-triggered call bypasses entirely. */
+   *  shared device is still booting, or has reported a fault — not just the
+   *  Call button's `disabled` prop, which a keyboard-triggered call bypasses
+   *  entirely. */
   function startOutbound(raw?: string) {
     const num = (raw ?? dial).trim();
-    if (!num || placeCall.isPending || softphoneConnecting) return;
+    if (!num || placeCall.isPending || softphoneBlocked) return;
     const e164 = num.startsWith("+") ? num : `+1${num.replace(/\D/g, "")}`;
     // Entity attribution (E2): the placed call is attributed to the entity this
     // dialer was opened from, whatever number ends up dialed (editing to reach a
@@ -681,9 +716,11 @@ export function Softphone({
                   ? "Calling…"
                   : state === "ringing_in"
                     ? "Ringing"
-                    : softphoneConnecting
-                      ? "Connecting…"
-                      : "Ready"}
+                    : softphoneFault
+                      ? SOFTPHONE_FAULT_TEXT[softphoneFault]
+                      : softphoneConnecting
+                        ? "Connecting…"
+                        : "Ready"}
         </span>
       </div>
 
@@ -802,7 +839,7 @@ export function Softphone({
             <div className="flex items-center gap-2">
               <button
                 onClick={() => startOutbound()}
-                disabled={!dial.trim() || placeCall.isPending || softphoneConnecting}
+                disabled={!dial.trim() || placeCall.isPending || softphoneBlocked}
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-success py-2 text-sm font-semibold text-on-fill shadow-sm transition hover:bg-success disabled:cursor-not-allowed disabled:bg-background-light disabled:text-text-secondary"
               >
                 <Phone className="h-4 w-4" /> Call

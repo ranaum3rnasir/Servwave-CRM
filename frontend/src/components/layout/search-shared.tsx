@@ -4,7 +4,7 @@ import { STATUS_REGISTRY, STATUS_INTENT_FILL, type StatusDomain } from '@/design
 
 export interface SearchResult {
   id: string;
-  entity_type: 'job' | 'customer' | 'lead' | 'estimate' | 'service-plan';
+  entity_type: 'job' | 'customer' | 'lead' | 'estimate' | 'service-plan' | 'calendar-entry';
   title: string;
   subtitle?: string | null;
   date?: string | null;
@@ -23,6 +23,12 @@ export interface SearchResponse {
     invoices: SearchResult[];
     /** Schedule scope only - the board's third schedulable type. Empty elsewhere. */
     servicePlans: SearchResult[];
+    /**
+     * Schedule scope only (Slice 09) - the board's fourth schedulable type (user-facing
+     * "Event"). Matched on title only (spec §3 - an entry carries no record number). Empty
+     * elsewhere, and empty (not missing) for a caller without `read CalendarEntry`.
+     */
+    calendarEntries: SearchResult[];
   };
 }
 
@@ -34,11 +40,15 @@ export interface SearchResponse {
  * Customers have no status, so they never resolve a dot.
  */
 const RESULT_DOMAIN: Record<SearchResult['entity_type'], StatusDomain | null> = {
-  job:            'job',
-  customer:       null,
-  lead:           'lead',
-  estimate:       'estimate',
-  'service-plan': 'servicePlan',
+  job:              'job',
+  customer:         null,
+  lead:             'lead',
+  estimate:         'estimate',
+  'service-plan':   'servicePlan',
+  // An Event carries no status (spec §3) - `result.status` is never set for this entity_type,
+  // so statusDotClass/statusLabel are never called with it in practice. Present anyway so this
+  // Record stays exhaustive over SearchResult['entity_type'].
+  'calendar-entry': null,
 };
 
 /**
@@ -100,8 +110,8 @@ export function statusDotClass(entityType: SearchResult['entity_type'], status: 
  * series and are defined in that same work-package file.
  */
 export function statusLabel(entityType: SearchResult['entity_type'], status: string): string {
-  // Display-only rename (job scheduling state) - the enum VALUE stays UNASSIGNED.
-  if (status === 'UNASSIGNED') return 'Unscheduled';
+  // Display-only rename (job scheduling state) - the enum VALUE stays UNSCHEDULED.
+  if (status === 'UNSCHEDULED') return 'Unscheduled';
   const domain = RESULT_DOMAIN[entityType];
   const label =
     domain === 'job' || domain === 'lead' ? STATUS_REGISTRY[domain][status]?.label : undefined;

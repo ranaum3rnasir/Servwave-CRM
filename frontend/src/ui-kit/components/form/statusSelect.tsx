@@ -27,12 +27,48 @@ export interface StatusSelectProps<T extends string = string> {
 }
 
 /**
- * Status picker whose options *are* the badge the table will render.
+ * The dot that carries a status's tone in the list.
  *
- * The alternative - a coloured dot beside plain text - asks the user to hold a
- * legend in their head, and it means one value speaks two visual languages: a
- * solid pill in the cell, a small dot in the control. Rendering the real chip
- * removes the translation step entirely.
+ * Written out one class per tone rather than composed from the tone name,
+ * because Tailwind scans source TEXT: a class assembled at runtime never
+ * appears in the source, no rule is generated, and the dot renders invisible.
+ */
+const DOT: Record<NonNullable<BadgeProps["variant"]>, string> = {
+  green: "bg-status-green",
+  amber: "bg-status-amber",
+  red: "bg-status-red",
+  blue: "bg-status-blue",
+  slate: "bg-status-slate",
+  purple: "bg-status-purple",
+  softGreen: "bg-status-green",
+  softAmber: "bg-status-amber",
+  softRed: "bg-status-red",
+  softBlue: "bg-status-blue",
+  softNeutral: "bg-subtle-foreground",
+  softPurple: "bg-status-purple",
+  outline: "bg-subtle-foreground",
+};
+
+/**
+ * Status picker: a dot and a label per option, a check on the current one.
+ *
+ * THIS USED TO RENDER THE BADGE ITSELF in every row, on the reasoning that a
+ * chip in the control and a chip in the table speak one visual language and
+ * spare the reader a legend. That argument holds for the TRIGGER, where one
+ * chip sits alone, and breaks down in the LIST: six saturated solid pills
+ * stacked in a panel are six things shouting at once, none of them the one you
+ * have selected, and a chip earns its colour by being the only one in view.
+ * The lead detail page shipped that version and it was the first thing called
+ * out in review.
+ *
+ * So the trigger keeps the chip - one status, in the language the table uses -
+ * and the list drops to a dot plus a label, which carries the same tone at a
+ * weight that lets six sit together. The CURRENT value is marked by a check,
+ * which is what a picker is supposed to do and what a list of chips never did.
+ *
+ * `pages/v2/_shared/statusMenu.tsx` is the same design on a DropdownMenu, for
+ * detail-page headers where the control is an action rather than a form field.
+ * Keep the two looking alike.
  *
  * Reserve the solid treatment for status, the field that defines a record.
  * Priority, category and similar qualifiers should use the soft Badge variants
@@ -61,10 +97,13 @@ function StatusSelect<T extends string = string>({
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
-          // Text stays in the item for type-ahead - Radix matches on
-          // textContent, and a badge-only item would be unsearchable.
-          <SelectItem key={option.value} value={option.value} textValue={option.label} className="py-1.5">
-            <Badge variant={option.tone}>{option.label}</Badge>
+          // `textValue` keeps type-ahead working - Radix matches on it rather
+          // than on the rendered children.
+          <SelectItem key={option.value} value={option.value} textValue={option.label} className="gap-2.5">
+            <span className={cn("size-2 shrink-0 rounded-full", DOT[option.tone])} aria-hidden />
+            <span className={cn("flex-1", option.value === value && "font-semibold")}>
+              {option.label}
+            </span>
           </SelectItem>
         ))}
       </SelectContent>

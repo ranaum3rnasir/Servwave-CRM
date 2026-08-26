@@ -10,7 +10,8 @@ import type { SchedulableEvent } from '@/components/schedule/scheduleModel';
 import { asWallClock } from '@/lib/schedule-tz';
 
 const twoCrewJob: SchedulableEvent = {
-  id: 'job-1',
+  boardId: 'job-1',
+  parentId: 'job-1',
   type: 'job',
   number: 'J00043',
   title: 'Rooftop Unit Swap',
@@ -23,7 +24,8 @@ const twoCrewJob: SchedulableEvent = {
 };
 
 const soloJob: SchedulableEvent = {
-  id: 'job-2',
+  boardId: 'job-2',
+  parentId: 'job-2',
   type: 'job',
   number: 'J00044',
   title: 'Filter Replacement',
@@ -32,6 +34,23 @@ const soloJob: SchedulableEvent = {
   ownerId: null,
   start: asWallClock(new Date(2026, 5, 10, 13, 0)),
   end: asWallClock(new Date(2026, 5, 10, 14, 0)),
+  raw: {},
+};
+
+// Slice 06 (calendar-entries spec §3, ADR 0002) — an entry naming Alice as a USER participant,
+// with an empty crew: it must place in Alice's column via `participantUserIds`, not `crew`.
+const entryNamingAlice: SchedulableEvent = {
+  boardId: 'ce-1',
+  parentId: 'entry-1',
+  type: 'calendar-entry',
+  number: '',
+  title: 'Team Lunch',
+  customer: '',
+  crew: [],
+  participantUserIds: ['m-alice'],
+  ownerId: null,
+  start: asWallClock(new Date(2026, 5, 10, 9, 0)),
+  end: asWallClock(new Date(2026, 5, 10, 11, 0)),
   raw: {},
 };
 
@@ -90,9 +109,34 @@ describe('TechnicianGridView — D1 multi-column rendering', () => {
   });
 });
 
+describe('TechnicianGridView — slice 06 participant column placement (ADR 0002)', () => {
+  it("an entry naming Alice as a participant renders in exactly one column (Alice's), on the correct day", () => {
+    renderGrid([entryNamingAlice]);
+    // D1's own convention in this file: column membership is proven by occurrence COUNT (see
+    // "renders a single-crew job in exactly one column" above) — two members, one match means
+    // it rendered in Alice's column and not Bob's.
+    expect(screen.getAllByText('Team Lunch')).toHaveLength(1);
+  });
+
+  it('an entry naming nobody (no participants, empty crew) renders in no member column', () => {
+    renderGrid([{ ...entryNamingAlice, participantUserIds: [] }]);
+    expect(screen.queryByText('Team Lunch')).not.toBeInTheDocument();
+  });
+
+  it('the participant card shows no red fill and no red outline (ADR 0002 — no crew, no conflict)', () => {
+    renderGrid([entryNamingAlice], new Set([entryNamingAlice.boardId]));
+    const card = screen.getByText('Team Lunch').closest('[data-board-id="ce-1"]');
+    expect(card).not.toBeNull();
+    expect(card!.className).not.toMatch(/bg-danger/);
+    expect(card!.className).not.toMatch(/border-danger/);
+    expect(screen.queryByText('needs crew')).not.toBeInTheDocument();
+    expect(screen.queryByText(/double-booked/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('TechnicianGridView — the two reds (D7 red outline; state 4 is structural)', () => {
   it("a conflicted 2-crew event shows the double-booked treatment in BOTH members' columns", () => {
-    renderGrid([twoCrewJob], new Set([twoCrewJob.id]));
+    renderGrid([twoCrewJob], new Set([twoCrewJob.boardId]));
     expect(screen.getAllByText(/double-booked/i)).toHaveLength(2);
   });
 
@@ -166,7 +210,8 @@ describe('TechnicianGridView — type accents (META)', () => {
 
   it('a walkthrough card carries the META warning accent (legend parity), not the legacy cyan', () => {
     const walkthrough: SchedulableEvent = {
-      id: 'wt-1',
+      boardId: 'wt-1',
+      parentId: 'lead-1',
       type: 'walkthrough',
       number: 'L00012',
       title: 'Walkthrough',

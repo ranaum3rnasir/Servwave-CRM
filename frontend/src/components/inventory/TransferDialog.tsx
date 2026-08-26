@@ -8,7 +8,6 @@ import { SelectField } from "@/components/form/SelectField";
 import { FormField } from "@/components/patterns/FormField";
 import { EmptyState } from "@/components/ui/empty-state";
 import {
-  useInventoryItems,
   useInventoryJobs,
   usePurchaseOrders,
   type Item,
@@ -22,6 +21,13 @@ import { formatExactDay } from "@/lib/format-date";
 type Props = {
   open: boolean;
   onClose: () => void;
+  /** The catalog the PARENT is showing. Deliberately a prop, not a
+   *  `useInventoryItems()` call of our own: the page fetches with
+   *  `useInventoryItems(showArchived)`, so a self-fetch here lands on a
+   *  different query key and a different cache. With "Show archived" on, the
+   *  row the user opened is then absent from our list and cannot be resolved
+   *  at all. */
+  items: Item[];
   initialItemId?: string;
   locations: Location[];
   onSubmit: (payload: {
@@ -72,13 +78,13 @@ export function TransferDialog({
   open,
   onClose,
   initialItemId,
+  items,
   locations,
   onSubmit,
   onBulkStageTransfer,
   errorMessage,
   submitting,
 }: Props) {
-  const { data: items = [] } = useInventoryItems();
   const { data: purchaseOrders = [] } = usePurchaseOrders();
   const { data: allJobs = [] } = useInventoryJobs();
 
@@ -135,8 +141,22 @@ export function TransferDialog({
       setQty("");
       setError(null);
     }
+    // The parent mounts this dialog unconditionally, so `initialItemId` was
+    // only ever read by the useState initializer - on the very first mount,
+    // when nothing is selected yet. Every later open kept whatever the latch
+    // effect below had parked on `itemId` (the first material item), which is
+    // why opening Transfer on a row showed a different item, 0 on-hand at
+    // every location and Max (0). Re-seed on the closed -> open edge, and
+    // clear the per-session location/quantity choices with it.
+    if (!wasOpen.current && open) {
+      setItemId(initialItemId ?? "");
+      setFromId("");
+      setToId("");
+      setQty("");
+      setError(null);
+    }
     wasOpen.current = open;
-  }, [open]);
+  }, [open, initialItemId]);
 
   // Reset bulk selection when PO/Job changes
   useEffect(() => {

@@ -81,6 +81,34 @@ function TopBarBrand({ className, mark, label, asChild, children, ...props }: To
   );
 }
 
+export interface TopBarWorkspaceProps extends React.ComponentProps<"div"> {
+  /** The organisation the signed-in user is currently working in. */
+  name: string;
+}
+
+/**
+ * The organisation's name, in the gap `TopBar` reserves for it between the
+ * brand and the search field.
+ *
+ * The brand says which product this is; without this the bar never says which
+ * organisation you are signed in to, which is the one thing a multi-tenant app
+ * cannot leave to inference. A hairline separates the two so "ServWave" and the
+ * company name do not read as one long wordmark.
+ *
+ * The caller decides whether there is a name to show at all - this renders what
+ * it is given rather than an empty slot, so a bar with no organisation loaded
+ * keeps the brand hard against the search field instead of holding a gap open
+ * for text that never arrives.
+ */
+function TopBarWorkspace({ className, name, ...props }: TopBarWorkspaceProps) {
+  return (
+    <div data-slot="topbar-workspace" className={cn("tb-workspace", className)} {...props}>
+      <span aria-hidden className="tb-div" />
+      <span className="tb-workspace-name">{name}</span>
+    </div>
+  );
+}
+
 export interface TopBarSearchProps extends React.ComponentProps<"input"> {
   shortcut?: string;
 }
@@ -168,13 +196,41 @@ export interface TopBarUserProps extends React.ComponentProps<"button"> {
   /** Background for the initials chip. Comes from the kit's avatar tint scale. */
   tint?: string;
   initials: string;
+  /**
+   * Organisation logo, shown INSTEAD of the initials chip.
+   *
+   * The chip is the app's one piece of tenant branding, so a company that has
+   * uploaded a logo gets it here rather than a generated tint. Falls back to
+   * the initials when there is no logo and, like the kit's Avatar, when the
+   * image fails to load - a broken-image glyph in the top bar is worse than
+   * the chip it replaced.
+   */
+  avatarSrc?: string;
+  /** Alternative text for `avatarSrc`. Required with it, so the logo is named. */
+  avatarAlt?: string;
 }
 
-function TopBarUser({ className, name, role, tint, initials, ...props }: TopBarUserProps) {
+function TopBarUser({
+  className, name, role, tint, initials, avatarSrc, avatarAlt, ...props
+}: TopBarUserProps) {
+  const [failed, setFailed] = React.useState(false);
+  const showLogo = Boolean(avatarSrc) && !failed;
+
   return (
     <button type="button" data-slot="topbar-user" className={cn("tb-user", className)} {...props}>
-      <span className="tb-avatar" style={{ backgroundColor: tint }} aria-hidden>
-        {initials}
+      {/* aria-hidden only while it is a chip of initials, which merely repeats
+          the name beside it. A logo carries its own alt text and is the org's
+          identity, not a decoration, so it stays in the accessibility tree. */}
+      <span
+        className="tb-avatar"
+        style={showLogo ? undefined : { backgroundColor: tint }}
+        aria-hidden={showLogo ? undefined : true}
+      >
+        {showLogo ? (
+          <img src={avatarSrc} alt={avatarAlt ?? ""} onError={() => setFailed(true)} />
+        ) : (
+          initials
+        )}
       </span>
       <span className="tb-user-meta">
         <span className="tb-user-name">{name}</span>
@@ -185,6 +241,6 @@ function TopBarUser({ className, name, role, tint, initials, ...props }: TopBarU
 }
 
 export {
-  TopBar, TopBarBrand, TopBarSearch, TopBarActions, TopBarAction,
+  TopBar, TopBarBrand, TopBarWorkspace, TopBarSearch, TopBarActions, TopBarAction,
   TopBarBadge, TopBarDivider, TopBarPill, TopBarUser,
 };

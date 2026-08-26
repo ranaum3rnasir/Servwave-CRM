@@ -37,14 +37,14 @@ import { Heading } from '@/components/ui/heading';
 import { SelectField } from '@/components/form/SelectField';
 import { DatePicker } from '@/components/form/DatePicker';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import {
   AGING_BUCKETS,
   type DateAnchor, type ConversionModel, type ReportFilters, type EstimateStatusKey,
   type RepRow, type DrillSelector, type AgingBucketKey, type Bucket,
-} from './estimate-conversion-logic';
-import { useEstimateConversionReport, useConversionDrilldown, type DrillResult } from './estimate-conversion-data';
+} from '@/lib/reports/estimate-conversion-logic';
+import { useEstimateConversionReport, useConversionDrilldown, type DrillResult } from '@/lib/reports/estimate-conversion-data';
 
 interface DrillState { selector: DrillSelector; title: string }
 

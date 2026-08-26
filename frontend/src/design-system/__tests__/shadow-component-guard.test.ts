@@ -119,8 +119,38 @@ function conceptsInName(name: string): Concept[] {
   return (Object.keys(CONCEPT_PRIMITIVES) as Concept[]).filter((c) => name.includes(c));
 }
 
+/**
+ * The kit's name for each legacy primitive, or null where it ships none.
+ *
+ * The v2 presentation layer composes `@/ui-kit/components/ui/*`, not
+ * `@/components/ui/*`. Both are shared primitives, so a v2 file building a
+ * dialog out of the kit's dialog is doing exactly what this guard asks for -
+ * but it read as a hand-rolled shadow, because the guard only knew one root.
+ *
+ * The workaround modules found was to declare with `function` and export at the
+ * bottom, dodging NAME_RE entirely. That silences the guard rather than
+ * satisfying it, and it was spreading: four modules had adopted it before this
+ * was fixed.
+ *
+ * Filenames differ between the two: the app is kebab-case, the kit is
+ * camelCase. `modal` and `toggle-group` map to null because the kit ships
+ * neither - a file named ...Modal is compliant via the kit's `dialog`, which
+ * the Modal concept already accepts.
+ */
+const KIT_PRIMITIVE: Record<string, string | null> = {
+  button: 'button',
+  dialog: 'dialog',
+  'confirm-dialog': 'confirmDialog',
+  switch: 'switch',
+  modal: null,
+  'toggle-group': null,
+};
+
 function importsPrimitive(code: string, primitive: string): boolean {
-  return new RegExp(`from\\s+['"]@/components/ui/${primitive}['"]`).test(code);
+  if (new RegExp(`from\\s+['"]@/components/ui/${primitive}['"]`).test(code)) return true;
+
+  const kitName = KIT_PRIMITIVE[primitive];
+  return !!kitName && new RegExp(`from\\s+['"]@/ui-kit/components/ui/${kitName}['"]`).test(code);
 }
 
 /** A JSX open/self-close of `tag`, e.g. `<Dialog>`/`<Dialog `/`<Dialog/>` -
@@ -186,6 +216,12 @@ const ALLOWLIST: AllowlistEntry[] = [
     file: 'components/workflows/AddStepButton.tsx',
     reason:
       "Popover-trigger control with three bespoke visual treatments (rail dot / dashed empty well / dashed inline chip) outside Button's variant vocabulary; composes Popover, not a hand-rolled dialog - not a duplicate of the Button primitive",
+  },
+  {
+    name: 'ConflictModal',
+    file: 'pages/v2/schedule/components/conflictModal.tsx',
+    reason:
+      'DELIBERATELY hand-rolled, not composing ui/dialog - documented at its one call site (SchedulePage.tsx): it can be set from inside an already-open EventEditor on a live 409, and EventEditor\'s own Dialog is gated `!conflictToast && !unscheduleConfirm` specifically so a Radix dialog is never mounted at the same tick as this overlay, avoiding a focus-lock fight between two Radix dialogs. Carries hand-rolled role="alertdialog"/aria-modal/aria-label and focus-in/focus-restore instead. Not a duplicate concept - a documented workaround for a real Radix limitation, same shape as the sibling "Nobody is assigned" and unschedule-confirm overlays in the same file (which predate this guard and are not separately-exported components).',
   },
 ];
 
@@ -281,5 +317,34 @@ describe('shadow-component-guard helpers (asserted examples)', () => {
       }
     `;
     expect(isCompliant(handRolled, 'ThingDialog')).toBe(false);
+  });
+
+  it('accepts the kit primitives, which the v2 layer composes instead of components/ui', () => {
+    const kitDialog = `
+      import { Dialog, DialogContent } from '@/ui-kit/components/ui/dialog';
+      export function ArchiveDialog() { return <Dialog><DialogContent /></Dialog>; }
+    `;
+    expect(isCompliant(kitDialog, 'ArchiveDialog')).toBe(true);
+
+    // camelCase in the kit, kebab-case in the app - the same primitive.
+    const kitConfirm = `
+      import { ConfirmDialog } from '@/ui-kit/components/ui/confirmDialog';
+      export function DeleteDialog() { return <ConfirmDialog />; }
+    `;
+    expect(isCompliant(kitConfirm, 'DeleteDialog')).toBe(true);
+
+    const kitSwitch = `
+      import { Switch } from '@/ui-kit/components/ui/switch';
+      export function NotifyToggle() { return <Switch />; }
+    `;
+    expect(isCompliant(kitSwitch, 'NotifyToggle')).toBe(true);
+
+    // Still catches the real thing: a kit IMPORT does not excuse a hand-rolled
+    // implementation, because the tag has to be rendered too.
+    const kitImportButHandRolled = `
+      import { Button } from '@/ui-kit/components/ui/button';
+      export function FakeDialog() { return <div role="dialog"><Button /></div>; }
+    `;
+    expect(isCompliant(kitImportButHandRolled, 'FakeDialog')).toBe(false);
   });
 });

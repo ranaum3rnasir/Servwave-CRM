@@ -26,13 +26,10 @@ export type JobStatusLabel =
   | 'Canceled';
 
 export const STATUS_LABEL: Record<string, JobStatusLabel> = {
-  UNASSIGNED: 'Submitted',
+  UNSCHEDULED: 'Submitted',
   SCHEDULED: 'In progress - Scheduled',
-  // Spec B1 (B-8): EN_ROUTE/ON_SITE/IN_PROGRESS previously all collapsed to 'In progress' --
-  // the report's own status column couldn't tell them apart. Distinct now; the report page's
-  // "in progress" KPI tile still folds all three back together (JobsReport.tsx).
-  EN_ROUTE: 'En route',
-  ON_SITE: 'On site',
+  // S4 (D17): EN_ROUTE and ON_SITE retired from JobStatus - being on the way and being on site
+  // are properties of a TRIP now, reported per visit rather than per job.
   IN_PROGRESS: 'In progress',
   COMPLETED: 'Done',
   CANCELLED: 'Canceled',

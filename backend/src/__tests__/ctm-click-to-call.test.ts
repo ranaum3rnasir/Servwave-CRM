@@ -20,7 +20,7 @@ const client = ctmClient as any;
 
 const OUT_BODY = {
   direction: 'out',
-  from_number: '(555) 555-0208',
+  from_number: '(551) 282-7064',
   to_number: '(555) 123-4567',
   status: 'ringing',
 };

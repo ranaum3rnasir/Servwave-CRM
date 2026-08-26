@@ -28,7 +28,7 @@ const MOCK_ORG = {
   state: 'NJ',
   postal_code: '07030',
   country: 'US',
-  email: 'info@example.com',
+  email: 'info@alphasecurityus.com',
   phone: null,
   website: null,
   logo_url: null,
@@ -232,7 +232,7 @@ describe('PATCH /api/organization — accepted_payment_methods (§4.5)', () => {
     expect(res.body.accepted_payment_methods).toEqual(['EXTERNAL_CARD', 'BANK_TRANSFER', 'CASH']);
   });
 
-  it('rejects CARD when Stripe charges are not enabled', async () => {
+  it('drops a client-sent CARD when Stripe charges are not enabled', async () => {
     (prisma.organization.findUnique as any).mockResolvedValue(NON_STRIPE_ORG);
 
     const res = await request(app)
@@ -240,17 +240,15 @@ describe('PATCH /api/organization — accepted_payment_methods (§4.5)', () => {
       .set(authHeader('admin'))
       .send({ accepted_payment_methods: ['CARD', 'EXTERNAL_CARD'] });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/card payments are not connected/i);
-    expect(res.body.error).not.toMatch(/stripe/i);
+    expect(res.status).toBe(200);
+    expect(res.body.accepted_payment_methods).toEqual(['EXTERNAL_CARD']);
   });
 
-  // Task 1.7 — the central regression this re-key exists to fix: a mid-onboarding org
-  // (Connect account created, so stripe_account_id is set) must NOT be able to enable CARD
-  // before Stripe has actually enabled charges on that account. Pre-1.7 the validator keyed
-  // off "stripe_account_id is non-null", which is true from the moment onboarding starts —
-  // this org would have wrongly been allowed to turn CARD on.
-  it('rejects CARD when the Stripe account exists but charges are not yet enabled (mid-onboarding)', async () => {
+  // Task 1.7 — a mid-onboarding org (Connect account created, so stripe_account_id is set)
+  // must NOT get CARD before Stripe has actually enabled charges on that account. Keying off
+  // "stripe_account_id is non-null" would be wrong: that is true from the moment onboarding
+  // starts. The resolver keys off stripe_charges_enabled, so a client-sent CARD is dropped.
+  it('drops a client-sent CARD when the account exists but charges are not yet enabled (mid-onboarding)', async () => {
     (prisma.organization.findUnique as any).mockResolvedValue(MID_ONBOARDING_ORG);
 
     const res = await request(app)
@@ -258,25 +256,28 @@ describe('PATCH /api/organization — accepted_payment_methods (§4.5)', () => {
       .set(authHeader('admin'))
       .send({ accepted_payment_methods: ['CARD', 'EXTERNAL_CARD'] });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/card payments are not connected/i);
-    expect(res.body.error).not.toMatch(/stripe/i);
+    expect(res.status).toBe(200);
+    expect(res.body.accepted_payment_methods).toEqual(['EXTERNAL_CARD']);
   });
 
-  it('rejects removing CARD once Stripe is integrated', async () => {
+  // The bug this resolver replaces a 400 for: the Settings page renders NO CARD toggle, yet
+  // PATCHes the whole array from the org snapshot it loaded. A snapshot fetched before
+  // charges went live has no CARD in it, so an unrelated edit (here: turning Venmo on) used
+  // to read as "disable Credit Card" and 400 a save the user never asked for. CARD is
+  // server-owned — it is re-derived from stripe_charges_enabled and survives regardless.
+  it('re-adds CARD when a stale client payload omits it (charges enabled)', async () => {
     (prisma.organization.findUnique as any).mockResolvedValue(STRIPE_ORG);
 
     const res = await request(app)
       .patch('/api/organization')
       .set(authHeader('admin'))
-      .send({ accepted_payment_methods: ['CHECK', 'BANK_TRANSFER'] });
+      .send({ accepted_payment_methods: ['CHECK', 'BANK_TRANSFER', 'VENMO'] });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/cannot be disabled once card payments are connected/i);
-    expect(res.body.error).not.toMatch(/stripe/i);
+    expect(res.status).toBe(200);
+    expect(res.body.accepted_payment_methods).toEqual(['CHECK', 'BANK_TRANSFER', 'VENMO', 'CARD']);
   });
 
-  it('accepts CARD when Stripe charges are enabled', async () => {
+  it('keeps CARD exactly once when the client also sent it (charges enabled)', async () => {
     (prisma.organization.findUnique as any).mockResolvedValue(STRIPE_ORG);
 
     const res = await request(app)
@@ -285,7 +286,7 @@ describe('PATCH /api/organization — accepted_payment_methods (§4.5)', () => {
       .send({ accepted_payment_methods: ['CARD', 'EXTERNAL_CARD', 'CHECK'] });
 
     expect(res.status).toBe(200);
-    expect(res.body.accepted_payment_methods).toEqual(['CARD', 'EXTERNAL_CARD', 'CHECK']);
+    expect(res.body.accepted_payment_methods).toEqual(['EXTERNAL_CARD', 'CHECK', 'CARD']);
   });
 
   it('rejects unknown payment method strings at the Zod layer', async () => {

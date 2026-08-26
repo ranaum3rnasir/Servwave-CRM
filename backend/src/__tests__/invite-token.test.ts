@@ -15,7 +15,7 @@ describe('invite-token', () => {
   it('rejects a tampered payload', () => {
     const token = signInviteToken(UID, EMAIL);
     const [, sig] = token.split('.');
-    const forged = Buffer.from(JSON.stringify({ uid: UID, email: 'attacker@evil.com', exp: 5555550224 })).toString('base64url');
+    const forged = Buffer.from(JSON.stringify({ uid: UID, email: 'attacker@evil.com', exp: 9999999999 })).toString('base64url');
     expect(verifyInviteToken(`${forged}.${sig}`)).toBeNull();
   });
 

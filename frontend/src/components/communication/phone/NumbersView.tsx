@@ -30,10 +30,14 @@ import { Check, ChevronDown, Plus, RotateCw, Search } from "lucide-react";
 import {
   customFlowOptions,
   flowNameForId,
+  fmtPhone,
   mapOwnedNumber,
   useBuyNumber,
   useSearchNumbers,
   useReassignNumberFlow,
+  useRefreshNumbers,
+  useReleaseNumber,
+  useUpdateNumberForwarding,
 } from "@/lib/api/communication";
 import type {
   AvailableNumber,
@@ -47,6 +51,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { useScheduleTimezone, formatInstant, isoToOrgDay } from '@/lib/schedule-tz';
 
 /* ─────────────────── Local helpers ─────────────────── */
 
@@ -56,14 +61,13 @@ function apiErrorMessage(err: unknown, fallback: string): string {
   return e?.response?.data?.error ?? fallback;
 }
 
-function numberCreatedLabel(iso: string): string {
-  const d = new Date(iso);
-  const wd = d.toLocaleDateString('en-US', { weekday: "short" });
-  const mo = d.toLocaleDateString('en-US', { month: "short" });
-  const t = d
-    .toLocaleTimeString('en-US', { hour: "2-digit", minute: "2-digit" })
-    .toLowerCase();
-  return `${wd} ${mo} ${d.getDate()}, ${d.getFullYear()} · ${t}`;
+function numberCreatedLabel(iso: string, tz: string): string {
+  const day = isoToOrgDay(iso, tz);
+  if (!day) return "";
+  const wd = formatInstant(iso, tz, { weekday: "short" });
+  const mo = formatInstant(iso, tz, { month: "short" });
+  const t = formatInstant(iso, tz, { hour: "2-digit", minute: "2-digit" }).toLowerCase();
+  return `${wd} ${mo} ${Number(day.slice(8, 10))}, ${day.slice(0, 4)} · ${t}`;
 }
 
 /** Call-flow picker used in each number row and in the "Get a number" dialog.
@@ -315,6 +319,120 @@ function AdGroupSelect({
   );
 }
 
+/** Where a number's calls ring, and the only place it can be changed.
+ *
+ *  This is the number's routing, not a label: saving re-points the live dial
+ *  route. The server fails the request outright rather than reporting a success
+ *  it did not achieve, so an error here means calls still reach the OLD
+ *  destination - which is what the error copy has to say, because the dangerous
+ *  failure is the silent one where the owner believes calls moved. */
+function ForwardToCell({
+  n,
+  canManage,
+  onToast,
+}: {
+  n: OwnedNumber;
+  canManage: boolean;
+  onToast: (m: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const updateForwarding = useUpdateNumberForwarding();
+
+  const draftE164 = toUsE164(draft);
+  const saving = updateForwarding.isPending;
+
+  function open() {
+    setDraft(n.forwardTo ?? "");
+    setEditing(true);
+  }
+
+  function save() {
+    if (!draftE164 || saving) return;
+    updateForwarding.mutate(
+      { id: n.id, forwardToE164: draftE164 },
+      {
+        onSuccess: () => {
+          setEditing(false);
+          onToast(`${n.number} now rings ${fmtPhone(draftE164)}`);
+        },
+        onError: (err) =>
+          onToast(
+            apiErrorMessage(
+              err,
+              `Could not change where ${n.number} rings - it still reaches its old destination`,
+            ),
+          ),
+      },
+    );
+  }
+
+  if (!editing) {
+    return (
+      <div className="space-y-1">
+        {n.forwardTo ? (
+          <span className="block font-mono text-[13px] text-text-primary">
+            {fmtPhone(n.forwardTo)}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-semibold text-warning">
+            Not routed
+          </span>
+        )}
+        {canManage && (
+          <button
+            type="button"
+            onClick={open}
+            className="block text-[11px] font-semibold text-primary hover:text-primary/80"
+          >
+            {n.forwardTo ? "Change" : "Set destination"}
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setEditing(false);
+        }}
+        placeholder="(555) 123-4567"
+        inputMode="tel"
+        aria-label={`Forward ${n.number} to`}
+        aria-invalid={draft.trim() !== "" && !draftE164}
+        className="w-full max-w-[180px] rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-[13px] focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={save}
+          disabled={!draftE164 || saving}
+          className="rounded bg-primary px-2.5 py-1 text-[11px] font-semibold text-on-fill hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setEditing(false)}
+          disabled={saving}
+          className="text-[11px] font-semibold text-text-secondary hover:text-text-primary"
+        >
+          Cancel
+        </button>
+      </div>
+      {draft.trim() !== "" && !draftE164 && (
+        <p className="text-[11px] font-medium text-danger">Enter a 10-digit US number.</p>
+      )}
+    </div>
+  );
+}
+
 /* ─────────────────── NumbersView ─────────────────── */
 
 export function NumbersView({
@@ -334,10 +452,23 @@ export function NumbersView({
 }) {
   const ability = useAppAbility();
   const canManage = ability.can("manage", "Communication");
+  const tz = useScheduleTimezone();
 
   const [adGroups, setAdGroups] = useState<AdGroup[]>(AD_GROUP_SEED);
   const [query, setQuery] = useState("");
   const [getOpen, setGetOpen] = useState(false);
+  // The number awaiting a release confirmation. Releasing is irreversible at
+  // the provider, so it never fires straight off the row button.
+  const [releasing, setReleasing] = useState<OwnedNumber | null>(null);
+  // What the owner has typed to confirm the release. A confirm dialog alone is
+  // one muscle-memory click away from permanently losing a working business
+  // line, so the number itself has to be re-entered. Digits only, so the
+  // formatting of the label is not part of the puzzle.
+  const [releaseTyped, setReleaseTyped] = useState("");
+  const releaseNumber = useReleaseNumber();
+  const digitsOf = (s: string) => s.replace(/\D/g, "");
+  const releaseConfirmed =
+    !!releasing && digitsOf(releaseTyped) !== "" && digitsOf(releaseTyped) === digitsOf(releasing.number);
 
   // Flow choices are the org's REAL call flows (server-validated UUIDs).
   const resolveFlowLabel = (flowId: string): string =>
@@ -347,6 +478,21 @@ export function NumbersView({
   // Row flow-reassign persists through PATCH /api/communication/numbers/:id.
   const reassignFlow = useReassignNumberFlow();
 
+  // The table is otherwise a connect-time snapshot of the org's numbers.
+  const refreshNumbers = useRefreshNumbers();
+
+  function syncFromProvider() {
+    refreshNumbers.mutate(undefined, {
+      onSuccess: (data) => {
+        setNumbers(data.numbers.map(mapOwnedNumber));
+        onToast(
+          data.synced === 1 ? "1 number synced" : `${data.synced} numbers synced`,
+        );
+      },
+      onError: (err) => onToast(apiErrorMessage(err, "Could not sync numbers - try again")),
+    });
+  }
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return numbers;
@@ -355,6 +501,7 @@ export function NumbersView({
         n.number.toLowerCase().includes(q) ||
         (n.tag ?? "").toLowerCase().includes(q) ||
         n.type.toLowerCase().includes(q) ||
+        (n.forwardTo ?? "").toLowerCase().includes(q) ||
         resolveFlowLabel(n.flowId).toLowerCase().includes(q) ||
         adGroupLabel(adGroups, n.adGroupId).toLowerCase().includes(q),
     );
@@ -409,8 +556,27 @@ export function NumbersView({
     }
   }
 
-  // The prototype's pause/release row actions were dropped rather than wired
-  // to nothing — status is display-only until a release/pause endpoint exists.
+  function confirmRelease() {
+    // The disabled Confirm button is the visible gate; this is the real one.
+    if (!releasing || releaseNumber.isPending || !releaseConfirmed) return;
+    const target = releasing;
+    releaseNumber.mutate(
+      { id: target.id },
+      {
+        onSuccess: () => {
+          setNumbers((prev) =>
+            prev.map((x) => (x.id === target.id ? { ...x, status: "released" } : x)),
+          );
+          setReleasing(null);
+          onToast(`${target.number} released - it will not be billed again`);
+        },
+        onError: (err) => {
+          onToast(apiErrorMessage(err, `Could not release ${target.number} - it is still active`));
+          setReleasing(null);
+        },
+      },
+    );
+  }
 
   function addNumber(num: OwnedNumber) {
     setNumbers((prev) => [num, ...prev.filter((x) => x.id !== num.id)]);
@@ -426,13 +592,25 @@ export function NumbersView({
           numbers and use them across your online and offline campaigns.
         </p>
         {canManage && (
-          <button
-            onClick={() => setGetOpen(true)}
-            className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-on-fill shadow-sm hover:bg-primary/90"
-          >
-            <Plus className="h-4 w-4" />
-            Get a number
-          </button>
+          <div className="flex flex-shrink-0 items-center gap-2">
+            <button
+              onClick={syncFromProvider}
+              disabled={refreshNumbers.isPending}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-light px-3.5 py-2 text-sm font-semibold text-text-primary hover:bg-background-light disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RotateCw
+                className={`h-4 w-4 ${refreshNumbers.isPending ? "animate-spin" : ""}`}
+              />
+              {refreshNumbers.isPending ? "Syncing…" : "Sync numbers"}
+            </button>
+            <button
+              onClick={() => setGetOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-on-fill shadow-sm hover:bg-primary/90"
+            >
+              <Plus className="h-4 w-4" />
+              Get a number
+            </button>
+          </div>
         )}
       </div>
 
@@ -449,27 +627,31 @@ export function NumbersView({
 
       {/* Numbers table — each number is its own row. */}
       <div className="overflow-x-auto rounded-card border border-border bg-surface-light">
-        <table className="w-full min-w-[920px] text-sm">
+        <table className="w-full min-w-[1040px] text-sm">
           <thead className="bg-background-light text-[10px] uppercase tracking-wide text-text-secondary">
             <tr>
               <th className="px-4 py-2.5 text-left">Number</th>
               <th className="px-4 py-2.5 text-left">Type</th>
+              <th className="px-4 py-2.5 text-left">Rings at</th>
               <th className="px-4 py-2.5 text-left">Ad group</th>
               <th className="px-4 py-2.5 text-left">Assigned flow</th>
               <th className="px-4 py-2.5 text-left">Status</th>
               <th className="px-4 py-2.5 text-left">Created</th>
+              <th className="px-4 py-2.5 text-right">
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {loading && numbers.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-[13px] text-text-secondary/60">
+                <td colSpan={8} className="px-4 py-10 text-center text-[13px] text-text-secondary/60">
                   Loading numbers…
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-[13px] text-text-secondary/60">
+                <td colSpan={8} className="px-4 py-10 text-center text-[13px] text-text-secondary/60">
                   <EmptyState
                     title={
                       numbers.length === 0
@@ -493,6 +675,9 @@ export function NumbersView({
                     )}
                   </td>
                   <td className="px-4 py-3 text-text-secondary">{n.type}</td>
+                  <td className="px-4 py-3">
+                    <ForwardToCell n={n} canManage={canManage} onToast={onToast} />
+                  </td>
                   <td className="px-4 py-3">
                     <AdGroupSelect
                       value={n.adGroupId}
@@ -521,7 +706,23 @@ export function NumbersView({
                   </td>
                   <td className="px-4 py-3">
                     {/* Display-only: status comes from the server row. */}
-                    {n.flowId === "" ? (
+                    {n.status === "released" ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-background-light px-2 py-0.5 text-[11px] font-semibold text-text-secondary">
+                        <span className="h-1.5 w-1.5 rounded-full bg-text-secondary/50" />
+                        Released
+                      </span>
+                    ) : n.status === "pending" ? (
+                      /* Claimed before the purchase was attempted. Still showing
+                         this means the purchase never finished - visible on
+                         purpose, since the alternative was an invisible charge. */
+                      <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-semibold text-warning">
+                        Purchase incomplete
+                      </span>
+                    ) : n.status === "failed" ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-danger/10 px-2 py-0.5 text-[11px] font-semibold text-danger">
+                        Purchase failed
+                      </span>
+                    ) : n.flowId === "" ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-semibold text-warning">
                         No flow
                       </span>
@@ -544,7 +745,21 @@ export function NumbersView({
                     )}
                   </td>
                   <td className="px-4 py-3 text-[12px] text-text-secondary">
-                    {numberCreatedLabel(n.createdAt)}
+                    {numberCreatedLabel(n.createdAt, tz)}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {canManage && n.status !== "released" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReleaseTyped("");
+                          setReleasing(n);
+                        }}
+                        className="text-[11px] font-semibold text-danger hover:text-danger/80"
+                      >
+                        Release
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))
@@ -552,6 +767,46 @@ export function NumbersView({
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={!!releasing}
+        onOpenChange={(o) => {
+          if (!o) {
+            setReleasing(null);
+            setReleaseTyped("");
+          }
+        }}
+        title="Release this number?"
+        description={
+          releasing
+            ? `${releasing.number} will stop ringing immediately and cannot be recovered - it goes back to the carrier pool, and someone else may take it. Calls already on record keep their history.`
+            : ""
+        }
+        confirmLabel={releaseNumber.isPending ? "Releasing…" : "Release number"}
+        onConfirm={confirmRelease}
+        isLoading={releaseNumber.isPending}
+        confirmDisabled={!releaseConfirmed}
+        variant="destructive"
+      >
+        {releasing && (
+          <div className="mt-4 space-y-2">
+            <label htmlFor="release-confirm" className="block text-sm text-secondary">
+              Type <span className="font-medium text-primary">{releasing.number}</span> to confirm
+            </label>
+            <input
+              id="release-confirm"
+              type="text"
+              inputMode="tel"
+              autoComplete="off"
+              autoFocus
+              value={releaseTyped}
+              onChange={(e) => setReleaseTyped(e.target.value)}
+              placeholder={releasing.number}
+              className="w-full rounded border border-border px-2 py-1.5 text-[13px] focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </div>
+        )}
+      </ConfirmDialog>
 
       <GetNumberDialog
         open={getOpen}

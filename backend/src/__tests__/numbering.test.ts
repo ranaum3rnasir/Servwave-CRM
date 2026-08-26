@@ -32,9 +32,15 @@ describe('allocateNumber — atomic per-org allocator', () => {
   });
 
   it('Org A and Org B counters are independent (sequential allocations from each)', async () => {
+    // 'lead' now supports custom numbers, so each allocateNumber call issues a second
+    // $queryRaw for the fast-path skip check (see numbering-editable-ids.test.ts) — the
+    // mocked free_n equal to the counter-derived candidate means "nothing collides",
+    // preserving this test's original intent unchanged.
     (prisma.$queryRaw as Mock)
-      .mockResolvedValueOnce([{ next_value: 43, prefix: 'L', padding: 5 }])   // Alpha (had 42)
-      .mockResolvedValueOnce([{ next_value: 2,  prefix: 'L', padding: 5 }]);  // OrgB (had 1)
+      .mockResolvedValueOnce([{ next_value: 43, prefix: 'L', padding: 5 }])   // Alpha self-heal (had 42)
+      .mockResolvedValueOnce([{ free_n: 42 }])                                // Alpha fast-path: 42 is free
+      .mockResolvedValueOnce([{ next_value: 2,  prefix: 'L', padding: 5 }])   // OrgB self-heal (had 1)
+      .mockResolvedValueOnce([{ free_n: 1 }]);                                // OrgB fast-path: 1 is free
 
     const alphaResult = await allocateNumber(prisma, 'lead', ALPHA_ORG_ID);
     const orgBResult  = await allocateNumber(prisma, 'lead', ORG_B_ID);
@@ -45,13 +51,16 @@ describe('allocateNumber — atomic per-org allocator', () => {
 
   it('throws when org not found', async () => {
     (prisma.$queryRaw as Mock).mockResolvedValue([]);
-    await expect(allocateNumber(prisma, 'lead', '99555555-0224-9999-9999-995555550224')).rejects.toThrow(/not found/);
+    await expect(allocateNumber(prisma, 'lead', '99999999-9999-9999-9999-999999999999')).rejects.toThrow(/not found/);
   });
 
   it('allocates sequential per-org customer numbers with prefix+padding', async () => {
+    // 'customer' now supports custom numbers too — same fast-path second-call shape as above.
     (prisma.$queryRaw as Mock)
       .mockResolvedValueOnce([{ next_value: 2, prefix: 'C', padding: 5 }])
-      .mockResolvedValueOnce([{ next_value: 3, prefix: 'C', padding: 5 }]);
+      .mockResolvedValueOnce([{ free_n: 1 }])
+      .mockResolvedValueOnce([{ next_value: 3, prefix: 'C', padding: 5 }])
+      .mockResolvedValueOnce([{ free_n: 2 }]);
     const a = await allocateNumber(prisma, 'customer', ALPHA_ORG_ID);
     const b = await allocateNumber(prisma, 'customer', ALPHA_ORG_ID);
     expect(a).toBe('C00001');

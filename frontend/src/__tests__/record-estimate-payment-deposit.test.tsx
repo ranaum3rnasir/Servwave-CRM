@@ -3,7 +3,7 @@
  *
  * Two defects this guards, both visible in the shipped dialog:
  *   1. The amount was `String((total * pct) / 100)` with no rounding, so a 70% deposit on $106.63
- *      rendered "74.64095555550224" in the input and posted that float as the payment.
+ *      rendered "74.64099999999999" in the input and posted that float as the payment.
  *   2. `amountTouched` was a permanent one-way latch: % -> amount stopped after the first manual
  *      amount edit and amount -> % never happened at all, so the two fields could describe
  *      different deposits while BOTH were posted (`amount` + `deposit_percentage`).
@@ -56,7 +56,7 @@ describe('deposit defaults', () => {
   it('rounds the prefilled amount to cents', () => {
     renderDialog({ depositType: 'PERCENTAGE', depositValue: 70 });
     expect(pctInput().value).toBe('70');
-    expect(amtInput().value).toBe('74.64'); // was 74.64095555550224
+    expect(amtInput().value).toBe('74.64'); // was 74.64099999999999
   });
 
   it('prefers the estimate deposit override over the org default', () => {

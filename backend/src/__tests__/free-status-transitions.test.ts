@@ -48,6 +48,20 @@ beforeEach(() => {
   // reaching findMany - but setup.ts leaves job.findMany with no default, so this stops a future
   // crewed fixture from silently 500ing (which `!== 400` would happily pass).
   mockPrisma.job.findMany.mockResolvedValue([]);
+  // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so the matrix job has
+  // one. Without it /assign answers 400 for an unrelated reason (crew is unexpressible on a
+  // visitless job - pinned deliberately in visit-crew.test.ts) and this matrix would read that
+  // as an ordering guard coming back.
+  (mockPrisma as unknown as { visit: { findMany: ReturnType<typeof vi.fn> } }).visit.findMany.mockResolvedValue([
+    {
+      id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+      visit_seq: 1, status: 'SCHEDULED',
+      scheduled_at: new Date('2026-08-10T15:00:00.000Z'),
+      scheduled_end: new Date('2026-08-10T17:00:00.000Z'),
+      is_all_day: false, created_at: new Date('2026-08-01T00:00:00.000Z'),
+      en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+    },
+  ]);
 });
 
 describe('free status transitions — every action accepts every status', () => {
@@ -138,7 +152,7 @@ describe('integrity guards survive — these are NOT ordering constraints', () =
   it('still refuses to delete a job that has a non-voided invoice', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
-      ...JOB_FIXTURE, status: 'UNASSIGNED', invoices: [{ status: 'SENT' }],
+      ...JOB_FIXTURE, status: 'UNSCHEDULED', invoices: [{ status: 'SENT' }],
     });
 
     const res = await request(app)
@@ -162,5 +176,108 @@ describe('integrity guards survive — these are NOT ordering constraints', () =
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/service plan/i);
+  });
+});
+
+describe('EN_ROUTE and ON_SITE are no longer job statuses (S4 B13, D17)', () => {
+  const VISIT_ID = 'v0000000-0000-0000-0000-000000000001';
+
+  beforeEach(() => {
+    mockAuthAs('admin');
+    mockPrisma.job.findUnique.mockResolvedValue({
+      ...JOB_FIXTURE,
+      status: 'SCHEDULED',
+      assignees: [],
+      invoices: [],
+      source_plan_id: null,
+    });
+  });
+
+  it('refuses EN_ROUTE as a target of POST /:id/status', async () => {
+    const res = await request(app)
+      .post(`/api/jobs/${JOB_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'EN_ROUTE' });
+
+    // A validation failure naming the field, not a 200 and not an opaque 500. Being on the way is
+    // a property of the TRIP now, and the /:id/en-route ROUTE survives to say so - only the
+    // status-dispatch target goes.
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toContain('status');
+  });
+
+  it('never lets a retired ON_SITE facet value reach the jobs query', async () => {
+    mockPrisma.job.findMany.mockResolvedValue([]);
+    (mockPrisma as unknown as { job: { count: ReturnType<typeof vi.fn>; groupBy: ReturnType<typeof vi.fn> } })
+      .job.count.mockResolvedValue(0);
+    (mockPrisma as unknown as { job: { groupBy: ReturnType<typeof vi.fn> } }).job.groupBy.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/jobs?status=ON_SITE')
+      .set(authHeader('admin'));
+
+    expect(res.status).toBe(200);
+    // The jobs facet's documented contract is to DROP an invalid enum literal rather than 400 -
+    // `status` is a strict Prisma enum column and an unguarded `{ in: [...] }` would throw a
+    // validation error (a 500) instead. What matters after the narrowing is that ON_SITE is now
+    // one of those dropped values, so a stale saved filter or a stale board query degrades to
+    // "no status filter" rather than emptying the board with a 500.
+    for (const call of mockPrisma.job.findMany.mock.calls) {
+      expect(JSON.stringify(call[0]?.where ?? {})).not.toContain('ON_SITE');
+    }
+  });
+
+  it('still routes IN_PROGRESS through start(), and starts the job\'s current visit with it', async () => {
+    // The table HONOURS the where, and carries a called-off decoy booked EARLIER than the real
+    // trip: the rule under test is the predicate (this tenant, this job, live statuses only), and
+    // a mock that ignored it would report green for a verb that revived a cancelled visit.
+    const table = [
+      {
+        id: VISIT_ID,
+        organization_id: '00000000-0000-0000-0000-000000000001',
+        job_id: JOB_FIXTURE.id,
+        status: 'SCHEDULED',
+        scheduled_at: new Date('2026-09-05T13:00:00Z'),
+        scheduled_end: new Date('2026-09-05T15:30:00Z'),
+        created_at: new Date('2026-08-20T10:00:00Z'),
+      },
+      {
+        id: 'v-cancelled',
+        organization_id: '00000000-0000-0000-0000-000000000001',
+        job_id: JOB_FIXTURE.id,
+        status: 'CANCELLED',
+        scheduled_at: new Date('2026-09-01T13:00:00Z'),
+        scheduled_end: new Date('2026-09-01T15:30:00Z'),
+        created_at: new Date('2026-08-20T09:00:00Z'),
+      },
+      {
+        id: 'v-other-org',
+        organization_id: '00000000-0000-0000-0000-0000000000b0',
+        job_id: JOB_FIXTURE.id,
+        status: 'SCHEDULED',
+        scheduled_at: new Date('2026-08-31T13:00:00Z'),
+        scheduled_end: new Date('2026-08-31T15:30:00Z'),
+        created_at: new Date('2026-08-20T08:00:00Z'),
+      },
+    ];
+    (mockPrisma as unknown as { visit: { findMany: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> } })
+      .visit.findMany.mockImplementation(async (args: any) => table.filter((r) => {
+        const where = args?.where ?? {};
+        if (where.organization_id !== undefined && r.organization_id !== where.organization_id) return false;
+        if (where.job_id !== undefined && r.job_id !== where.job_id) return false;
+        if (where.status?.in && !where.status.in.includes(r.status)) return false;
+        return true;
+      }));
+
+    const res = await request(app)
+      .post(`/api/jobs/${JOB_FIXTURE.id}/status`)
+      .set(authHeader('admin'))
+      .send({ status: 'IN_PROGRESS' });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.job.update.mock.calls[0][0].data.status).toBe('IN_PROGRESS');
+    const visitUpdate = (mockPrisma as unknown as { visit: { update: ReturnType<typeof vi.fn> } }).visit.update;
+    expect(visitUpdate.mock.calls[0][0].where.id).toBe(VISIT_ID);
+    expect(visitUpdate.mock.calls[0][0].data.status).toBe('IN_PROGRESS');
   });
 });

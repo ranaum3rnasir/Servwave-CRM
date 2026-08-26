@@ -27,8 +27,8 @@ import { DatePicker } from '@/components/form/DatePicker';
 import { SectionCard } from '@/components/jobs/overview/SectionCard';
 import { ReportShell } from './ReportShell';
 import { formatCurrency, formatCurrencyWhole, formatPhone } from '@/lib/utils';
-import { findReport } from './report-catalog';
-import { hashStr, mulberry32 } from './_shared';
+import { findReport } from '@/lib/reports/report-catalog';
+import { hashStr, mulberry32 } from '@/lib/reports/random';
 import { exportCsvFile } from '@/lib/csv';
 import { STATUS_INTENT_CLASSES } from '@/design-system/status-registry';
 

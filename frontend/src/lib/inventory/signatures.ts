@@ -1,3 +1,5 @@
+import { formatInstant } from '@/lib/schedule-tz';
+
 // Signature value object — what gets stamped onto a signed doc.
 //
 // In production these would persist to the server with the doc record
@@ -63,17 +65,19 @@ export function clearSignature(userId: string): void {
   window.localStorage.removeItem(KEY(userId));
 }
 
-/** Helper: render a date in a doc-friendly format ("May 26, 2026 · 2:14 PM"). */
-export function fmtSignedAt(iso: string): string {
-  const d = new Date(iso);
-  const date = d.toLocaleDateString('en-US', {
+/** Helper: render a date in a doc-friendly format ("May 26, 2026 · 2:14 PM").
+ *
+ *  On the ORG's clock, not the signer's. This matters more here than on a normal
+ *  render: ApprovalDetailDialog splices the result into the approval COMMENT it
+ *  persists, so a browser-zone reading is not merely shown wrong to one viewer -
+ *  it is written into the record permanently, and every later reader inherits the
+ *  approver's timezone with no way to tell. */
+export function fmtSignedAt(iso: string, tz: string): string {
+  const date = formatInstant(iso, tz, {
     month: "short",
     day: "numeric",
     year: "numeric",
   });
-  const time = d.toLocaleTimeString('en-US', {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const time = formatInstant(iso, tz, { hour: "numeric", minute: "2-digit" });
   return `${date} · ${time}`;
 }

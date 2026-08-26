@@ -55,7 +55,7 @@ const TASK_ID = 'aa000000-0000-0000-0000-000000000001';
 const SUBTASK_ID = 'bb000000-0000-0000-0000-000000000002';
 const OTHER_USER_ID = '00000000-0000-0000-0000-000000000099';
 
-// A task owned/created by SOMEONE ELSE, linked to a JOB — the caller is never a principal.
+// A task assigned to / created by SOMEONE ELSE, linked to a JOB — the caller is never a principal.
 const LINKED_TASK = {
   id: TASK_ID,
   task_number: 'T00001',
@@ -64,7 +64,7 @@ const LINKED_TASK = {
   description: '',
   status: 'TODO',
   priority: 'MEDIUM',
-  owner_id: OTHER_USER_ID,
+  assignee_ids: [OTHER_USER_ID] as string[],
   due_at: null,
   linked_entity_type: 'JOB',
   linked_entity_id: JOB_ID,
@@ -180,7 +180,7 @@ describe('instance access — linked entity within scope', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// [4] Principals: watcher can comment; creator retains access
+// [4] Principals: watcher can comment; the CREATOR is not a principal any more
 // ═══════════════════════════════════════════════════════════════════════
 describe('instance access — principals', () => {
   it('a watcher (watcher_ids includes user) POST /:id/comments → 201, no entity probe', async () => {
@@ -196,18 +196,49 @@ describe('instance access — principals', () => {
     expect(mockPrisma.job.findFirst).not.toHaveBeenCalled();
   });
 
-  it('the creator (created_by = user) GET /:id → 200 even after assigning the task away', async () => {
+  // INVERTED by the multi-assignee change. `created_by` is audit-only now (design §2/§4) and
+  // grants nothing, so a creator who has been assigned away from an unlinked task loses it.
+  // Unreachable in practice: create force-assigns, so the creator starts on every task they make.
+  it('the creator (created_by = user) GET /:id → 403 once assigned away', async () => {
     mockAuthAs('sales');
     mockPrisma.task.findFirst.mockResolvedValue({
       ...UNLINKED_TASK,
       created_by: TEST_USERS.sales.id,
-      owner_id: OTHER_USER_ID,
+      assignee_ids: [OTHER_USER_ID],
+    });
+
+    const res = await request(app).get(`/api/tasks/${TASK_ID}`).set(authHeader('sales'));
+
+    expect(res.status).toBe(403);
+    expect(mockPrisma.job.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('an assignee (assignee_ids includes user) GET /:id → 200, no entity probe', async () => {
+    mockAuthAs('sales');
+    mockPrisma.task.findFirst.mockResolvedValue({
+      ...UNLINKED_TASK,
+      assignee_ids: [OTHER_USER_ID, TEST_USERS.sales.id],
     });
 
     const res = await request(app).get(`/api/tasks/${TASK_ID}`).set(authHeader('sales'));
 
     expect(res.status).toBe(200);
     expect(mockPrisma.job.findFirst).not.toHaveBeenCalled();
+  });
+
+  // Design §9 — removal really removes. The row is unlinked, so nothing else can let them back in.
+  it('a REMOVED assignee can no longer read the task → 403', async () => {
+    mockAuthAs('sales');
+    mockPrisma.task.findFirst.mockResolvedValue({
+      ...UNLINKED_TASK,
+      created_by: TEST_USERS.sales.id,
+      assignee_ids: [OTHER_USER_ID],
+      watcher_ids: [],
+    });
+
+    const res = await request(app).get(`/api/tasks/${TASK_ID}`).set(authHeader('sales'));
+
+    expect(res.status).toBe(403);
   });
 });
 
@@ -349,10 +380,10 @@ describe('GET /api/tasks + /summary with linked_entity params', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// [9] Unfiltered non-admin list — owner OR creator OR watcher
+// [9] Unfiltered non-admin list — assignee OR watcher
 // ═══════════════════════════════════════════════════════════════════════
 describe('unfiltered non-admin list scope', () => {
-  it('where carries OR [{owner_id},{created_by},{watcher_ids has}]', async () => {
+  it('where carries OR [{assignee_ids has},{watcher_ids has}] and no created_by arm', async () => {
     mockAuthAs('sales');
 
     const res = await request(app).get('/api/tasks').set(authHeader('sales'));
@@ -360,8 +391,7 @@ describe('unfiltered non-admin list scope', () => {
     expect(res.status).toBe(200);
     const where = (mockPrisma.task.findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     expect(where.OR).toEqual([
-      { owner_id: TEST_USERS.sales.id },
-      { created_by: TEST_USERS.sales.id },
+      { assignee_ids: { has: TEST_USERS.sales.id } },
       { watcher_ids: { has: TEST_USERS.sales.id } },
     ]);
   });

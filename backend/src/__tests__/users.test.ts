@@ -517,7 +517,7 @@ describe('DELETE /api/users/:id/permanent', () => {
     time_entries: 0, timeclock_ot_reviews: 0, issued_refunds: 0, created_credits: 0,
     collected_payments: 0, voided_payments: 0, refunded_invoices: 0,
     commission_owned_leads: 0, dispatched_jobs: 0, service_plans_sold: 0,
-    timeline_events: 0, cancelled_walkthroughs: 0,
+    timeline_events: 0, cancelled_visits: 0,
   };
 
   const inactiveNoHistory = {

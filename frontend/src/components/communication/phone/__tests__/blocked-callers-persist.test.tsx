@@ -13,6 +13,12 @@ import userEvent from "@testing-library/user-event";
 import { BlockedCallersView } from "../BlockedCallersView";
 import type { BlockedNumber } from "@/lib/api/communication";
 
+// The view renders `blockedAt` on the ORG's clock, so it reads the org query. This
+// spec renders it bare (no QueryClientProvider), hence the stub.
+vi.mock("@/lib/api/organization", () => ({
+  useOrganization: () => ({ data: { timezone: "America/New_York" } }),
+}));
+
 const ROW: BlockedNumber = {
   id: "b1000000-0000-0000-0000-000000000001",
   number: "+13475550188",

@@ -63,6 +63,7 @@ const MODULES: Array<[string, string]> = [
   ['Department', 'Departments'],
   ['Location', 'Locations'],
   ['Automation', 'Automations'],
+  ['CalendarEntry', 'Events'],
 ];
 const CRUD: Array<['read' | 'create' | 'update' | 'delete', string]> = [
   ['read', 'View'],
@@ -321,6 +322,12 @@ export default function RolesPage() {
                     checked={draft.sensitive.managePayments}
                     disabled={!editable}
                     onChange={(v) => setSensitive('managePayments', v)}
+                  />
+                  <Row
+                    label="Edit record ID numbers - also rewrites derived estimate and logistic-order numbers"
+                    checked={draft.sensitive.editRecordIds}
+                    disabled={!editable}
+                    onChange={(v) => setSensitive('editRecordIds', v)}
                   />
                 </Card>
 

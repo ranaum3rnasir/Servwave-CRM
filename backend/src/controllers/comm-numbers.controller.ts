@@ -7,9 +7,11 @@ import { logAudit } from '../lib/audit';
 import {
   isCtmConfigured,
   searchNumbers as ctmSearchNumbers,
+  listNumbers as ctmListNumbers,
   buyNumber as ctmBuyNumber,
   createReceivingNumber,
   updateNumberRouting,
+  releaseNumber,
   enableSms,
   CtmApiError,
 } from '../lib/ctm/client';
@@ -28,6 +30,15 @@ import { normalizeNAPhone } from '../lib/comms-identity';
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
+/** Where a number's calls actually ring, read off the `route_to` JSON column.
+ *  Only the forward destination is a shape we own; anything else in there is
+ *  someone else's routing and reads as "not a simple forward". */
+export function forwardToOf(routeTo: unknown): string | null {
+  if (!routeTo || typeof routeTo !== 'object' || Array.isArray(routeTo)) return null;
+  const value = (routeTo as Record<string, unknown>).forward_to;
+  return typeof value === 'string' && value ? value : null;
+}
+
 /** Wire shape for a PhoneNumber row (snake_case; created_at ISO). */
 function mapNumber(row: {
   id: string;
@@ -39,6 +50,7 @@ function mapNumber(row: {
   sms_enabled: boolean;
   ctm_number_id: string | null;
   call_flow_id: string | null;
+  route_to?: unknown;
   status: string;
   created_at: Date | string;
 }) {
@@ -52,6 +64,9 @@ function mapNumber(row: {
     sms_enabled: row.sms_enabled,
     ctm_number_id: row.ctm_number_id,
     call_flow_id: row.call_flow_id,
+    // Where this number rings. Previously absent entirely, which left the UI
+    // unable to show - let alone change - the destination that IS the routing.
+    forward_to: forwardToOf(row.route_to),
     status: row.status,
     created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
   };
@@ -192,15 +207,69 @@ export async function buyNumber(req: Request, res: Response) {
       }
     }
 
+    // Claim the row BEFORE the money moves.
+    //
+    // Buy is two untied steps - spend at the provider, then save - and a
+    // failure between them loses a number that is already billing. That is not
+    // hypothetical: `+1 609-596-8565` was bought on 2026-08-05, still sits on
+    // the account with a next_billing_date, and has no row here at all, because
+    // the save wrote `[object Object]` as the number. The specific cause was
+    // fixed in 46be48d91; the shape of the risk was not.
+    //
+    // Recording the intent first means a purchase that then fails leaves a
+    // visible `failed` row, and one that never resolves leaves a `pending` one.
+    // Either is an anomaly somebody can see, which an invisible charge is not.
+    const requestedE164 = normalizeNAPhone(String(req.body.phone_number));
+    const existing = requestedE164
+      ? await prisma.phoneNumber.findFirst({
+          where: { organization_id: orgId, e164: requestedE164 },
+          select: { id: true, status: true },
+        })
+      : null;
+    // Only a row THIS request created may be marked failed below - re-buying a
+    // number the org already owns must never downgrade the working one.
+    let claimedId: string | null = null;
+    if (requestedE164 && !existing) {
+      const claimed = await prisma.phoneNumber.upsert({
+        where: { organization_id_e164: { organization_id: orgId, e164: requestedE164 } },
+        create: {
+          e164: requestedE164,
+          source: 'ctm',
+          sms_enabled: false,
+          status: 'pending',
+          organization_id: orgId,
+        },
+        update: {},
+      });
+      claimedId = claimed.id;
+    }
+
+    /** Best-effort: a marker that cannot be written must not swallow the real
+     *  error the caller needs (the typed 409 the UI branches on, in particular). */
+    const markClaimFailed = async () => {
+      if (!claimedId) return;
+      try {
+        await prisma.phoneNumber.update({ where: { id: claimedId }, data: { status: 'failed' } });
+      } catch (err) {
+        logger.error('Failed to mark an unfinished number purchase as failed:', err);
+      }
+    };
+
     // test:true unless real purchasing is EXPLICITLY armed. NODE_ENV is not a
     // safe discriminator: Render sets NODE_ENV=production on every service,
     // staging included, which would place a real billed order from a QA click
     // (live QA finding, 2026-07-21). Only CTM_PURCHASE_LIVE=true — set on the
     // production service at go-live — disarms the CTM test flag.
-    const purchased = await ctmBuyNumber(accountId, {
-      phone_number: req.body.phone_number,
-      test: process.env.CTM_PURCHASE_LIVE !== 'true',
-    });
+    let purchased: Record<string, unknown>;
+    try {
+      purchased = await ctmBuyNumber(accountId, {
+        phone_number: req.body.phone_number,
+        test: process.env.CTM_PURCHASE_LIVE !== 'true',
+      });
+    } catch (err) {
+      await markClaimFailed();
+      throw err;
+    }
     const tpnId = purchased.id !== undefined && purchased.id !== null ? String(purchased.id) : null;
 
     // Defence in depth, independent of the provider's response shape: only a
@@ -276,12 +345,24 @@ export async function buyNumber(req: Request, res: Response) {
       },
       update: {
         ctm_number_id: tpnId,
+        ...(typeof purchased.formatted === 'string' && { formatted: purchased.formatted }),
         ...(flow ? { call_flow_id: flow.id } : {}),
         ...(routeTo ? { route_to: routeTo } : {}),
         sms_enabled: smsEnabled,
         status: 'active',
       },
     });
+
+    // Normally the claim above IS this row, promoted from pending to active by
+    // the update branch. If the provider handed back a different number than
+    // the one asked for, it is not - and the claim would linger as a pending
+    // row for a number nobody owns. Drop it rather than leave a false anomaly
+    // among the real ones.
+    if (claimedId && claimedId !== row.id) {
+      await prisma.phoneNumber
+        .delete({ where: { id: claimedId } })
+        .catch((err) => logger.error('Failed to clear a superseded number claim:', err));
+    }
 
     void logAudit({
       req,
@@ -319,15 +400,34 @@ export async function buyNumber(req: Request, res: Response) {
 
 // ─── PATCH /numbers/:id ──────────────────────────────────────────────────────
 
-export const updateNumberSchema = z.object({
-  call_flow_id: z.string().uuid('call_flow_id must be a valid id').nullable(),
-});
+// Both fields are optional and independent, so a payload may carry either one
+// alone. `call_flow_id` was previously REQUIRED here, which is the whole reason
+// the forward destination could not be changed without also restating the flow.
+export const updateNumberSchema = z
+  .object({
+    call_flow_id: z.string().uuid('call_flow_id must be a valid id').nullable().optional(),
+    // Where calls to this number ring. Editable because it IS the routing: a
+    // tech changes phone, or the number moves to someone else, and there is no
+    // other way to follow that.
+    forward_to_e164: z
+      .string()
+      .trim()
+      .min(1)
+      .max(40)
+      .refine((v) => normalizeNAPhone(v) !== null, {
+        message: 'forward_to_e164 must be a North-American phone number (e.g. +12015551234)',
+      })
+      .optional(),
+  })
+  .refine((b) => b.call_flow_id !== undefined || b.forward_to_e164 !== undefined, {
+    message: 'Provide call_flow_id and/or forward_to_e164',
+  });
 
 export async function updateNumber(req: Request, res: Response) {
   try {
     const row = await prisma.phoneNumber.findFirst({
       where: { id: req.params.id as string, ...tenantWhere(req) },
-      select: { id: true },
+      select: { id: true, e164: true, source: true, ctm_number_id: true, route_to: true },
     });
     if (!row) {
       res.status(404).json({ error: 'Number not found' });
@@ -345,14 +445,257 @@ export async function updateNumber(req: Request, res: Response) {
       }
     }
 
-    // call_flow_id is the ONLY writable field on this route.
+    // Re-route BEFORE the DB write, and fail the request if the phone system
+    // refuses. This is deliberately the opposite of buyNumber's warn-and-carry-on
+    // policy: there the money is already spent so the row must survive, whereas
+    // here a silent failure would leave the owner believing calls now reach a
+    // new phone while they keep ringing the old one.
+    let routeTo: { forward_to: string } | null = null;
+    if (req.body.forward_to_e164 !== undefined) {
+      if (!row.ctm_number_id) {
+        res.status(400).json({
+          error: 'This number is not managed by the phone system, so its routing cannot be changed',
+        });
+        return;
+      }
+      const accountId = await requireCtmAccount(req, res);
+      if (!accountId) return;
+
+      const forwardTo = normalizeNAPhone(String(req.body.forward_to_e164))!;
+      try {
+        // Same two steps as buy, in the same order: the phone system will not
+        // dial a destination it has not been told about.
+        try {
+          await createReceivingNumber(accountId, forwardTo);
+        } catch (err) {
+          const alreadyExists =
+            err instanceof CtmApiError && /already|exist|duplicate|taken/i.test(err.reason);
+          if (!alreadyExists) throw err;
+        }
+        await updateNumberRouting(accountId, row.ctm_number_id, {
+          dial_route: 'forward',
+          numbers: [forwardTo],
+        });
+      } catch (err) {
+        const reason = err instanceof CtmApiError ? err.reason : 'request failed';
+        logger.error(`[ctm] re-routing number ${row.e164} failed: ${reason}`);
+        res.status(502).json({
+          error: 'The phone system rejected the change - this number still rings its old destination',
+        });
+        return;
+      }
+      routeTo = { forward_to: forwardTo };
+    }
+
     const updated = await prisma.phoneNumber.update({
       where: { id: row.id },
-      data: { call_flow_id: req.body.call_flow_id },
+      data: {
+        ...(req.body.call_flow_id !== undefined && { call_flow_id: req.body.call_flow_id }),
+        ...(routeTo && { route_to: routeTo }),
+      },
     });
+
+    // Where a customer's calls go is worth an audit row of its own; a flow
+    // relabel is not.
+    if (routeTo) {
+      void logAudit({
+        req,
+        action: 'number.forwarding_updated',
+        resourceType: 'PhoneNumber',
+        resourceId: row.id,
+        metadata: {
+          e164: row.e164,
+          previous_forward_to: forwardToOf(row.route_to),
+          forward_to: routeTo.forward_to,
+        },
+      });
+    }
+
     res.json({ number: mapNumber(updated) });
   } catch (err) {
     logger.error('Failed to update phone number:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── DELETE /numbers/:id ─────────────────────────────────────────────────────
+
+/**
+ * Give a number back and stop its recurring charge (SRVW-240).
+ *
+ * There was previously no way out at all: buy was a one-way door, so a customer
+ * could start a recurring charge from the UI and had no way to stop it.
+ *
+ * The row is marked released, never deleted. Calls and messages reference the
+ * number, and someone reviewing last month's calls should still see which
+ * number took them. Releasing also strips the number of every caller-ID role,
+ * since a released number is unreachable and presenting it on an outbound call
+ * would be worse than presenting nothing.
+ *
+ * IRREVERSIBLE at the provider - the number goes back to the carrier pool - so
+ * the UI confirms before calling this.
+ */
+export async function releaseNumberById(req: Request, res: Response) {
+  try {
+    const row = await prisma.phoneNumber.findFirst({
+      where: { id: req.params.id as string, ...tenantWhere(req) },
+      select: { id: true, e164: true, source: true, ctm_number_id: true, status: true },
+    });
+    if (!row) {
+      res.status(404).json({ error: 'Number not found' });
+      return;
+    }
+
+    // Release at the provider FIRST: reporting a release that did not happen
+    // would leave the customer believing they had stopped paying for it.
+    // A bring-your-own number has nothing to hand back, and an already-released
+    // one is done - both skip straight to the local write, which is what makes
+    // this safe to press twice.
+    if (row.ctm_number_id && row.status !== 'released') {
+      const accountId = await requireCtmAccount(req, res);
+      if (!accountId) return;
+      try {
+        await releaseNumber(accountId, row.ctm_number_id);
+      } catch (err) {
+        // A number the provider does not have is a number that is no longer
+        // billing anyone, which is the whole point of the request.
+        const alreadyGone = err instanceof CtmApiError && err.httpStatus === 404;
+        if (!alreadyGone) {
+          const reason = err instanceof CtmApiError ? err.reason : 'request failed';
+          logger.error(`[ctm] releasing number ${row.e164} failed: ${reason}`);
+          res.status(502).json({
+            error: 'The phone system could not release this number - it is still active',
+          });
+          return;
+        }
+      }
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      // A released number can no longer be anyone's caller ID.
+      await tx.userPhoneNumber.deleteMany({ where: { phone_number_id: row.id } });
+      return tx.phoneNumber.update({
+        where: { id: row.id },
+        data: { status: 'released', is_org_default: false, sms_enabled: false },
+      });
+    });
+
+    void logAudit({
+      req,
+      action: 'number.released',
+      resourceType: 'PhoneNumber',
+      resourceId: row.id,
+      metadata: { e164: row.e164, ctm_number_id: row.ctm_number_id, source: row.source },
+    });
+
+    res.json({ number: mapNumber(updated) });
+  } catch (err) {
+    logger.error('Failed to release phone number:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── POST /numbers/refresh ───────────────────────────────────────────────────
+
+/**
+ * The forward destination a live provider record describes, if it describes one.
+ *
+ * The record's `route_to` is `{type:'receiving_number', dial:[{number}]}` when a
+ * number simply forwards, `{type:'call_queue', dial:{…}}` when it is routed
+ * some other way, and carries `dial: []` when the number rings nowhere at all
+ * (two of the four numbers on the live account are in that state). Only the
+ * single-destination forward is a shape ServWave owns; everything else returns
+ * null so the mirror reports "no simple forward" rather than inventing one.
+ */
+export function forwardToFromProvider(routeTo: unknown): string | null {
+  if (!routeTo || typeof routeTo !== 'object') return null;
+  const record = routeTo as Record<string, unknown>;
+  if (record.type !== 'receiving_number' || !Array.isArray(record.dial)) return null;
+  // Several destinations ring at once; collapsing them to one would be a lie.
+  if (record.dial.length !== 1) return null;
+  const first = record.dial[0] as Record<string, unknown> | undefined;
+  const number = first?.number;
+  return typeof number === 'string' && number ? number : null;
+}
+
+/**
+ * Re-read the account's numbers and make the local list match.
+ *
+ * `importNumbers` runs once, at connect, and never again, so the list is a
+ * snapshot of that moment: a number bought in the provider's own dashboard, or
+ * one ServWave bought and failed to save, never appears. The second case is the
+ * dangerous one, because an invisible number is still a billed number.
+ *
+ * Deliberately read-only against the provider - it enables nothing and buys
+ * nothing, so it is safe to press at any time.
+ */
+export async function refreshNumbers(req: Request, res: Response) {
+  try {
+    const accountId = await requireCtmAccount(req, res);
+    if (!accountId) return;
+    const orgId = req.user!.organization_id;
+
+    const remote = await ctmListNumbers(accountId);
+
+    let synced = 0;
+    for (const n of remote) {
+      const e164 = String(n.number ?? n.phone_number ?? n.e164 ?? '');
+      if (!e164) continue;
+      const tpnId = n.id !== undefined && n.id !== null ? String(n.id) : null;
+      const type = n.type === 'tollfree' || n.type === 'local' ? String(n.type) : null;
+      const label = typeof n.name === 'string' && n.name.trim() ? n.name.trim() : null;
+      const forwardTo = forwardToFromProvider(n.route_to);
+      // The provider's own vocabulary is active/stopped; ours is active/paused.
+      const status = n.status === 'active' ? 'active' : 'paused';
+
+      await prisma.phoneNumber.upsert({
+        where: { organization_id_e164: { organization_id: orgId, e164 } },
+        create: {
+          e164,
+          formatted: typeof n.formatted === 'string' ? n.formatted : null,
+          label,
+          source: 'ctm',
+          type,
+          ctm_number_id: tpnId,
+          ...(forwardTo && { route_to: { forward_to: forwardTo } }),
+          sms_enabled: n.sms_enabled === true,
+          status,
+          organization_id: orgId,
+        },
+        update: {
+          ctm_number_id: tpnId,
+          type,
+          status,
+          ...(label && { label }),
+          ...(forwardTo && { route_to: { forward_to: forwardTo } }),
+          // sms_enabled is owned by the enablement call on buy/connect. A
+          // read-only mirror must never silently turn texting off.
+        },
+      });
+      synced++;
+    }
+
+    void logAudit({
+      req,
+      action: 'numbers.refreshed',
+      resourceType: 'Organization',
+      resourceId: orgId,
+      metadata: { synced },
+    });
+
+    const rows = await prisma.phoneNumber.findMany({
+      where: tenantWhere(req),
+      orderBy: { created_at: 'asc' },
+    });
+    res.json({ synced, numbers: rows.map(mapNumber) });
+  } catch (err) {
+    logger.error('Failed to refresh phone numbers:', err);
+    if (err instanceof CtmApiError) {
+      // Never fall through to "the account has no numbers" - an empty list
+      // here would read as "nothing is billing you".
+      res.status(502).json({ error: 'The phone system request failed' });
+      return;
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 }

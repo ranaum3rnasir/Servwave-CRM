@@ -25,7 +25,7 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { DateRangeControl } from './DateRangeControl';
 import { ResizableTable } from '@/components/data/ResizableTable';
@@ -36,7 +36,7 @@ import { SelectField } from '@/components/form/SelectField';
 import { ChartCard } from '@/components/charts';
 import { chartPalette, token } from '@/design-system';
 import { formatCurrencyWhole } from '@/lib/utils';
-import { hashStr, mulberry32 } from './_shared';
+import { hashStr, mulberry32 } from '@/lib/reports/random';
 
 // ── Domain vocab (Alpha Security US) ─────────────────────────────────────────
 const STATUSES = ['Submitted', 'In progress', 'Done', 'Canceled'] as const;

@@ -28,6 +28,14 @@ export interface AutomationEvent {
    * JOB_RESCHEDULED → new scheduled_start ISO; TECH_ASSIGNED → user id.
    */
   occurrenceKey?: string;
+  /**
+   * Multi-visit D18: the visit this occurrence is about. It joins the DEDUPE key
+   * only (dedupe.ts), never the occurrence key, so two visits on one job enrol
+   * twice instead of visit 2 being swallowed as a duplicate of visit 1. The
+   * ENTITY stays the parent job/lead - context.ts's loadExecutionBundle has no
+   * 'visit' case, and D18 asks for the occurrence to name the visit, not the entity.
+   */
+  visitId?: string;
   actorId?: string | null;
   /** Whatever this event captured that the live entity won't have later (a removed
    *  recipient, request-time text) — see context.ts's EventPayload. */

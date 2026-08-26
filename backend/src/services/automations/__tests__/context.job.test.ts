@@ -33,14 +33,19 @@ function jobRow(overrides: Record<string, unknown> = {}) {
       phone: '+15551234567',
     },
     service_location: { address_line1: '123 Main St', city: 'Raleigh', state: 'NC' },
-    assignees: [
+    // S8 (D6): the job's crew is the union across its trips, so the fixture states it there.
+    visits: [
       {
-        user: {
-          id: 't0000000-0000-0000-0000-000000000001',
-          email: 'mike@example.com',
-          first_name: 'Mike',
-          last_name: 'Torres',
-        },
+        assignees: [
+          {
+            user: {
+              id: 't0000000-0000-0000-0000-000000000001',
+              email: 'mike@example.com',
+              first_name: 'Mike',
+              last_name: 'Torres',
+            },
+          },
+        ],
       },
     ],
     dispatcher: null,

@@ -80,7 +80,7 @@ describe('isOutboundAllowed (env-driven guard)', () => {
   it('unset allowlist → allows any number (unrestricted)', () => {
     (env as any).CTM_OUTBOUND_ALLOWLIST = undefined;
     expect(isOutboundAllowed('+12015550123')).toBe(true);
-    expect(isOutboundAllowed('+15555550223')).toBe(true);
+    expect(isOutboundAllowed('+19998887777')).toBe(true);
   });
 
   it('empty / whitespace allowlist → unrestricted', () => {
@@ -104,7 +104,7 @@ describe('isOutboundAllowed (env-driven guard)', () => {
   it('set allowlist → refuses an unlisted number', () => {
     (env as any).CTM_OUTBOUND_ALLOWLIST = '+12015550123';
     expect(isOutboundAllowed('+15551230000')).toBe(false);
-    expect(isOutboundAllowed('+15555550223')).toBe(false);
+    expect(isOutboundAllowed('+19998887777')).toBe(false);
   });
 });
 
@@ -174,7 +174,7 @@ describe('SMS delivery gate — allowlist wiring', () => {
 
 const OUT_BODY = {
   direction: 'out',
-  from_number: '(555) 555-0208',
+  from_number: '(551) 282-7064',
   to_number: '(201) 555-0123', // normalizes to +12015550123
   status: 'ringing',
 };

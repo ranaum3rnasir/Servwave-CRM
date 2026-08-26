@@ -33,6 +33,11 @@ export type BuilderMode = 'event' | 'date';
 export type AnchorKey =
   | 'job.scheduled_start'
   | 'lead.walkthrough_scheduled_at'
+  // Lead stage clocks (spec #1751 D8). The OPTIONS and LABELS still come from the served
+  // catalog, as the note above says — only the compiler-checked key set lives here.
+  | 'lead.created_at'
+  | 'lead.contacted_at'
+  | 'lead.last_visit_completed_at'
   | 'invoice.due_date'
   | 'estimate.valid_until';
 

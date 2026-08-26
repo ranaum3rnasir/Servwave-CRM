@@ -185,7 +185,7 @@
   "text-back": [
     "src/components/communication/phone/SmsInboxView.tsx",
     "src/lib/api/communication-shared/phone-messages.ts",
-    "src/pages/reports/call-tracking-seed.ts"
+    "src/lib/reports/call-tracking-seed.ts"
   ],
   "text-body": [
     "src/components/workflows/SendTextForm.tsx"

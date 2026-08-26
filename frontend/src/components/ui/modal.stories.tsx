@@ -67,7 +67,7 @@ import { Modal, type ModalEditAction, type ModalProps } from './modal'
 import { Button } from './button'
 
 type ModalWidth = NonNullable<ModalProps['width']>
-const WIDTHS: ModalWidth[] = ['sm', 'md', 'lg', 'xl']
+const WIDTHS: ModalWidth[] = ['xs', 'sm', 'md', 'lg', 'xl']
 
 /** Named options for the footer Controls select - a designer picks a shape, not JSX. */
 type FooterPreset = 'none' | 'closeOnly' | 'cancelSave' | 'cancelDelete'
@@ -158,7 +158,7 @@ const meta = {
       control: { type: 'select' },
       options: WIDTHS,
       description:
-        'Max width. Defaults to "md" (max-w-lg) - today\'s unstyled geometry, unmoved (12 explicit call sites + 2 by omission = 14). sm=max-w-md (6 sites), lg=max-w-2xl (17 sites, the single most common explicit value), xl=max-w-4xl (15 sites). `size` is a deprecated alias of the same type - still live, resolves identically, not surfaced as a separate control here.',
+        'Max width. Defaults to "md" (max-w-lg) - today\'s unstyled geometry, unmoved (12 explicit call sites + 2 by omission = 14). xs=max-w-sm (the confirm-shaped dialogs), sm=max-w-md (6 sites), lg=max-w-2xl (17 sites, the single most common explicit value), xl=max-w-4xl (15 sites). `size` is a deprecated alias of the same type - still live, resolves identically, not surfaced as a separate control here.',
     },
     lockEscape: {
       control: 'boolean',
@@ -192,7 +192,28 @@ type Story = StoryObj<typeof meta>
  */
 export const Default: Story = {}
 
-/** `width="sm"` - max-w-md, the narrowest rung (6 real call sites). */
+/**
+ * `width="xs"` - max-w-sm, the narrowest rung.
+ *
+ * Added for the confirm-shaped dialogs that were already rendering at max-w-sm
+ * by hand (void payment, void invoice, record payment) and could not move onto
+ * Modal without getting wider. It is `DialogWidth`'s own `xs`, so the two
+ * scales now name the same four widths the same way.
+ */
+export const SizeXs: Story = {
+  args: {
+    width: 'xs',
+    title: 'Void payment?',
+    children: (
+      <p className="text-sm text-text-secondary">
+        One question and two buttons. Anything wider makes a confirmation look
+        like a form.
+      </p>
+    ),
+  },
+}
+
+/** `width="sm"` - max-w-md, the second rung (6 real call sites). */
 export const SizeSm: Story = {
   args: {
     width: 'sm',

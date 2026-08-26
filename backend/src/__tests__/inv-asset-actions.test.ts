@@ -105,7 +105,7 @@ describe('POST /api/inventory/assets/:id/assign', () => {
     mockPrisma.user.findFirst.mockResolvedValue(null);
 
     const res = await request(app).post(`/api/inventory/assets/${ASSET_FIXTURE.id}/assign`).set(authHeader('admin'))
-      .send({ user_id: '99555555-0224-9999-9999-995555550224' });
+      .send({ user_id: '99999999-9999-9999-9999-999999999999' });
 
     expect(res.status).toBe(404);
     expect(mockPrisma.assetEvent.create).not.toHaveBeenCalled();

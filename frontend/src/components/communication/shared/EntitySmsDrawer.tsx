@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { useMessageThreads, deliveryNote, outboundBubbleClass } from '@/lib/api/communication';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
 interface EntitySmsDrawerProps {
   customerId: string;
@@ -21,14 +22,14 @@ interface EntitySmsDrawerProps {
   onClose: () => void;
 }
 
-/** Short "2:01 PM" time for a bubble (locale, no seconds). */
-function bubbleTime(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+/** Short "2:01 PM" time for a bubble, on the ORG's clock (no seconds). */
+function bubbleTime(ts: string, tz: string): string {
+  if (Number.isNaN(new Date(ts).getTime())) return '';
+  return formatInstant(ts, tz, { hour: 'numeric', minute: '2-digit' });
 }
 
 export function EntitySmsDrawer({ customerId, customerName, onClose }: EntitySmsDrawerProps) {
+  const tz = useScheduleTimezone();
   const { data: threads = [], isLoading } = useMessageThreads();
   const thread = threads.find((t) => t.customerId === customerId);
   const messages = thread?.messages ?? [];
@@ -96,7 +97,7 @@ export function EntitySmsDrawer({ customerId, customerName, onClose }: EntitySms
                           : 'text-text-secondary',
                       )}
                     >
-                      {bubbleTime(m.ts)}
+                      {bubbleTime(m.ts, tz)}
                     </span>
                   </div>
                 </div>

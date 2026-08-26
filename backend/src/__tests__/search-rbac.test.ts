@@ -107,9 +107,9 @@ describe('GET /api/search — RBAC row-scoping (QA-B2 residual leak fix)', () =>
       // through the walkthroughs -> performers join (defaultGrants.ts).
       const leadWheres = wheresOf(m.lead.findMany);
       expect(leadWheres.length).toBeGreaterThan(0);
-      for (const w of leadWheres) expect(deepHas(w, 'walkthroughs')).toBe(true);
+      for (const w of leadWheres) expect(deepHas(w, 'visits')).toBe(true);
       // …and a strict tech must NOT get org-wide leads (the old role-literal bug).
-      for (const w of leadWheres) expect(deepHas(w, 'walkthroughs')).toBe(true);
+      for (const w of leadWheres) expect(deepHas(w, 'visits')).toBe(true);
     });
   });
 
@@ -167,7 +167,7 @@ describe('GET /api/search — RBAC row-scoping (QA-B2 residual leak fix)', () =>
           // No injected ownership scope for an admin.
           expect(deepHas(w, 'lead_assignees')).toBe(false);
           expect(deepHas(w, 'assignees')).toBe(false);
-          expect(deepHas(w, 'walkthroughs')).toBe(false);
+          expect(deepHas(w, 'visits')).toBe(false);
         }
       }
       expect(m.customer.findMany).toHaveBeenCalled();

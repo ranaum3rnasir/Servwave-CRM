@@ -1,10 +1,22 @@
 import { supabase, getAccessToken } from './supabase';
 import { useAuthStore } from '@/stores/auth.store';
 import { setCachedUser } from '@/stores/auth.store';
+import { clearQueryCache } from './queryClient';
 
-// On this route the AuthCallbackPage owns the OAuth completion (finalize gatekeeper);
+// On these routes the AuthCallbackPage owns the OAuth completion (finalize gatekeeper);
 // the global listener must not race it by calling checkAuth() in parallel.
-const OAUTH_CALLBACK_PATH = '/auth/callback';
+//
+// Both the legacy path and its /v2 counterpart are listed. The guard used to be a
+// `===` against the legacy path alone, which meant the v2 callback page - already
+// built and routed at /v2/auth/callback - would have had checkAuth() racing its
+// finalizeOAuthLogin(), and /api/auth/me 401s for a Google identity that has not
+// been finalized yet. Widening the guard is additive: it can only ever SKIP work
+// on one more pathname, never start any.
+const OAUTH_CALLBACK_PATHS = ['/auth/callback', '/v2/auth/callback'];
+
+function isOAuthCallbackRoute(): boolean {
+  return OAUTH_CALLBACK_PATHS.includes(window.location.pathname);
+}
 
 let initialized = false;
 
@@ -17,7 +29,7 @@ export function initAuthListener(): void {
 
     switch (event) {
       case 'INITIAL_SESSION':
-        if (window.location.pathname === OAUTH_CALLBACK_PATH) break;
+        if (isOAuthCallbackRoute()) break;
         // Session restored from storage — validate with backend
         if (session) {
           checkAuth();
@@ -27,7 +39,7 @@ export function initAuthListener(): void {
         break;
 
       case 'SIGNED_IN':
-        if (window.location.pathname === OAUTH_CALLBACK_PATH) break;
+        if (isOAuthCallbackRoute()) break;
         // Re-auth the realtime socket so private channels keep a fresh JWT.
         {
           const token = getAccessToken();
@@ -38,7 +50,10 @@ export function initAuthListener(): void {
         break;
 
       case 'SIGNED_OUT':
-        // Cross-tab sign-out sync
+        // Cross-tab sign-out sync. The cache clear is not just hygiene: this tab keeps its
+        // QueryClient across a sign-out/sign-in, so without it the next account inherits
+        // this one's cached records.
+        clearQueryCache();
         setCachedUser(null);
         useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false, error: null });
         break;

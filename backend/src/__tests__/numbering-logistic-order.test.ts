@@ -131,6 +131,30 @@ function makeFakeTx(state: FakeState) {
       ]);
     }
 
+    // ── allocateNumber: custom-number fast-path skip check ────────────────────
+    // (`supportsCustomNumbers` entities only — see numbering-editable-ids.test.ts for the
+    // dedicated skip-logic coverage; this handler just lets 'job'/'customer' etc. flow
+    // through THIS file's self-heal-focused tests without throwing "unexpected SQL".)
+    if (/^SELECT MIN\(n\) AS free_n/i.test(flat)) {
+      const [allocated, windowEnd, orgId, prefix, padding] = params as [number, number, string, string, number];
+      if (orgId !== ORG) return Promise.resolve([{ free_n: null }]);
+      const taken = new Set(state.rows.map((r) => r.number));
+      let freeN: number | null = null;
+      for (let n = allocated; n <= windowEnd; n++) {
+        const candidate = `${prefix}${String(n).padStart(padding, '0')}`;
+        if (!taken.has(candidate)) {
+          freeN = n;
+          break;
+        }
+      }
+      return Promise.resolve([{ free_n: freeN }]);
+    }
+
+    // ── allocateNumber: custom-number fallback (full-table scan) ──────────────
+    if (/^SELECT COALESCE\(MAX/i.test(flat) && /AS next_free/i.test(flat)) {
+      return Promise.resolve([{ next_free: maxTrailingInt(state.rows) + 1 }]);
+    }
+
     // ── allocateAnchoredNumber step 1: row lock on the anchor row ─────────────
     if (/FOR (NO KEY )?UPDATE/i.test(flat)) {
       const table = /FROM (\w+)/i.exec(flat)?.[1] ?? '';
@@ -204,7 +228,7 @@ describe('allocateNumber — logistic_order (flat)', () => {
   it('throws when the organization does not exist', async () => {
     const { tx } = makeFakeTx(freshState());
     await expect(
-      numbering.allocateNumber(tx, 'logistic_order', '99555555-0224-9999-9999-995555550224'),
+      numbering.allocateNumber(tx, 'logistic_order', '99999999-9999-9999-9999-999999999999'),
     ).rejects.toThrow(/not found/);
   });
 

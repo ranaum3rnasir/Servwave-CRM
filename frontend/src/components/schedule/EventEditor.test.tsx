@@ -28,7 +28,8 @@ const OWNER = { id: 'u-olivia', first_name: 'Olivia', last_name: 'Owner' };
 
 /** State-2 job: crew ≥1 + timed, SCHEDULED; owner reached via estimate.lead. */
 const scheduledJob: SchedulableEvent = {
-  id: 'job-1',
+  boardId: 'job-1',
+  parentId: 'job-1',
   type: 'job',
   number: 'J00043',
   title: 'Rooftop Unit Swap',
@@ -50,7 +51,8 @@ const scheduledJob: SchedulableEvent = {
 
 /** Timed walkthrough — owner read straight off lead.commission_owner. */
 const walkthrough: SchedulableEvent = {
-  id: 'wt-lead-1',
+  boardId: 'wt-lead-1',
+  parentId: 'lead-1',
   type: 'walkthrough',
   number: 'L00012',
   title: 'Initial site visit',
@@ -70,7 +72,8 @@ const walkthrough: SchedulableEvent = {
 /** State-3 job: keeps its crew, no time. */
 const unscheduledJob: SchedulableEvent = {
   ...scheduledJob,
-  id: 'job-2',
+  boardId: 'job-2',
+  parentId: 'job-2',
   number: 'J00044',
   start: null,
   end: null,
@@ -124,13 +127,16 @@ describe('EventEditor (TG12)', () => {
     expect((await screen.findAllByText('Bob Ortiz')).length).toBeGreaterThan(0);
     // Timed → schedule inputs pre-filled from the event. Date is a DatePicker now -
     // displays MM/DD/YYYY (typeable text), not the native input's raw 'yyyy-MM-dd'.
-    expect(screen.getByLabelText('Date')).toHaveValue('06/10/2026');
+    expect(screen.getByLabelText('Start date')).toHaveValue('06/10/2026');
     // TimeCombobox renders 12-hour text; the native input showed a 24-hour clock
     // in any non-US browser locale, and this is a US-only product.
     expect(screen.getByLabelText('Start time')).toHaveValue('9:00 AM');
-    // Duration is now a SelectField (Radix trigger button, not a native <select>)
-    // — assert on the rendered label instead of a DOM `.value`.
-    expect(screen.getByLabelText('Duration')).toHaveTextContent('2 hours');
+    // Both ends are stated. The popover used to stop at date + start + a Duration
+    // dropdown, never showing when the job actually ends; there is no duration control
+    // on any surface now.
+    expect(screen.getByLabelText('End date')).toHaveValue('06/10/2026');
+    expect(screen.getByLabelText('End time')).toHaveValue('11:00 AM');
+    expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
     // Nothing is dirty yet → no save buttons
     expect(screen.queryByRole('button', { name: 'Save crew' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save time' })).not.toBeInTheDocument();
@@ -151,6 +157,17 @@ describe('EventEditor (TG12)', () => {
     fireEvent.blur(screen.getByLabelText('Start time'));
     fireEvent.click(screen.getByRole('button', { name: 'Save time' }));
     expect(onSaveTime).toHaveBeenCalledWith(new Date(2026, 5, 10, 13, 30), 120);
+    expect(vi.mocked(api.post)).not.toHaveBeenCalled();
+  });
+
+  it('end-time edit + Save time emits the SAME (start, durationMin) contract', () => {
+    const { onSaveTime } = renderEditor();
+    fireEvent.change(screen.getByLabelText('End time'), { target: { value: '12:00 PM' } });
+    fireEvent.blur(screen.getByLabelText('End time'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save time' }));
+    // Start unchanged, duration re-derived from the new end — the page's mutation never
+    // learns that the field the user typed into was an end time.
+    expect(onSaveTime).toHaveBeenCalledWith(new Date(2026, 5, 10, 9, 0), 180);
     expect(vi.mocked(api.post)).not.toHaveBeenCalled();
   });
 
@@ -189,13 +206,13 @@ describe('EventEditor (TG12)', () => {
     // The unschedule action is hidden entirely when readOnly
     expect(screen.queryByRole('button', { name: /Move to Unscheduled/ })).not.toBeInTheDocument();
     // Time renders as text, not inputs
-    expect(screen.queryByLabelText('Date')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Start date')).not.toBeInTheDocument();
   });
 
   it('an unscheduled event shows "Unscheduled" — no time inputs, no unschedule button', () => {
     renderEditor({ event: unscheduledJob });
     expect(screen.getByText(/Unscheduled —/)).toBeInTheDocument();
-    expect(screen.queryByLabelText('Date')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Start date')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Start time')).not.toBeInTheDocument();
     // Move to Unscheduled is for TIMED events only
     expect(screen.queryByRole('button', { name: /Move to Unscheduled/ })).not.toBeInTheDocument();
@@ -212,7 +229,7 @@ describe('EventEditor (TG12)', () => {
 
   it('clicking interactive elements does NOT close or navigate', async () => {
     const { onClose } = renderEditor();
-    fireEvent.click(screen.getByLabelText('Date'));                        // input
+    fireEvent.click(screen.getByLabelText('Start date'));                        // input
     fireEvent.click(await screen.findByLabelText('Remove Alice Ng'));      // crew chip button
     fireEvent.click(screen.getByLabelText('Call Alice Ng'));               // tel: link
     expect(onClose).not.toHaveBeenCalled();

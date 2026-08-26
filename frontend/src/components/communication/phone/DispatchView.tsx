@@ -27,6 +27,7 @@ import {
   shortTime,
 } from "@/components/communication/phone/shared";
 import { CallDetailDrawer } from "@/components/communication/phone/CallsView";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 /* ─────────────────── Dispatch & Calls ─────────────────── */
 
@@ -40,6 +41,7 @@ export function DispatchView({
   onToast: (m: string) => void;
 }) {
   const { data: customers = [] } = usePhoneCustomers();
+  const tz = useScheduleTimezone();
   // Callback queue: missed + voicemail, ordered by expected lost revenue.
   const queue = calls
     .filter((c) => c.status === "missed" || c.status === "voicemail")
@@ -89,7 +91,7 @@ export function DispatchView({
                       <p className="truncate text-sm font-semibold text-text-primary">
                         {cust?.name ?? fmtPhone(c.fromNumber)}
                         <span className="ml-2 text-[10px] font-normal uppercase tracking-wide text-text-secondary">
-                          {c.status} · {shortTime(c.startedAt)}
+                          {c.status} · {shortTime(c.startedAt, tz)}
                         </span>
                       </p>
                       {c.summary && <p className="truncate text-[12px] text-text-secondary">{c.summary}</p>}
@@ -160,7 +162,7 @@ export function DispatchView({
                       )}
                     </td>
                     <td className="px-3 py-2 text-text-secondary">{c.trackingSource ?? "—"}</td>
-                    <td className="px-3 py-2 text-right font-mono text-text-secondary">{shortTime(c.startedAt)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-text-secondary">{shortTime(c.startedAt, tz)}</td>
                   </tr>
                 );
               })}

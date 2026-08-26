@@ -17,8 +17,20 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
+
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_MAIN: 'aaaaaaa1-0000-4000-8000-000000000001',
@@ -178,7 +190,9 @@ describe('InventoryPage - Restock (SRVW-92)', () => {
     expect(await dialog.findByText('Location not found')).toBeInTheDocument();
     // Dialog stayed open with the entered qty intact.
     expect(dialog.getByLabelText(/quantity/i)).toHaveValue(5);
-    expect(screen.queryByText(/Received/)).toBeNull();
+    // Asserted on the toast CALL, not on rendered text: the routed page reports through
+    // sonner and no toaster is mounted here, so a queryByText would pass vacuously.
+    expect(mockToast).not.toHaveBeenCalledWith(expect.stringMatching(/Received/));
     // No local mirror write - the FLT-20 row's On Hand cell still shows the seeded
     // server total (1 at Main + 4 at Van = 5). A surviving mirror adding the failed
     // qty of 5 would render 10, so this genuinely discriminates.

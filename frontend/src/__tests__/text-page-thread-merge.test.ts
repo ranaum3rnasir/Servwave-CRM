@@ -7,7 +7,7 @@
 // It must be pure + convergent — merge(merge(prev, seed), seed) === merge(prev,
 // seed) — so the seed effect can re-run safely (jsdom seed-effect-loop hazard).
 import { describe, it, expect } from 'vitest';
-import { mergeServerThreads } from '@/pages/communication/TextPage';
+import { mergeServerThreads } from '@/lib/communication/mergeServerThreads';
 import type { MessageThread } from '@/lib/api/communication';
 
 const thread = (overrides: Partial<MessageThread>): MessageThread => ({
