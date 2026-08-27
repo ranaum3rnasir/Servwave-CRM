@@ -26,8 +26,18 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
 describe('BrowserAutomationIndicator', () => {
   beforeEach(() => {
     useSpiderWatcherStore.setState({
-      notifications: { email: true, sms: true, inApp: true },
+      notifications: { email: true, sms: true, inApp: true, redFrame: true },
       days: '0',
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 0,
+          unit: 'Second',
+        },
+      ],
       customers: TEST_CUSTOMERS,
       selectedCustomerIds: ['c1'],
       selectedLeadIds: ['l1'],
@@ -70,12 +80,27 @@ describe('BrowserAutomationIndicator', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it('does not render when inApp notifications are disabled', () => {
+  it('does not render when redFrame notifications are disabled', () => {
     useSpiderWatcherStore.setState({
-      notifications: { email: true, sms: true, inApp: false },
+      notifications: { email: true, sms: true, inApp: true, redFrame: false },
     });
 
     render(<BrowserAutomationIndicator />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('dynamically toggles red frame visibility when redFrame notification preference changes', () => {
+    const { rerender } = render(<BrowserAutomationIndicator />);
+    expect(screen.getByRole('status')).toBeInTheDocument();
+
+    // Uncheck / disable redFrame
+    useSpiderWatcherStore.getState().setRedFrameNotification(false);
+    rerender(<BrowserAutomationIndicator />);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+    // Enable redFrame
+    useSpiderWatcherStore.getState().setRedFrameNotification(true);
+    rerender(<BrowserAutomationIndicator />);
+    expect(screen.getByRole('status')).toBeInTheDocument();
   });
 });

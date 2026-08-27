@@ -47,8 +47,34 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
 describe('SpiderNotificationPopup', () => {
   beforeEach(() => {
     useSpiderWatcherStore.setState({
-      notifications: { email: true, sms: true, inApp: true },
+      notifications: { email: true, sms: true, inApp: true, redFrame: true },
       days: '0',
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 0,
+          unit: 'Second',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 0,
+          unit: 'Second',
+        },
+        {
+          id: 'walkthrough-scheduled-estimate',
+          label: 'Walkthrough Scheduled → Estimate',
+          fromStage: 'Walkthrough Scheduled',
+          toStage: 'Estimate',
+          duration: 0,
+          unit: 'Second',
+        },
+      ],
       customers: TEST_CUSTOMERS,
       selectedCustomerIds: ['c1'],
       selectedLeadIds: ['l1', 'l2', 'l3'],
@@ -110,9 +136,9 @@ describe('SpiderNotificationPopup', () => {
 
     const initialNotifs = useSpiderWatcherStore.getState().getComputedNotifications();
     expect(initialNotifs.length).toBeGreaterThan(0);
-    const targetNotif = initialNotifs[0];
+    const targetNotif = initialNotifs[0]!;
 
-    const card = screen.getAllByText(targetNotif.companyName)[0].closest('div[class*="cursor-pointer"]');
+    const card = screen.getAllByText(targetNotif.companyName)[0]?.closest('div[class*="cursor-pointer"]');
     expect(card).not.toBeNull();
     fireEvent.click(card!);
 
@@ -155,7 +181,7 @@ describe('SpiderNotificationPopup', () => {
 
   it('does not render popup when inApp notification setting is disabled', () => {
     useSpiderWatcherStore.setState({
-      notifications: { email: true, sms: true, inApp: false },
+      notifications: { email: true, sms: true, inApp: false, redFrame: true },
       inAppNotifications: [],
       customers: [],
     });

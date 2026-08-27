@@ -1,3 +1,4 @@
+import { useState, useEffect, useMemo } from 'react';
 import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
 import { cn } from '@/lib/utils';
 
@@ -6,23 +7,41 @@ interface BrowserAutomationIndicatorProps {
 }
 
 /**
- * Visual Browser Automation Indicator Frame (Spider Notification Indicator)
+ * Visual Browser Automation Indicator Frame (Spider Notification Alert Indicator)
  *
- * Refinements:
- * 1. Solid deep maroon hue (#800000 / rgba(128, 0, 0, ...)).
- * 2. 10% reduced intensity and opacity for a more subdued, elegant, balanced ambient tone.
- * 3. Smooth 3.5s breathing/pulsing animation with pointer-events: none.
- * 4. Strictly visible only while unread spider notifications exist; auto-dismisses on read.
+ * Requirements:
+ * 1. Subdued deep maroon frame (#800000) with smooth breathing pulse animation.
+ * 2. Pointer-events: none overlay so user interaction remains unhindered.
+ * 3. Shows automatically whenever a Spider notification alert is active (unread lead stage threshold alerts).
+ * 4. Automatically disappears when the notification is marked as read upon message dispatch.
  */
 export function BrowserAutomationIndicator({ className }: BrowserAutomationIndicatorProps) {
-  const inAppEnabled = useSpiderWatcherStore((s) => s.notifications.inApp);
+  const [tick, setTick] = useState(0);
+
+  // Subscribe to reactive store slices so changes immediately re-evaluate alerts
+  const redFrameEnabled = useSpiderWatcherStore((s) => s.notifications.redFrame ?? true);
+  const customers = useSpiderWatcherStore((s) => s.customers);
+  const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
+  const leadStages = useSpiderWatcherStore((s) => s.leadStages);
+  const readNotificationIds = useSpiderWatcherStore((s) => s.readNotificationIds);
   const getComputedNotifications = useSpiderWatcherStore((s) => s.getComputedNotifications);
 
-  const activeNotifs = inAppEnabled ? getComputedNotifications() : [];
+  // Periodic heartbeat to evaluate elapsed real-time lead durations against stage thresholds
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTick((t) => (t + 1) % 10000);
+    }, 2500);
+    return () => clearInterval(timer);
+  }, []);
+
+  const activeNotifs = useMemo(() => {
+    return redFrameEnabled ? getComputedNotifications() : [];
+  }, [redFrameEnabled, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
+
   const unreadCount = activeNotifs.filter((n) => !n.read).length;
 
-  // Frame is strictly visible only while there are active unread spider notifications
-  const isVisible = inAppEnabled && unreadCount > 0;
+  // Frame is strictly visible when an unread spider notification alert is active and Red Frame is enabled
+  const isVisible = redFrameEnabled && unreadCount > 0;
 
   if (!isVisible) return null;
 

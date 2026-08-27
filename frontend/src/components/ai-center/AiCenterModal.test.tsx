@@ -65,11 +65,8 @@ function renderSpiderDetail() {
     <QueryClientProvider client={queryClient}>
       <AgentDetailModal
         agent={agent}
-        open={true}
         onOpenChange={() => {}}
-        onStart={() => {}}
-        onStop={() => {}}
-        isPending={false}
+        onBook={() => {}}
       />
     </QueryClientProvider>
   );
@@ -109,7 +106,27 @@ describe('AiCenterModal', () => {
   it('renders custom Watcher configuration UI for Spider agent with Lead Stages and multi-lead Contact Watchers', () => {
     renderSpiderDetail();
 
-    // 1. Lead Stages section with 3 stages and default 0 second period
+    // 0. Notifications section with Email, SMS, In-app Message, and Red Frame
+    expect(screen.getByText('Notifications')).toBeInTheDocument();
+    expect(screen.getByText('Email')).toBeInTheDocument();
+    expect(screen.getByText('SMS')).toBeInTheDocument();
+    expect(screen.getByText('In-app Message')).toBeInTheDocument();
+    expect(screen.getByText('Red Frame')).toBeInTheDocument();
+
+    // Footer buttons: Book a call about Spider and Save button
+    expect(screen.getByRole('button', { name: /Book a call about Spider/i })).toBeInTheDocument();
+    const saveBtn = screen.getByRole('button', { name: /Save/i });
+    expect(saveBtn).toBeInTheDocument();
+
+    // Toggling Red Frame in UI modifies draft, but does NOT update store until Save is clicked
+    expect(useSpiderWatcherStore.getState().notifications.redFrame).toBe(true);
+    const redFrameOption = screen.getByText('Red Frame').closest('div[class*="cursor-pointer"]');
+    expect(redFrameOption).not.toBeNull();
+    fireEvent.click(redFrameOption!);
+    // Store remains unchanged before saving
+    expect(useSpiderWatcherStore.getState().notifications.redFrame).toBe(true);
+
+    // 1. Lead Stages section with 3 stages and default blank duration
     expect(screen.getByText('Distance')).toBeInTheDocument();
     expect(screen.getByText('New → Contacted')).toBeInTheDocument();
     expect(screen.getByText('Contacted → Walkthrough Scheduled')).toBeInTheDocument();
@@ -117,23 +134,42 @@ describe('AiCenterModal', () => {
 
     const stages = useSpiderWatcherStore.getState().leadStages;
     expect(stages.length).toBe(3);
-    expect(stages.every((s) => s.duration === 0 && s.unit === 'Second')).toBe(true);
+    expect(stages.every((s) => s.duration === undefined && s.unit === 'Second')).toBe(true);
 
-    // Parallel time period & units inputs exist
-    const unitSelects = screen.getAllByLabelText(/Time unit for/i);
+    // Parallel time period & units inputs exist and default to blank
+    const unitSelects = screen.getAllByLabelText(/^Time unit for/i);
     expect(unitSelects.length).toBe(3);
-    const durationInputs = screen.getAllByLabelText(/Time period for/i);
+    const durationInputs = screen.getAllByLabelText(/^Time period for/i);
     expect(durationInputs.length).toBe(3);
+    expect(durationInputs[0]!.getAttribute('value') || '').toBe('');
 
-    // Changing stage time period updates store
-    fireEvent.change(durationInputs[0], { target: { value: '7' } });
-    expect(useSpiderWatcherStore.getState().leadStages[0].duration).toBe(7);
+    // Stepper + / - buttons exist
+    const incButtons = screen.getAllByLabelText(/^Increment time period for/i);
+    expect(incButtons.length).toBe(3);
+    const decButtons = screen.getAllByLabelText(/^Decrement time period for/i);
+    expect(decButtons.length).toBe(3);
 
-    // Save button exists at the end of Distance section and saves thresholds
-    const saveThresholdsBtn = screen.getByRole('button', { name: /Save/i });
-    expect(saveThresholdsBtn).toBeInTheDocument();
-    fireEvent.click(saveThresholdsBtn);
+    // Decrement button is disabled when blank/<1
+    expect(decButtons[0]!).toBeDisabled();
+
+    // Clicking increment button increments draft value to 1 and enables decrement button
+    fireEvent.click(incButtons[0]!);
+    expect(durationInputs[0]!.getAttribute('value')).toBe('1');
+    expect(decButtons[0]!).not.toBeDisabled();
+
+    // Changing stage time period to 7 in draft
+    fireEvent.change(durationInputs[0]!, { target: { value: '7' } });
+    expect(durationInputs[0]!.getAttribute('value')).toBe('7');
+
+    // Before clicking Save, store still has undefined duration and redFrame: true
+    expect(useSpiderWatcherStore.getState().leadStages[0]!.duration).toBeUndefined();
+    expect(useSpiderWatcherStore.getState().notifications.redFrame).toBe(true);
+
+    // Clicking Save in footer applies all draft changes to the store
+    fireEvent.click(saveBtn);
     expect(screen.getByText('Saved')).toBeInTheDocument();
+    expect(useSpiderWatcherStore.getState().leadStages[0]!.duration).toBe(7);
+    expect(useSpiderWatcherStore.getState().notifications.redFrame).toBe(false);
 
     // 2. Contact Watchers with Multi-Lead Dropdowns
     expect(screen.getByText('John Smith')).toBeInTheDocument();
@@ -155,6 +191,9 @@ describe('AiCenterModal', () => {
     expect(screen.getByText('LD-101')).toBeInTheDocument();
     expect(screen.getByText('Main Line Leak & Pipe Replacement')).toBeInTheDocument();
     expect(screen.getByText('LD-102')).toBeInTheDocument();
+
+    // With blank stage threshold (default), displays 'none threshold set'
+    expect(screen.getAllByText('none threshold set').length).toBeGreaterThan(0);
 
     // Select/deselect customer and specific lead
     const leadCheckbox = screen.getByLabelText(/Select lead LD-101 for notifications/i);
@@ -217,5 +256,179 @@ describe('AiCenterModal', () => {
     expect(s4.stageLabel).toBe('Walkthrough Scheduled → Estimate');
     expect(s4.elapsedUnit).toBe('Day');
     expect(s4.elapsedValue).toBe(2);
+  });
+
+  it('selects all customers and all leads by default in Spider Contact Watchers', () => {
+    useSpiderWatcherStore.setState({
+      customers: [],
+      selectedCustomerIds: [],
+      selectedLeadIds: [],
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 0,
+          unit: 'Second',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 0,
+          unit: 'Second',
+        },
+      ],
+      hasUserModifiedSelection: false,
+    });
+
+    useSpiderWatcherStore.getState().setCustomers(TEST_CUSTOMERS);
+
+    const state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual(['c1']);
+    expect(state.selectedLeadIds).toEqual(['l1', 'l2']);
+
+    // Computed notifications evaluate all selected leads as triggered by default (0s threshold)
+    const notifs = state.getComputedNotifications();
+    expect(notifs.length).toBe(2);
+    expect(notifs.map((n) => n.leadId)).toEqual(['l1', 'l2']);
+  });
+
+  it('selects nested leads when customers load before leads arrive asynchronously', () => {
+    useSpiderWatcherStore.setState({
+      customers: [],
+      selectedCustomerIds: [],
+      selectedLeadIds: [],
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 0,
+          unit: 'Second',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 0,
+          unit: 'Second',
+        },
+      ],
+      hasUserModifiedSelection: false,
+    });
+
+    // Step 1: Customers API returns first without leads
+    const customersWithoutLeads: WatcherCustomer[] = [
+      {
+        id: 'c1',
+        name: 'John Smith',
+        company: 'Apex Plumbing Co.',
+        email: 'john@apexplumbing.com',
+        leads: [],
+      },
+    ];
+    useSpiderWatcherStore.getState().setCustomers(customersWithoutLeads);
+    expect(useSpiderWatcherStore.getState().selectedCustomerIds).toEqual(['c1']);
+    expect(useSpiderWatcherStore.getState().selectedLeadIds).toEqual([]);
+
+    // Step 2: Leads API returns shortly after
+    useSpiderWatcherStore.getState().setCustomers(TEST_CUSTOMERS);
+    const state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual(['c1']);
+    expect(state.selectedLeadIds).toEqual(['l1', 'l2']);
+    expect(state.getComputedNotifications().length).toBe(2);
+  });
+
+  it('allows toggling customer and lead selections and supports select/deselect all', () => {
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 0,
+          unit: 'Second',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 0,
+          unit: 'Second',
+        },
+      ],
+      hasUserModifiedSelection: false,
+    });
+
+    // Deselect customer c1
+    useSpiderWatcherStore.getState().toggleCustomerSelection('c1', ['l1', 'l2']);
+    let state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual([]);
+    expect(state.selectedLeadIds).toEqual([]);
+    expect(state.getComputedNotifications().length).toBe(0);
+
+    // Select customer c1 again -> selects both customer and its leads
+    useSpiderWatcherStore.getState().toggleCustomerSelection('c1', ['l1', 'l2']);
+    state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual(['c1']);
+    expect(state.selectedLeadIds).toEqual(['l1', 'l2']);
+
+    // Deselect single lead l1
+    useSpiderWatcherStore.getState().toggleLeadSelection('l1', 'c1', ['l1', 'l2']);
+    state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual(['c1']); // c1 still selected because l2 is selected
+    expect(state.selectedLeadIds).toEqual(['l2']);
+
+    // Deselect all
+    useSpiderWatcherStore.getState().deselectAllCustomers();
+    state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual([]);
+    expect(state.selectedLeadIds).toEqual([]);
+
+    // Select all
+    useSpiderWatcherStore.getState().selectAllCustomers();
+    state = useSpiderWatcherStore.getState();
+    expect(state.selectedCustomerIds).toEqual(['c1']);
+    expect(state.selectedLeadIds).toEqual(['l1', 'l2']);
+  });
+
+  it('does not apply selection changes until the user clicks Save', () => {
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+      hasUserModifiedSelection: false,
+    });
+
+    renderSpiderDetail();
+
+    // Click "Deselect all" in modal
+    const deselectAllBtn = screen.getByText('Deselect all');
+    fireEvent.click(deselectAllBtn);
+
+    // The modal UI now reflects "Select all" (draft was updated)
+    expect(screen.getByText('Select all')).toBeInTheDocument();
+
+    // BUT store has NOT changed yet because Save was not clicked
+    expect(useSpiderWatcherStore.getState().selectedCustomerIds).toEqual(['c1']);
+    expect(useSpiderWatcherStore.getState().selectedLeadIds).toEqual(['l1', 'l2']);
+
+    // Now click the Save button in the footer
+    const saveBtn = screen.getByRole('button', { name: /Save/i });
+    fireEvent.click(saveBtn);
+
+    // Now store has been updated!
+    expect(useSpiderWatcherStore.getState().selectedCustomerIds).toEqual([]);
+    expect(useSpiderWatcherStore.getState().selectedLeadIds).toEqual([]);
   });
 });

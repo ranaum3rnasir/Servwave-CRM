@@ -13,6 +13,9 @@ import {
   CheckCircle2,
   Layers,
   Save,
+  Plus,
+  Minus,
+  Square,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
@@ -40,6 +43,8 @@ import {
   type TimeUnit,
   type WatcherCustomer,
   type WatcherLead,
+  type SpiderNotificationsConfig,
+  type LeadStageConfig,
   DEFAULT_WATCHER_CUSTOMERS,
   isLeadOverdue,
   resolveLeadStageAndElapsedTime,
@@ -55,71 +60,40 @@ interface AgentDetailModalProps {
 
 const TIME_UNITS: TimeUnit[] = ['Second', 'Minute', 'Hour', 'Day'];
 
-/** Dedicated UI for Spider (AI Lead Manager) Watcher configuration */
-function SpiderWatcherConfig() {
-  const notifications = useSpiderWatcherStore((s) => s.notifications);
-  const setNotifications = useSpiderWatcherStore((s) => s.setNotifications);
-  const leadStages = useSpiderWatcherStore((s) => s.leadStages);
-  const updateLeadStage = useSpiderWatcherStore((s) => s.updateLeadStage);
-  const storeCustomers = useSpiderWatcherStore((s) => s.customers);
-  const setCustomers = useSpiderWatcherStore((s) => s.setCustomers);
-  const selectedCustomerIds = useSpiderWatcherStore((s) => s.selectedCustomerIds);
-  const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
-  const toggleCustomerSelection = useSpiderWatcherStore((s) => s.toggleCustomerSelection);
-  const toggleLeadSelection = useSpiderWatcherStore((s) => s.toggleLeadSelection);
-  const selectAllCustomers = useSpiderWatcherStore((s) => s.selectAllCustomers);
-  const deselectAllCustomers = useSpiderWatcherStore((s) => s.deselectAllCustomers);
+interface SpiderWatcherConfigProps {
+  notifications: SpiderNotificationsConfig;
+  setNotifications: React.Dispatch<React.SetStateAction<SpiderNotificationsConfig>>;
+  leadStages: LeadStageConfig[];
+  updateLeadStage: (id: string, updates: Partial<LeadStageConfig>) => void;
+  selectedCustomerIds: string[];
+  selectedLeadIds: string[];
+  toggleCustomerSelection: (customerId: string, leadIdsForCustomer: string[]) => void;
+  toggleLeadSelection: (
+    leadId: string,
+    customerId: string,
+    allLeadIdsForCustomer: string[]
+  ) => void;
+  selectAllCustomers: () => void;
+  deselectAllCustomers: () => void;
+  storeCustomers: WatcherCustomer[];
+}
 
-  const { toast } = useToast();
+/** Dedicated UI for Spider (AI Lead Manager) Watcher configuration */
+function SpiderWatcherConfig({
+  notifications,
+  setNotifications,
+  leadStages,
+  updateLeadStage,
+  selectedCustomerIds,
+  selectedLeadIds,
+  toggleCustomerSelection,
+  toggleLeadSelection,
+  selectAllCustomers,
+  deselectAllCustomers,
+  storeCustomers,
+}: SpiderWatcherConfigProps) {
   const [search, setSearch] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
-  const [isSaved, setIsSaved] = useState(false);
-
-  const handleSaveThresholds = () => {
-    setIsSaved(true);
-    toast({
-      title: 'Threshold Settings Saved',
-      description: 'Stage distance thresholds for Spider Agent have been successfully stored.',
-      duration: 3000,
-    });
-    setTimeout(() => setIsSaved(false), 2000);
-  };
-
-  // Fetch actual real leads from the Leads API
-  const { data: apiLeads } = useQuery({
-    queryKey: ['spider-watcher-leads-real'],
-    queryFn: async () => {
-      try {
-        const res = await api.get('/api/leads', { params: { limit: 100 } });
-        return res.data?.leads || [];
-      } catch {
-        return [];
-      }
-    },
-    staleTime: 30_000,
-  });
-
-  // Fetch actual customers from API
-  const { data: apiCustomers } = useQuery({
-    queryKey: ['spider-watcher-customers-real'],
-    queryFn: async () => {
-      try {
-        const res = await api.get('/api/customers', { params: { limit: 100 } });
-        return res.data?.customers || [];
-      } catch {
-        return [];
-      }
-    },
-    staleTime: 30_000,
-  });
-
-  // Sync store when real API leads arrive
-  useEffect(() => {
-    if (apiLeads || apiCustomers) {
-      const live = buildWatcherCustomersFromLive(apiLeads || [], apiCustomers || []);
-      setCustomers(live);
-    }
-  }, [apiLeads, apiCustomers, setCustomers]);
 
   // Use live store customers
   const customersList: WatcherCustomer[] = useMemo(() => {
@@ -176,7 +150,10 @@ function SpiderWatcherConfig() {
 
   const allSelected =
     customersList.length > 0 &&
-    customersList.every((c) => selectedCustomerIds.includes(c.id));
+    customersList.every((c) => selectedCustomerIds.includes(c.id)) &&
+    customersList.every((c) =>
+      c.leads.every((l) => selectedLeadIds.includes(l.id))
+    );
 
   return (
     <div className="space-y-4">
@@ -244,6 +221,24 @@ function SpiderWatcherConfig() {
                 <span>In-app Message</span>
               </div>
             </div>
+
+            <div
+              className="flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-background-light cursor-pointer"
+              onClick={() =>
+                setNotifications((prev) => ({ ...prev, redFrame: !prev.redFrame }))
+              }
+            >
+              <Checkbox
+                checked={notifications.redFrame}
+                onCheckedChange={(checked) =>
+                  setNotifications((prev) => ({ ...prev, redFrame: !!checked }))
+                }
+              />
+              <div className="flex items-center gap-2 text-xs font-semibold text-text-primary">
+                <Square className="h-3.5 w-3.5 text-[#800000]" />
+                <span>Red Frame</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -276,24 +271,64 @@ function SpiderWatcherConfig() {
                     </span>
                   </div>
 
-                  {/* Parallel Time Period & Unit Inputs */}
-                  <div className="flex items-center gap-2 shrink-0">
+                  {/* Parallel Time Period Stepper & Unit Inputs */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Decrement Button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const currentVal =
+                          stage.duration && stage.duration >= 1 ? stage.duration : 0;
+                        const nextVal = currentVal - 1;
+                        updateLeadStage(stage.id, {
+                          duration: nextVal >= 1 ? nextVal : undefined,
+                        });
+                      }}
+                      disabled={!stage.duration || stage.duration < 1}
+                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-light text-text-secondary hover:bg-background-light hover:text-text-primary active:scale-95 disabled:opacity-40 disabled:pointer-events-none transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500 shadow-xs cursor-pointer"
+                      aria-label={`Decrement time period for ${stage.label}`}
+                    >
+                      <Minus className="h-3 w-3" />
+                    </button>
+
+                    {/* Numeric Input */}
                     <input
                       type="number"
-                      min="0"
-                      value={stage.duration !== undefined ? stage.duration : 0}
+                      min="1"
+                      value={stage.duration && stage.duration >= 1 ? stage.duration : ''}
                       onChange={(e) => {
-                        const val = parseInt(e.target.value, 10);
-                        if (!isNaN(val) && val >= 0) {
+                        const raw = e.target.value.trim();
+                        if (raw === '') {
+                          updateLeadStage(stage.id, { duration: undefined });
+                          return;
+                        }
+                        const val = parseInt(raw, 10);
+                        if (!isNaN(val) && val >= 1) {
                           updateLeadStage(stage.id, { duration: val });
-                        } else if (e.target.value === '') {
-                          updateLeadStage(stage.id, { duration: 0 });
+                        } else {
+                          updateLeadStage(stage.id, { duration: undefined });
                         }
                       }}
-                      className="w-14 rounded-md border border-border bg-surface-light px-2 py-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
-                      placeholder="0"
+                      className="w-12 h-7 rounded-md border border-border bg-surface-light px-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
+                      placeholder=""
                       aria-label={`Time period for ${stage.label}`}
                     />
+
+                    {/* Increment Button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const currentVal =
+                          stage.duration && stage.duration >= 1 ? stage.duration : 0;
+                        updateLeadStage(stage.id, { duration: currentVal + 1 });
+                      }}
+                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-light text-text-secondary hover:bg-background-light hover:text-text-primary active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500 shadow-xs cursor-pointer"
+                      aria-label={`Increment time period for ${stage.label}`}
+                    >
+                      <Plus className="h-3 w-3" />
+                    </button>
+
+                    {/* Unit Select */}
                     <Select
                       value={stage.unit}
                       onValueChange={(val) =>
@@ -319,34 +354,10 @@ function SpiderWatcherConfig() {
               ))}
             </div>
 
-            <div className="pt-2 border-t border-border/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="pt-2 border-t border-border/40">
               <p className="text-[11px] text-text-soft leading-tight">
                 Spider watches for leads remaining in each stage longer than the configured period.
               </p>
-              <Button
-                type="button"
-                size="sm"
-                onClick={handleSaveThresholds}
-                className={cn(
-                  'h-7 px-3 text-xs font-semibold transition-all shrink-0 self-end sm:self-auto shadow-xs',
-                  isSaved
-                    ? 'bg-success-600 hover:bg-success-700 text-on-fill'
-                    : 'bg-ai-600 hover:bg-ai-700 text-on-fill'
-                )}
-                aria-label="Save configured threshold settings"
-              >
-                {isSaved ? (
-                  <>
-                    <Check className="h-3.5 w-3.5 mr-1" />
-                    Saved
-                  </>
-                ) : (
-                  <>
-                    <Save className="h-3.5 w-3.5 mr-1" />
-                    Save
-                  </>
-                )}
-              </Button>
             </div>
           </div>
         </div>
@@ -408,7 +419,17 @@ function SpiderWatcherConfig() {
           ) : (
             filteredCustomers.map((customer) => {
               const allCustomerLeadIds = customer.leads.map((l) => l.id);
-              const isCustomerChecked = selectedCustomerIds.includes(customer.id);
+              const allLeadsSelected =
+                customer.leads.length > 0 &&
+                customer.leads.every((l) => selectedLeadIds.includes(l.id));
+              const someLeadsSelected =
+                customer.leads.length > 0 &&
+                customer.leads.some((l) => selectedLeadIds.includes(l.id)) &&
+                !allLeadsSelected;
+
+              const customerCheckedState: boolean | 'indeterminate' = someLeadsSelected
+                ? 'indeterminate'
+                : selectedCustomerIds.includes(customer.id);
               const isDropdownOpen = expandedCustomerId === customer.id;
 
               const triggeredLeadsForCustomer = customer.leads.filter(
@@ -438,7 +459,7 @@ function SpiderWatcherConfig() {
                       onClick={(e) => e.stopPropagation()}
                     >
                       <Checkbox
-                        checked={isCustomerChecked}
+                        checked={customerCheckedState}
                         onCheckedChange={() =>
                           toggleCustomerSelection(customer.id, allCustomerLeadIds)
                         }
@@ -530,10 +551,14 @@ function SpiderWatcherConfig() {
                         <div className="space-y-1.5">
                           {customer.leads.map((lead) => {
                             const isLeadChecked = selectedLeadIds.includes(lead.id);
-                            const overdue = isLeadOverdue(lead, leadStages);
                             const stageConfig = leadStages.find(
                               (s) => s.id === lead.stageId || s.label === lead.stageLabel
                             );
+                            const hasThreshold =
+                              stageConfig?.duration !== undefined &&
+                              stageConfig?.duration !== null &&
+                              !isNaN(stageConfig?.duration);
+                            const overdue = hasThreshold && isLeadOverdue(lead, leadStages);
 
                             return (
                               <div
@@ -543,6 +568,8 @@ function SpiderWatcherConfig() {
                                   isLeadChecked
                                     ? overdue
                                       ? 'border-danger-border bg-danger-surface/50 hover:bg-danger-surface/70'
+                                      : !hasThreshold
+                                      ? 'border-border/60 bg-background-light/40 hover:bg-background-light'
                                       : 'border-ai-200 bg-ai-50/40 hover:bg-ai-50/60'
                                     : 'border-border/60 bg-surface-light/60 opacity-65 hover:opacity-100'
                                 )}
@@ -578,11 +605,15 @@ function SpiderWatcherConfig() {
                                     {lead.elapsedValue > 1 ? 's' : ''} in stage
                                   </span>
 
-                                  {isLeadChecked && overdue ? (
+                                  {isLeadChecked && !hasThreshold ? (
+                                    <span className="rounded-full bg-surface-light border border-border px-2 py-0.5 text-[10px] font-medium text-text-soft">
+                                      none threshold set
+                                    </span>
+                                  ) : isLeadChecked && overdue ? (
                                     <span className="flex items-center gap-1 rounded-full bg-danger text-on-fill px-2 py-0.5 text-[10px] font-bold shadow-xs">
                                       <AlertTriangle className="h-3 w-3" />
                                       Alert Active ({lead.elapsedValue} {lead.elapsedUnit}s ≥{' '}
-                                      {stageConfig?.duration ?? 0} {stageConfig?.unit || 'Second'}s)
+                                      {stageConfig?.duration} {stageConfig?.unit || 'Second'}s)
                                     </span>
                                   ) : isLeadChecked ? (
                                     <span className="flex items-center gap-1 rounded-full bg-ai-50 text-ai-strong border border-ai-200 px-2 py-0.5 text-[10px] font-semibold">
@@ -616,6 +647,181 @@ function SpiderWatcherConfig() {
 export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailModalProps) {
   const [transcriberOpen, setTranscriberOpen] = useState(false);
   const isSpider = agent?.id === 'spider' || agent?.name.toLowerCase() === 'spider';
+  const { toast } = useToast();
+  const [isSaved, setIsSaved] = useState(false);
+
+  // Read store state for initial draft
+  const storeNotifications = useSpiderWatcherStore((s) => s.notifications);
+  const storeLeadStages = useSpiderWatcherStore((s) => s.leadStages);
+  const storeCustomers = useSpiderWatcherStore((s) => s.customers);
+  const storeSelectedCustomerIds = useSpiderWatcherStore((s) => s.selectedCustomerIds);
+  const storeSelectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
+  const setStoreCustomers = useSpiderWatcherStore((s) => s.setCustomers);
+
+  // Local draft state for Spider Watcher settings
+  const [draftNotifications, setDraftNotifications] = useState<SpiderNotificationsConfig>(storeNotifications);
+  const [draftLeadStages, setDraftLeadStages] = useState<LeadStageConfig[]>(storeLeadStages);
+  const [draftSelectedCustomerIds, setDraftSelectedCustomerIds] = useState<string[]>(storeSelectedCustomerIds);
+  const [draftSelectedLeadIds, setDraftSelectedLeadIds] = useState<string[]>(storeSelectedLeadIds);
+  const [hasDraftModifiedSelection, setHasDraftModifiedSelection] = useState<boolean>(false);
+
+  // Fetch actual real leads from the Leads API
+  const { data: apiLeads } = useQuery({
+    queryKey: ['spider-watcher-leads-real'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/api/leads', { params: { limit: 100 } });
+        return res.data?.leads || [];
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 30_000,
+  });
+
+  // Fetch actual customers from API
+  const { data: apiCustomers } = useQuery({
+    queryKey: ['spider-watcher-customers-real'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/api/customers', { params: { limit: 100 } });
+        return res.data?.customers || [];
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 30_000,
+  });
+
+  // Sync store when real API leads arrive
+  useEffect(() => {
+    if (
+      (Array.isArray(apiLeads) && apiLeads.length > 0) ||
+      (Array.isArray(apiCustomers) && apiCustomers.length > 0)
+    ) {
+      const live = buildWatcherCustomersFromLive(apiLeads || [], apiCustomers || []);
+      setStoreCustomers(live);
+    }
+  }, [apiLeads, apiCustomers, setStoreCustomers]);
+
+  // Reset draft state from store whenever modal opens / agent changes
+  useEffect(() => {
+    if (agent && isSpider) {
+      const storeState = useSpiderWatcherStore.getState();
+      setDraftNotifications({ ...storeState.notifications });
+      setDraftLeadStages(storeState.leadStages.map((s) => ({ ...s })));
+      setDraftSelectedCustomerIds([...storeState.selectedCustomerIds]);
+      setDraftSelectedLeadIds([...storeState.selectedLeadIds]);
+      setHasDraftModifiedSelection(storeState.hasUserModifiedSelection);
+      setIsSaved(false);
+    }
+  }, [agent, isSpider]);
+
+  // If customers exist and user has not modified selection, ensure all are selected in draft
+  useEffect(() => {
+    if (
+      isSpider &&
+      storeCustomers.length > 0 &&
+      draftSelectedCustomerIds.length === 0 &&
+      !hasDraftModifiedSelection
+    ) {
+      setDraftSelectedCustomerIds(storeCustomers.map((c) => c.id));
+      setDraftSelectedLeadIds(storeCustomers.flatMap((c) => c.leads.map((l) => l.id)));
+    }
+  }, [isSpider, storeCustomers, draftSelectedCustomerIds.length, hasDraftModifiedSelection]);
+
+  const updateDraftLeadStage = (id: string, updates: Partial<LeadStageConfig>) => {
+    setDraftLeadStages((prev) =>
+      prev.map((stage) => (stage.id === id ? { ...stage, ...updates } : stage))
+    );
+  };
+
+  const toggleCustomerSelection = (customerId: string, leadIdsForCustomer: string[]) => {
+    setHasDraftModifiedSelection(true);
+    const allLeadsSelected =
+      leadIdsForCustomer.length > 0 &&
+      leadIdsForCustomer.every((id) => draftSelectedLeadIds.includes(id));
+    const isSelected =
+      draftSelectedCustomerIds.includes(customerId) &&
+      (leadIdsForCustomer.length === 0 || allLeadsSelected);
+
+    let newCustomerIds: string[];
+    let newLeadIds: string[];
+
+    if (isSelected) {
+      newCustomerIds = draftSelectedCustomerIds.filter((id) => id !== customerId);
+      newLeadIds = draftSelectedLeadIds.filter((id) => !leadIdsForCustomer.includes(id));
+    } else {
+      newCustomerIds = Array.from(new Set([...draftSelectedCustomerIds, customerId]));
+      newLeadIds = Array.from(new Set([...draftSelectedLeadIds, ...leadIdsForCustomer]));
+    }
+
+    setDraftSelectedCustomerIds(newCustomerIds);
+    setDraftSelectedLeadIds(newLeadIds);
+  };
+
+  const toggleLeadSelection = (
+    leadId: string,
+    customerId: string,
+    allLeadIdsForCustomer: string[]
+  ) => {
+    setHasDraftModifiedSelection(true);
+    const isLeadSelected = draftSelectedLeadIds.includes(leadId);
+    let newLeadIds: string[];
+
+    if (isLeadSelected) {
+      newLeadIds = draftSelectedLeadIds.filter((id) => id !== leadId);
+    } else {
+      newLeadIds = [...draftSelectedLeadIds, leadId];
+    }
+
+    const hasAnySelectedLead = allLeadIdsForCustomer.some((id) => newLeadIds.includes(id));
+    let newCustomerIds = draftSelectedCustomerIds;
+
+    if (hasAnySelectedLead && !draftSelectedCustomerIds.includes(customerId)) {
+      newCustomerIds = [...draftSelectedCustomerIds, customerId];
+    } else if (!hasAnySelectedLead && draftSelectedCustomerIds.includes(customerId)) {
+      newCustomerIds = draftSelectedCustomerIds.filter((id) => id !== customerId);
+    }
+
+    setDraftSelectedLeadIds(newLeadIds);
+    setDraftSelectedCustomerIds(newCustomerIds);
+  };
+
+  const selectAllCustomers = () => {
+    setHasDraftModifiedSelection(true);
+    setDraftSelectedCustomerIds(storeCustomers.map((c) => c.id));
+    setDraftSelectedLeadIds(storeCustomers.flatMap((c) => c.leads.map((l) => l.id)));
+  };
+
+  const deselectAllCustomers = () => {
+    setHasDraftModifiedSelection(true);
+    setDraftSelectedCustomerIds([]);
+    setDraftSelectedLeadIds([]);
+  };
+
+  const handleSave = () => {
+    useSpiderWatcherStore.setState({
+      notifications: draftNotifications,
+      leadStages: draftLeadStages,
+      selectedCustomerIds: draftSelectedCustomerIds,
+      selectedLeadIds: draftSelectedLeadIds,
+      hasUserModifiedSelection: true,
+      days:
+        draftLeadStages[0]?.duration !== undefined
+          ? String(draftLeadStages[0].duration)
+          : '',
+    });
+
+    setIsSaved(true);
+    toast({
+      title: 'Spider Agent Settings Saved',
+      description:
+        'Notification preferences, distance thresholds, and contact watchers have been successfully applied.',
+      duration: 3000,
+    });
+    setTimeout(() => setIsSaved(false), 2000);
+  };
 
   return (
     <>
@@ -672,7 +878,19 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
               {/* Body */}
               <div className="flex-1 overflow-y-auto p-6">
                 {isSpider ? (
-                  <SpiderWatcherConfig />
+                  <SpiderWatcherConfig
+                    notifications={draftNotifications}
+                    setNotifications={setDraftNotifications}
+                    leadStages={draftLeadStages}
+                    updateLeadStage={updateDraftLeadStage}
+                    selectedCustomerIds={draftSelectedCustomerIds}
+                    selectedLeadIds={draftSelectedLeadIds}
+                    toggleCustomerSelection={toggleCustomerSelection}
+                    toggleLeadSelection={toggleLeadSelection}
+                    selectAllCustomers={selectAllCustomers}
+                    deselectAllCustomers={deselectAllCustomers}
+                    storeCustomers={storeCustomers}
+                  />
                 ) : (
                   <>
                     {/* Feature-video placeholder */}
@@ -713,24 +931,65 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
 
               {/* Footer CTA */}
               <div className="border-t border-border bg-surface-light p-4">
-                <div className="flex items-center gap-3">
-                  <Button
-                    variant="solid"
-                    tone="ai"
-                    className="flex-1"
-                    onClick={() => onBook(agent)}
-                  >
-                    Book a call about {agent.name}
-                  </Button>
-                  {agent.name.toLowerCase() === 'owl' && (
-                    <Button
-                      id="transcriber-start-btn"
-                      variant="outline"
-                      className="shrink-0"
-                      onClick={() => setTranscriberOpen(true)}
-                    >
-                      Start
-                    </Button>
+                <div className="flex items-center gap-3 w-full">
+                  {isSpider ? (
+                    <>
+                      <Button
+                        variant="solid"
+                        tone="ai"
+                        className="flex-[4] min-w-0"
+                        style={{ width: '80%' }}
+                        onClick={() => onBook(agent)}
+                      >
+                        Book a call about {agent.name}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="solid"
+                        onClick={handleSave}
+                        className={cn(
+                          'flex-[1] min-w-0 transition-all shadow-xs flex items-center justify-center gap-1.5',
+                          isSaved
+                            ? 'bg-success-600 hover:bg-success-700 text-on-fill'
+                            : 'bg-ai-600 hover:bg-ai-700 text-on-fill'
+                        )}
+                        style={{ width: '20%' }}
+                        aria-label="Save configured Spider agent settings"
+                      >
+                        {isSaved ? (
+                          <>
+                            <Check className="h-4 w-4 mr-1" />
+                            Saved
+                          </>
+                        ) : (
+                          <>
+                            <Save className="h-4 w-4 mr-1" />
+                            Save
+                          </>
+                        )}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        variant="solid"
+                        tone="ai"
+                        className="flex-1"
+                        onClick={() => onBook(agent)}
+                      >
+                        Book a call about {agent.name}
+                      </Button>
+                      {agent.name.toLowerCase() === 'owl' && (
+                        <Button
+                          id="transcriber-start-btn"
+                          variant="outline"
+                          className="shrink-0"
+                          onClick={() => setTranscriberOpen(true)}
+                        >
+                          Start
+                        </Button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

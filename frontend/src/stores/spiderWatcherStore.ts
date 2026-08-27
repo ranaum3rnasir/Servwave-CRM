@@ -11,7 +11,7 @@ export interface LeadStageConfig {
   label: string;
   fromStage: string;
   toStage: string;
-  duration: number;
+  duration?: number;
   unit: TimeUnit;
 }
 
@@ -44,6 +44,7 @@ export interface SpiderNotificationsConfig {
   email: boolean;
   sms: boolean;
   inApp: boolean;
+  redFrame?: boolean;
 }
 
 export interface InAppNotification {
@@ -62,18 +63,19 @@ export interface InAppNotification {
 }
 
 /** Convert a duration + unit to seconds for comparison */
-export function timeUnitToSeconds(duration: number, unit: TimeUnit): number {
+export function timeUnitToSeconds(duration: number | undefined | null, unit: TimeUnit): number {
+  const d = duration !== undefined && duration !== null ? duration : 0;
   switch (unit) {
     case 'Second':
-      return duration;
+      return d;
     case 'Minute':
-      return duration * 60;
+      return d * 60;
     case 'Hour':
-      return duration * 3600;
+      return d * 3600;
     case 'Day':
-      return duration * 86400;
+      return d * 86400;
     default:
-      return duration;
+      return d;
   }
 }
 
@@ -199,7 +201,9 @@ export function resolveLeadStageAndElapsedTime(lead: {
 /** Check whether a lead has exceeded the stage threshold */
 export function isLeadOverdue(lead: WatcherLead, stageConfigs: LeadStageConfig[]): boolean {
   const config = stageConfigs.find((s) => s.id === lead.stageId || s.label === lead.stageLabel);
-  if (!config) return false;
+  if (!config || config.duration === undefined || config.duration === null || isNaN(config.duration)) {
+    return false;
+  }
 
   const leadSeconds =
     lead.elapsedSeconds !== undefined
@@ -217,7 +221,7 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
     label: 'New → Contacted',
     fromStage: 'New',
     toStage: 'Contacted',
-    duration: 0,
+    duration: undefined,
     unit: 'Second',
   },
   {
@@ -225,7 +229,7 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
     label: 'Contacted → Walkthrough Scheduled',
     fromStage: 'Contacted',
     toStage: 'Walkthrough Scheduled',
-    duration: 0,
+    duration: undefined,
     unit: 'Second',
   },
   {
@@ -233,7 +237,7 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
     label: 'Walkthrough Scheduled → Estimate',
     fromStage: 'Walkthrough Scheduled',
     toStage: 'Estimate',
-    duration: 0,
+    duration: undefined,
     unit: 'Second',
   },
 ];
@@ -293,6 +297,14 @@ export function buildWatcherCustomersFromLive(
           phone: cust.phone,
           leads: [],
         });
+      } else {
+        const existing = customerMap.get(cust.id)!;
+        if (existing.name === 'Customer' || !existing.email || !existing.company) {
+          existing.name = customerDisplayName(cust, cust.company_name || existing.name);
+          existing.company = cust.company_name || existing.company;
+          existing.email = cust.email || existing.email;
+          existing.phone = cust.phone || existing.phone;
+        }
       }
     }
   }
@@ -310,6 +322,7 @@ interface SpiderWatcherState {
   customers: WatcherCustomer[];
   selectedCustomerIds: string[];
   selectedLeadIds: string[];
+  hasUserModifiedSelection: boolean;
   inAppNotifications: InAppNotification[];
   readNotificationIds: string[];
   isRedBorderActive: boolean;
@@ -322,6 +335,7 @@ interface SpiderWatcherState {
       | ((prev: SpiderNotificationsConfig) => SpiderNotificationsConfig)
   ) => void;
   setInAppNotification: (enabled: boolean) => void;
+  setRedFrameNotification: (enabled: boolean) => void;
   setDays: (days: string) => void;
   setLeadStages: (stages: LeadStageConfig[]) => void;
   updateLeadStage: (id: string, updates: Partial<LeadStageConfig>) => void;
@@ -353,12 +367,14 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
     email: true,
     sms: true,
     inApp: true,
+    redFrame: true,
   },
-  days: '0',
+  days: '',
   leadStages: DEFAULT_LEAD_STAGES,
   customers: [],
   selectedCustomerIds: [],
   selectedLeadIds: [],
+  hasUserModifiedSelection: false,
   inAppNotifications: [],
   readNotificationIds: [],
   isRedBorderActive: false,
@@ -375,6 +391,11 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
       notifications: { ...state.notifications, inApp: enabled },
     })),
 
+  setRedFrameNotification: (enabled) =>
+    set((state) => ({
+      notifications: { ...state.notifications, redFrame: enabled },
+    })),
+
   setDays: (days) => set({ days }),
 
   setLeadStages: (stages) => set({ leadStages: stages }),
@@ -385,15 +406,48 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
         stage.id === id ? { ...stage, ...updates } : stage
       );
       const firstStage = updatedStages[0];
-      const newDays = firstStage ? String(firstStage.duration) : state.days;
+      const newDays = firstStage && firstStage.duration !== undefined ? String(firstStage.duration) : '';
       return { leadStages: updatedStages, days: newDays };
     }),
 
-  setCustomers: (customers) => set({ customers }),
+  setCustomers: (customers) =>
+    set((state) => {
+      const allCustomerIds = customers.map((c) => c.id);
+      const allLeadIds = customers.flatMap((c) => c.leads.map((l) => l.id));
+
+      // If user has not manually customized selection, select ALL customers and ALL nested leads by default
+      if (!state.hasUserModifiedSelection) {
+        return {
+          customers,
+          selectedCustomerIds: allCustomerIds,
+          selectedLeadIds: allLeadIds,
+        };
+      }
+
+      // Preserve valid customer and lead selections if customized by the user
+      const validCustomerIds = state.selectedCustomerIds.filter((id) =>
+        allCustomerIds.includes(id)
+      );
+      const validLeadIds = state.selectedLeadIds.filter((id) =>
+        allLeadIds.includes(id)
+      );
+
+      return {
+        customers,
+        selectedCustomerIds: validCustomerIds,
+        selectedLeadIds: validLeadIds,
+      };
+    }),
 
   toggleCustomerSelection: (customerId, leadIdsForCustomer) =>
     set((state) => {
-      const isSelected = state.selectedCustomerIds.includes(customerId);
+      const allLeadsSelected =
+        leadIdsForCustomer.length > 0 &&
+        leadIdsForCustomer.every((id) => state.selectedLeadIds.includes(id));
+      const isSelected =
+        state.selectedCustomerIds.includes(customerId) &&
+        (leadIdsForCustomer.length === 0 || allLeadsSelected);
+
       let newCustomerIds: string[];
       let newLeadIds: string[];
 
@@ -401,11 +455,12 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
         newCustomerIds = state.selectedCustomerIds.filter((id) => id !== customerId);
         newLeadIds = state.selectedLeadIds.filter((id) => !leadIdsForCustomer.includes(id));
       } else {
-        newCustomerIds = [...state.selectedCustomerIds, customerId];
+        newCustomerIds = Array.from(new Set([...state.selectedCustomerIds, customerId]));
         newLeadIds = Array.from(new Set([...state.selectedLeadIds, ...leadIdsForCustomer]));
       }
 
       return {
+        hasUserModifiedSelection: true,
         selectedCustomerIds: newCustomerIds,
         selectedLeadIds: newLeadIds,
       };
@@ -432,6 +487,7 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
       }
 
       return {
+        hasUserModifiedSelection: true,
         selectedLeadIds: newLeadIds,
         selectedCustomerIds: newCustomerIds,
       };
@@ -439,12 +495,14 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
 
   selectAllCustomers: () =>
     set((state) => ({
+      hasUserModifiedSelection: true,
       selectedCustomerIds: state.customers.map((c) => c.id),
       selectedLeadIds: state.customers.flatMap((c) => c.leads.map((l) => l.id)),
     })),
 
   deselectAllCustomers: () =>
     set({
+      hasUserModifiedSelection: true,
       selectedCustomerIds: [],
       selectedLeadIds: [],
     }),
@@ -537,12 +595,13 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
             lead.stageLabel || lead.stageId || config?.fromStage
           );
 
+          const thresholdDuration = config?.duration ?? 0;
           result.push({
             id: notifId,
             contactName: customer.name,
             companyName: customer.company || customer.name,
             inactiveDays: Math.max(1, Math.round(leadSecs / 86400)),
-            message: `Lead ${lead.leadNumber} (${lead.serviceRequest}) in stage "${currentStage}" for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${config?.duration ?? 0} ${config?.unit || 'Second'}${config && config.duration > 1 ? 's' : ''}).`,
+            message: `Lead ${lead.leadNumber} (${lead.serviceRequest}) in stage "${currentStage}" for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${thresholdDuration} ${config?.unit || 'Second'}${thresholdDuration > 1 ? 's' : ''}).`,
             timeAgo: `${lead.elapsedValue} ${lead.elapsedUnit.toLowerCase()}${lead.elapsedValue > 1 ? 's' : ''} in stage`,
             read: false,
             contactId: customer.id,

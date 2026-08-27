@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Sparkles, BellOff, X, Bell } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -16,15 +16,29 @@ export function SpiderNotificationPopup() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const panelRef = useRef<HTMLDivElement>(null);
+  const [tick, setTick] = useState(0);
 
   const inAppEnabled = useSpiderWatcherStore((s) => s.notifications.inApp);
+  const customers = useSpiderWatcherStore((s) => s.customers);
+  const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
+  const leadStages = useSpiderWatcherStore((s) => s.leadStages);
+  const readNotificationIds = useSpiderWatcherStore((s) => s.readNotificationIds);
   const getComputedNotifications = useSpiderWatcherStore((s) => s.getComputedNotifications);
   const selectNotification = useSpiderWatcherStore((s) => s.selectNotification);
   const setInAppNotification = useSpiderWatcherStore((s) => s.setInAppNotification);
   const isWindowOpen = useSpiderWatcherStore((s) => s.isWindowOpen);
   const setIsWindowOpen = useSpiderWatcherStore((s) => s.setIsWindowOpen);
 
-  const activeNotifications = inAppEnabled ? getComputedNotifications() : [];
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTick((t) => (t + 1) % 10000);
+    }, 2500);
+    return () => clearInterval(timer);
+  }, []);
+
+  const activeNotifications = useMemo(() => {
+    return inAppEnabled ? getComputedNotifications() : [];
+  }, [inAppEnabled, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
 
   const unreadCount = inAppEnabled
     ? activeNotifications.filter((n) => !n.read).length
