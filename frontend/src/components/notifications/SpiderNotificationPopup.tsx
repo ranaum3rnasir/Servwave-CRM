@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Sparkles, BellOff, X, Bell } from 'lucide-react';
+import { Sparkles, BellOff, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Heading } from '@/components/ui/heading';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
 import {
@@ -97,7 +97,16 @@ export function SpiderNotificationPopup() {
         )}
         style={!isWindowOpen && unreadCount > 0 ? { animationDuration: '1.4s' } : undefined}
       >
-        <Bell className="h-6 w-6 text-on-fill drop-shadow-xs" />
+        <Avatar className="h-9 w-9 shrink-0 select-none pointer-events-none">
+          <AvatarImage
+            src="/ai-center/agents/spider.png"
+            alt="Spider Agent"
+            className="object-contain"
+          />
+          <AvatarFallback tone="solid">
+            🕷️
+          </AvatarFallback>
+        </Avatar>
 
         {/* Unread badge */}
         {unreadCount > 0 && (
@@ -117,9 +126,16 @@ export function SpiderNotificationPopup() {
           {/* Header */}
           <div className="flex items-center justify-between border-b border-border bg-surface-light px-4 py-3">
             <div className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ai-50 text-ai-600">
-                <Sparkles className="h-3.5 w-3.5" />
-              </span>
+              <Avatar className="h-6 w-6 shrink-0">
+                <AvatarImage
+                  src="/ai-center/agents/spider.png"
+                  alt="Spider Agent"
+                  className="object-contain"
+                />
+                <AvatarFallback tone="solid">
+                  🕷️
+                </AvatarFallback>
+              </Avatar>
               <div>
                 <Heading level={3} scale="sm" weight="bold">
                   Spider Notifications
