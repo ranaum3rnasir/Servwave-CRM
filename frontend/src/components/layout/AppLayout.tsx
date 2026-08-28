@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Outlet, useLocation } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -8,6 +8,7 @@ import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import Sidebar from './Sidebar';
 import Header from './Header';
 import { ServWaveMark } from '@/components/brand/ServWaveMark';
+import { useSettingsGuard } from '@/stores/settingsGuard.store';
 import { AiCenterModal } from '@/components/ai-center/AiCenterModal';
 import CopilotProvider from '@/components/copilot/CopilotProvider';
 import { OfficeSoftphoneWarmup } from '@/components/communication/phone/OfficeSoftphoneWarmup';
@@ -73,13 +74,23 @@ export default function AppLayout() {
             >
               <Menu className="h-5 w-5" />
             </Button>
-            {/* Wordmark */}
-            <div className="flex min-w-0 items-center gap-2">
-              <ServWaveMark className="h-6 w-6 shrink-0" />
-              <span className="truncate text-base font-bold tracking-tight text-on-fill">
-                ServWave
+            {/* Wordmark (acts as home link) */}
+            <Link
+              to="/"
+              aria-label="ServWave dashboard"
+              onClick={(e) => {
+                if (useSettingsGuard.getState().isDirty) {
+                  e.preventDefault();
+                  requestLeave(() => navigate('/'));
+                }
+              }}
+              className="flex items-center gap-2 rounded-lg outline-none transition-colors focus-visible:ring-2 focus-visible:ring-on-fill/60"
+            >
+              <ServWaveMark className="h-6 w-auto text-on-fill" />
+              <span className="hidden whitespace-nowrap text-lg font-bold tracking-tight text-on-fill sm:inline">
+                Serv<span className="text-on-fill">Wave</span>
               </span>
-            </div>
+            </Link>
           </div>
 
           {/* Header content (search, notifications, user avatar, AI trigger) */}
