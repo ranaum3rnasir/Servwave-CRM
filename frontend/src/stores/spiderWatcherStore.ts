@@ -242,14 +242,188 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
   },
 ];
 
+const NOW = Date.now();
+const MIN = 60 * 1000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
+  {
+    id: 'c1',
+    name: 'John Smith',
+    company: 'Apex Plumbing Co.',
+    email: 'john@apexplumbing.com',
+    phone: '+1 (555) 234-5678',
+    leads: [
+      {
+        id: 'l1',
+        leadNumber: 'LD-101',
+        serviceRequest: 'Main Line Leak & Pipe Replacement',
+        stageId: 'new-contacted',
+        stageLabel: 'New → Contacted',
+        elapsedValue: 4,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 4 * 86400,
+        createdAt: new Date(NOW - 4 * DAY).toISOString(),
+      },
+      {
+        id: 'l2',
+        leadNumber: 'LD-102',
+        serviceRequest: 'Commercial Water Heater Installation',
+        stageId: 'contacted-walkthrough-scheduled',
+        stageLabel: 'Contacted → Walkthrough Scheduled',
+        elapsedValue: 6,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 6 * 86400,
+        createdAt: new Date(NOW - 10 * DAY).toISOString(),
+        contactedAt: new Date(NOW - 6 * DAY).toISOString(),
+      },
+      {
+        id: 'l3',
+        leadNumber: 'LD-103',
+        serviceRequest: 'Backflow Valve Annual Testing',
+        stageId: 'walkthrough-scheduled-estimate',
+        stageLabel: 'Walkthrough Scheduled → Estimate',
+        elapsedValue: 12,
+        elapsedUnit: 'Hour',
+        elapsedSeconds: 12 * 3600,
+        createdAt: new Date(NOW - 5 * DAY).toISOString(),
+        walkthroughScheduledAt: new Date(NOW - 12 * HOUR).toISOString(),
+      },
+    ],
+  },
+  {
+    id: 'c2',
+    name: 'Sarah Johnson',
+    company: 'Metro HVAC Services',
+    email: 'sarah.j@metrohvac.com',
+    phone: '+1 (555) 345-6789',
+    leads: [
+      {
+        id: 'l4',
+        leadNumber: 'LD-201',
+        serviceRequest: 'Central AC Rooftop Unit Overhaul',
+        stageId: 'contacted-walkthrough-scheduled',
+        stageLabel: 'Contacted → Walkthrough Scheduled',
+        elapsedValue: 8,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 8 * 86400,
+        createdAt: new Date(NOW - 12 * DAY).toISOString(),
+        contactedAt: new Date(NOW - 8 * DAY).toISOString(),
+      },
+      {
+        id: 'l5',
+        leadNumber: 'LD-202',
+        serviceRequest: 'Ductwork System Sanitization & Sealing',
+        stageId: 'walkthrough-scheduled-estimate',
+        stageLabel: 'Walkthrough Scheduled → Estimate',
+        elapsedValue: 3,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 3 * 86400,
+        createdAt: new Date(NOW - 7 * DAY).toISOString(),
+        walkthroughScheduledAt: new Date(NOW - 3 * DAY).toISOString(),
+      },
+    ],
+  },
+  {
+    id: 'c3',
+    name: 'Michael Brown',
+    company: 'Citywide Electric',
+    email: 'mbrown@citywide.com',
+    phone: '+1 (555) 456-7890',
+    leads: [
+      {
+        id: 'l6',
+        leadNumber: 'LD-301',
+        serviceRequest: '400A Main Electrical Panel Upgrade',
+        stageId: 'new-contacted',
+        stageLabel: 'New → Contacted',
+        elapsedValue: 5,
+        elapsedUnit: 'Hour',
+        elapsedSeconds: 5 * 3600,
+        createdAt: new Date(NOW - 5 * HOUR).toISOString(),
+      },
+      {
+        id: 'l7',
+        leadNumber: 'LD-302',
+        serviceRequest: 'Level 3 Dual EV Charger Installation',
+        stageId: 'walkthrough-scheduled-estimate',
+        stageLabel: 'Walkthrough Scheduled → Estimate',
+        elapsedValue: 2,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 2 * 86400,
+        createdAt: new Date(NOW - 4 * DAY).toISOString(),
+        walkthroughScheduledAt: new Date(NOW - 2 * DAY).toISOString(),
+      },
+    ],
+  },
+  {
+    id: 'c4',
+    name: 'Emily Davis',
+    company: 'Highland Builders',
+    email: 'edavis@highland.com',
+    phone: '+1 (555) 567-8901',
+    leads: [
+      {
+        id: 'l8',
+        leadNumber: 'LD-401',
+        serviceRequest: 'Custom Home Framing Structural Inspection',
+        stageId: 'walkthrough-scheduled-estimate',
+        stageLabel: 'Walkthrough Scheduled → Estimate',
+        elapsedValue: 4,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 4 * 86400,
+        createdAt: new Date(NOW - 6 * DAY).toISOString(),
+        walkthroughScheduledAt: new Date(NOW - 4 * DAY).toISOString(),
+      },
+      {
+        id: 'l9',
+        leadNumber: 'LD-402',
+        serviceRequest: 'Multi-Level Deck Construction',
+        stageId: 'new-contacted',
+        stageLabel: 'New → Contacted',
+        elapsedValue: 5,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 5 * 86400,
+        createdAt: new Date(NOW - 5 * DAY).toISOString(),
+      },
+    ],
+  },
+  {
+    id: 'c5',
+    name: 'Robert Wilson',
+    company: 'Summit Property Management',
+    email: 'rwilson@summitpm.com',
+    phone: '+1 (555) 678-9012',
+    leads: [
+      {
+        id: 'l10',
+        leadNumber: 'LD-501',
+        serviceRequest: 'Multi-Unit HVAC & Boiler Seasonal Assessment',
+        stageId: 'contacted-walkthrough-scheduled',
+        stageLabel: 'Contacted → Walkthrough Scheduled',
+        elapsedValue: 6,
+        elapsedUnit: 'Day',
+        elapsedSeconds: 6 * 86400,
+        createdAt: new Date(NOW - 9 * DAY).toISOString(),
+        contactedAt: new Date(NOW - 6 * DAY).toISOString(),
+      },
+    ],
+  },
+];
+
 /** Build customer + leads structure from live API records */
 export function buildWatcherCustomersFromLive(
   apiLeads: any[] = [],
   apiCustomers: any[] = []
 ): WatcherCustomer[] {
+  if ((!apiLeads || apiLeads.length === 0) && (!apiCustomers || apiCustomers.length === 0)) {
+    return DEFAULT_WATCHER_CUSTOMERS;
+  }
+
   const customerMap = new Map<string, WatcherCustomer>();
 
-  if (Array.isArray(apiLeads)) {
+  if (Array.isArray(apiLeads) && apiLeads.length > 0) {
     for (const rawLead of apiLeads) {
       const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
       const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
@@ -309,11 +483,12 @@ export function buildWatcherCustomersFromLive(
     }
   }
 
-  return Array.from(customerMap.values());
+  const result = Array.from(customerMap.values());
+  return result.length > 0 ? result : DEFAULT_WATCHER_CUSTOMERS;
 }
 
-/** No mock/dummy customers by default — strictly driven by live data & selections */
-export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [];
+const ALL_CUSTOMER_IDS = DEFAULT_WATCHER_CUSTOMERS.map((c) => c.id);
+const ALL_LEAD_IDS = DEFAULT_WATCHER_CUSTOMERS.flatMap((c) => c.leads.map((l) => l.id));
 
 interface SpiderWatcherState {
   notifications: SpiderNotificationsConfig;
@@ -371,9 +546,9 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
   },
   days: '',
   leadStages: DEFAULT_LEAD_STAGES,
-  customers: [],
-  selectedCustomerIds: [],
-  selectedLeadIds: [],
+  customers: DEFAULT_WATCHER_CUSTOMERS,
+  selectedCustomerIds: ALL_CUSTOMER_IDS,
+  selectedLeadIds: ALL_LEAD_IDS,
   hasUserModifiedSelection: false,
   inAppNotifications: [],
   readNotificationIds: [],
