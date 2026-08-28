@@ -19,7 +19,7 @@ import api from '@/lib/axios';
 import { useAuthStore } from '@/stores/auth.store';
 import { renderWithProviders } from './helpers';
 import { buildAbility } from '@/lib/ability';
-import SchedulePage from '@/pages/SchedulePage';
+import SchedulePage from '@/pages/v2/schedule/SchedulePage';
 
 const mockApi = vi.mocked(api);
 

@@ -20,11 +20,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Routes, Route } from 'react-router-dom';
 import api from '@/lib/axios';
 import * as tasksApi from '@/lib/api/tasks';
+import { useTaskDetailStore } from '@/stores/taskDetailStore';
 import { renderWithProviders } from './helpers';
 import { JobLeadTasksTab } from '@/components/tasks/JobLeadTasksTab';
 import CustomerDetailPage from '@/pages/CustomerDetailPage';
@@ -67,10 +68,17 @@ vi.mock('@/components/tasks/TaskDetailDrawer', () => ({
   TaskDetailDrawer: () => null,
 }));
 
-// Stub TaskCard to render a simple data-testid element
+// Stub TaskCard to render a simple data-testid element. The assignee names are
+// rendered too so the stale-card defect (an assignee edit made in the drawer
+// leaving the card's avatar stack untouched) is observable from the test.
 vi.mock('@/components/tasks/TaskCard', () => ({
-  TaskCard: ({ task }: { task: { id: string; title: string } }) => (
-    <div data-testid={`task-card-${task.id}`}>{task.title}</div>
+  TaskCard: ({ task }: { task: { id: string; title: string; assignees?: { id: string; name: string | null }[] } }) => (
+    <div data-testid={`task-card-${task.id}`}>
+      {task.title}
+      <span data-testid={`task-card-assignees-${task.id}`}>
+        {(task.assignees ?? []).map((a) => a.name ?? a.id).join(', ')}
+      </span>
+    </div>
   ),
 }));
 
@@ -126,8 +134,8 @@ function makeTask(id: string, title: string) {
     description: '',
     status: 'TODO' as const,
     priority: 'MEDIUM' as const,
-    owner_id: '',
-    owner_name: null,
+    assignee_ids: ['user-1'],
+    assignees: [{ id: 'user-1', name: 'Casey Field' }],
     watcher_ids: [],
     due_at: null,
     linked_entity: { type: 'JOB' as const, id: ENTITY_UUID, label: 'J00001' },
@@ -255,6 +263,8 @@ describe('JobLeadTasksTab — entity-filtered server fetch (FIX A)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // The drawer store is module state shared by every test in this file.
+    useTaskDetailStore.setState({ openTaskId: null });
     listTasksSpy = vi
       .spyOn(tasksApi, 'listTasks')
       .mockResolvedValue(ENTITY_TASKS);
@@ -320,6 +330,81 @@ describe('JobLeadTasksTab — entity-filtered server fetch (FIX A)', () => {
       linked_entity_type: 'JOB',
       linked_entity_id: ENTITY_UUID,
     });
+  });
+
+  // ── Stale-card defect (#1718's class) ───────────────────────────────────────
+  // The tab holds its rows in LOCAL state; every drawer edit writes to
+  // `useTasksStore.tasks`, a different array. Without a refresh the card under
+  // the drawer keeps the pre-edit assignee stack until a full page reload.
+
+  it('refetches entity tasks when the detail drawer closes, so a drawer edit reaches the card', async () => {
+    const EDITED = [
+      {
+        ...makeTask(TASK_UUID_1, 'Inspect HVAC unit'),
+        assignee_ids: ['user-2'],
+        assignees: [{ id: 'user-2', name: 'Dana Rivera' }],
+      },
+      makeTask(TASK_UUID_2, 'Replace filter'),
+    ];
+
+    renderWithProviders(
+      <JobLeadTasksTab entity={{ type: 'JOB', id: ENTITY_UUID, label: 'J00001' }} />
+    );
+
+    await waitFor(() => expect(listTasksSpy).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId(`task-card-assignees-${TASK_UUID_1}`).textContent).toBe('Casey Field');
+
+    // Open the drawer on this task. Opening alone must NOT refetch.
+    act(() => { useTaskDetailStore.getState().open(TASK_UUID_1); });
+    expect(listTasksSpy).toHaveBeenCalledTimes(1);
+
+    // The edit lands in the tasks store, which this tab does not read from.
+    listTasksSpy.mockResolvedValue(EDITED);
+
+    act(() => { useTaskDetailStore.getState().close(); });
+
+    await waitFor(() => expect(listTasksSpy).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId(`task-card-assignees-${TASK_UUID_1}`).textContent).toBe('Dana Rivera')
+    );
+
+    // The refresh must still be the ENTITY-FILTERED call: the tab shows only
+    // tasks linked to this entity, and the row set must not widen.
+    expect(listTasksSpy).toHaveBeenNthCalledWith(2, {
+      linked_entity_type: 'JOB',
+      linked_entity_id: ENTITY_UUID,
+    });
+    expect(screen.getByText('Tasks', { selector: 'h3' }).textContent).toContain('(2)');
+  });
+
+  it('refreshes when the drawer switches straight from one task to another', async () => {
+    renderWithProviders(
+      <JobLeadTasksTab entity={{ type: 'JOB', id: ENTITY_UUID, label: 'J00001' }} />
+    );
+    await waitFor(() => expect(listTasksSpy).toHaveBeenCalledTimes(1));
+
+    act(() => { useTaskDetailStore.getState().open(TASK_UUID_1); });
+    // t1 -> t2 never passes through null, so a "closed?" test alone would miss it.
+    act(() => { useTaskDetailStore.getState().open(TASK_UUID_2); });
+
+    await waitFor(() => expect(listTasksSpy).toHaveBeenCalledTimes(2));
+  });
+
+  it('drops a task deleted from the drawer once the drawer closes', async () => {
+    renderWithProviders(
+      <JobLeadTasksTab entity={{ type: 'JOB', id: ENTITY_UUID, label: 'J00001' }} />
+    );
+    await waitFor(() => expect(listTasksSpy).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId(`task-card-${TASK_UUID_1}`)).toBeInTheDocument();
+
+    act(() => { useTaskDetailStore.getState().open(TASK_UUID_1); });
+    listTasksSpy.mockResolvedValue([makeTask(TASK_UUID_2, 'Replace filter')]);
+    act(() => { useTaskDetailStore.getState().close(); });
+
+    await waitFor(() =>
+      expect(screen.queryByTestId(`task-card-${TASK_UUID_1}`)).not.toBeInTheDocument()
+    );
+    expect(screen.getByTestId(`task-card-${TASK_UUID_2}`)).toBeInTheDocument();
   });
 
   it('works with LEAD entity type', async () => {
@@ -427,7 +512,7 @@ describe('CustomerDetailPage — Tasks tab (FIX B)', () => {
     renderWithProviders(<CustomerDetailPage />);
 
     // Wait for load — customer name heading
-    await screen.findByText('Test Customer', { selector: 'h1' });
+    await screen.findByRole('heading', { name: /Test Customer/ });
     expect(screen.getByRole('tab', { name: /Tasks/i })).toBeInTheDocument();
   });
 
@@ -436,7 +521,7 @@ describe('CustomerDetailPage — Tasks tab (FIX B)', () => {
 
     renderWithProviders(<CustomerDetailPage />);
 
-    await screen.findByText('Test Customer', { selector: 'h1' });
+    await screen.findByRole('heading', { name: /Test Customer/ });
     await user.click(screen.getByRole('tab', { name: /Tasks/i }));
 
     // JobLeadTasksTab calls listTasks — verify it used the UUID (not number "C00099")

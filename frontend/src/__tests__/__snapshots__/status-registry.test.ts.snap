@@ -15,7 +15,7 @@ estimate.DECLINED -> intent=danger | label=Declined | chip=bg-danger-surface tex
 estimate.EXPIRED -> intent=warning | label=Expired | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
 estimate.ARCHIVED -> intent=neutral | label=Archived | chip=bg-neutral-surface text-neutral-text border-neutral-border | fill=bg-neutral-strong | text=text-neutral-text
 estimate.SUPERSEDED -> intent=neutral | label=Superseded | chip=bg-neutral-surface text-neutral-text border-neutral-border | fill=bg-neutral-strong | text=text-neutral-text
-job.UNASSIGNED -> intent=warning | label=Unscheduled | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
+job.UNSCHEDULED -> intent=warning | label=Unscheduled | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
 job.SCHEDULED -> intent=warning | label=Scheduled | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
 job.EN_ROUTE -> intent=warning | label=En Route | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
 job.ON_SITE -> intent=warning | label=On Site | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
@@ -39,6 +39,7 @@ task.TODO -> intent=neutral | label=To Do | chip=bg-neutral-surface text-neutral
 task.IN_PROGRESS -> intent=info | label=In Progress | chip=bg-info-surface text-info-text border-info-border | fill=bg-info-strong | text=text-info-text
 task.BLOCKED -> intent=warning | label=Blocked | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text
 task.DONE -> intent=success | label=Done | chip=bg-success-surface text-success-text border-success-border | fill=bg-success-strong | text=text-success-text
+task.CANCELLED -> intent=danger | label=Cancelled | chip=bg-danger-surface text-danger-text border-danger-border | fill=bg-danger-strong | text=text-danger-text
 taskPriority.LOW -> intent=neutral | label=Low | chip=bg-neutral-surface text-neutral-text border-neutral-border | fill=bg-neutral-strong | text=text-neutral-text
 taskPriority.MEDIUM -> intent=info | label=Medium | chip=bg-info-surface text-info-text border-info-border | fill=bg-info-strong | text=text-info-text
 taskPriority.HIGH -> intent=warning | label=High | chip=bg-warning-surface text-warning-text border-warning-border | fill=bg-warning-strong | text=text-warning-text

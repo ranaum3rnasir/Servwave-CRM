@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { Heading } from '@/components/ui/heading';
-import type { ReportDef } from './report-catalog';
+import type { ReportDef } from '@/lib/reports/report-catalog';
 
 /**
  * Shared chrome for every built report: back link + header (icon, S-code, title)

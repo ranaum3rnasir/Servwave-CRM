@@ -54,6 +54,24 @@
     // advisory DB rather than a deterministic local check. Ported from the same fix on
     // main (PR #1166). Revisit if ajv (or workbox-build) bumps its own fast-uri floor past
     // 3.1.5.
-    "GHSA-7p8r-x3mc-p8w7"
+    "GHSA-7p8r-x3mc-p8w7",
+    // GHSA-ggr8-5vv4-36mx (deepmerge-ts <8.0.0, stack exhaustion when merging recursive object
+    // graphs) - 2026-08-19. Reddened the nightly audit on `main` from 2026-08-18 and every PR
+    // that touches a manifest. Three facts, each checked rather than assumed:
+    //   1. The only path is `prisma > @prisma/config > deepmerge-ts` (`npm ls @prisma/config
+    //      --all`), and `prisma` is a backend devDependency - `@prisma/client`, the package the
+    //      server actually runs on, has no dependencies at all. skip-dev should exclude this,
+    //      and for the same reason as GHSA-7p8r-x3mc-p8w7 above it intermittently does not.
+    //   2. There is no forward fix to take. @prisma/config@7.9.1 (latest, ahead of our 6.19.3)
+    //      still depends on deepmerge-ts 7.1.5, so bumping prisma changes nothing.
+    //   3. An override cannot reach it: @prisma/config pins deepmerge-ts to the EXACT version
+    //      7.1.5, not a range, so forcing ^8.0.1 does not re-resolve the subtree - it drops the
+    //      package out of the tree entirely (reproduced, lockfile left with @prisma/config
+    //      requiring a dependency that is no longer installed).
+    // Reachability: @prisma/config is read by the prisma CLI at build time (`prisma generate`,
+    // `prisma migrate deploy` in Render's build command) and merges OUR OWN schema/config files.
+    // No request-path code, no user-supplied input, so the recursive-graph DoS has nothing to
+    // stand on here. Revisit when @prisma/config bumps its deepmerge-ts pin past 8.0.0.
+    "GHSA-ggr8-5vv4-36mx"
   ]
 }

@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { VideoPreviewDialog } from '@/components/ui/VideoPreviewDialog';
 import { useConfirm } from '@/hooks/useConfirm';
 import { deleteAttachmentPrompt } from '@/lib/confirmPrompts';
+import { ACCEPTED_UPLOAD_TYPES } from '@/lib/uploadTypes';
 
 interface AttachmentSectionProps {
   entityType: string;
@@ -42,7 +43,7 @@ interface PendingUpload {
   errorMessage?: string;
 }
 
-const ACCEPTED_TYPES = 'image/jpeg,image/png,image/heic,video/mp4,application/pdf';
+const ACCEPTED_TYPES = ACCEPTED_UPLOAD_TYPES;
 const MAX_SIZE = 25 * 1024 * 1024;
 const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
 

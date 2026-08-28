@@ -51,10 +51,10 @@ describe('defineAbilityFor — per-user overrides (allow/deny)', () => {
     expect(createRule).toBeTruthy();
     expect(createRule?.inverted).toBeFalsy();
     // create Invoice → own via parent job (job.assignees ∋ me).
-    expect(createRule?.conditions).toEqual({ job: { assignees: { some: { user_id: 'u1' } } } });
+    expect(createRule?.conditions).toEqual({ job: { visits: { some: { assignees: { some: { user_id: 'u1' } } } } } });
     // impliesRead materialized the paired own-scoped read Invoice (so the grantee can see it).
     const readRule = ability.rules.find((r) => r.subject === 'Invoice' && r.action === 'read' && !r.inverted);
-    expect(readRule?.conditions).toEqual({ job: { assignees: { some: { user_id: 'u1' } } } });
+    expect(readRule?.conditions).toEqual({ job: { visits: { some: { assignees: { some: { user_id: 'u1' } } } } } });
   });
 
   it('deny-override emits an inverted (cannot) rule', () => {

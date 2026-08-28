@@ -425,6 +425,8 @@ describe('POST /api/jobs/:id/cancel — LO unwind wiring (E7 / E11)', () => {
         planVisit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         priceBookItem: { findMany: mockPrisma.priceBookItem.findMany },
         stockMovement: { create: mockPrisma.stockMovement.create },
         stockBalance: { upsert: mockPrisma.stockBalance.upsert },
@@ -460,7 +462,7 @@ describe('POST /api/jobs/:id/cancel — LO unwind wiring (E7 / E11)', () => {
 describe('DELETE /api/jobs/:id — LO unwind wiring (E10)', () => {
   it('returns the PROCESSED LO BEFORE the job row dies, and never deletes the LO', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNASSIGNED', invoices: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNSCHEDULED', invoices: [] });
     mockPrisma.job.delete.mockResolvedValue(JOB_FIXTURE);
     loFindByAnchor([loFindRow({ job_id: JOB_FIXTURE.id })]);
 
@@ -517,6 +519,8 @@ describe('POST /api/invoices/:id/void — LO unwind wiring (E9)', () => {
         invoice: { update: vi.fn().mockResolvedValue({ id: INV_ID, status: 'VOIDED', invoice_number: 'I00002' }) },
         job: { update: vi.fn().mockResolvedValue({}) },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         depositCreditApplication: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         payment: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
@@ -563,6 +567,8 @@ describe('DELETE /api/invoices/:id — DRAFT delete LO unwind wiring', () => {
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]) },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         priceBookItem: { findMany: mockPrisma.priceBookItem.findMany },
         stockMovement: { create: mockPrisma.stockMovement.create },
         stockBalance: { upsert: mockPrisma.stockBalance.upsert },

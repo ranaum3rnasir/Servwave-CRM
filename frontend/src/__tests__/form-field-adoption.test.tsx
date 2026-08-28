@@ -208,15 +208,19 @@ describe('JobFormPage - the conversion restyles nothing', () => {
     );
   });
 
-  it('keeps the schedule inputs own width overrides after the wrap', () => {
+  it('renders the shared schedule field set, each control wired to its own label', () => {
     renderWithProviders(<JobFormPage />, { ability: adminAbility, initialEntries: ['/jobs/new'] });
     fireEvent.click(screen.getByRole('switch'));
 
-    // DatePicker/TimeCombobox put `className` on the wrapper that positions the
-    // text field beside its calendar/clock button, and the labelled Input inside
-    // is `flex-1` - so the width override still constrains the field, one level out.
-    expect(screen.getByLabelText('Start Date').parentElement).toHaveClass('w-[180px]');
-    expect(screen.getByLabelText('Start Time').parentElement).toHaveClass('w-[140px]');
+    // The page's four hand-rolled Start/End Date/Time fields (each with its own width
+    // override) are now ScheduleTimeFields, the same set the scheduler board and the job
+    // dialog render. FormField still owns the id/htmlFor wiring inside it.
+    for (const name of ['Start date', 'Start time', 'End date', 'End time']) {
+      const control = screen.getByLabelText(name);
+      expect(control.id).toBeTruthy();
+      expect(screen.getByText(name).getAttribute('for')).toBe(control.id);
+    }
+    expect(screen.queryByLabelText('Start Date')).not.toBeInTheDocument();
   });
 });
 

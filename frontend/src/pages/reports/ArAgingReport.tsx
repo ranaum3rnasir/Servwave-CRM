@@ -19,16 +19,16 @@ import { SelectField } from '@/components/form/SelectField';
 import { ChartCard } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { token } from '@/design-system/tokens';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { ReportToolbar } from './_shared';
 import { DateRangeControl } from './DateRangeControl';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
-import { useArAging } from './ar-aging-data';
+import { useArAging } from '@/lib/reports/ar-aging-data';
 import {
   ACTION, BUCKET_COLOR, BUCKET_ORDER, aggregate, applyFilter, applyDateRange, arAgingCsv, bucketFor, bucketTotals, invoiceDate,
   type Account, type Bucket, type Filter, type DateField, type FlatInvoice,
-} from './arAging.data';
+} from '@/lib/reports/arAging.data';
 import { exportCsvFile } from '@/lib/csv';
 
 const money0 = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`;

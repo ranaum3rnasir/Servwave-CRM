@@ -17,7 +17,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './helpers';
 import PriceBookPage from '@/pages/inventory/PriceBookPage';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
 
 const h = vi.hoisted(() => ({
@@ -103,7 +103,9 @@ vi.mock('@/lib/api/inventory', async (importOriginal) => {
   };
 });
 
-const TAXABLE_LABEL = 'Taxable (apply sales tax on estimates and invoices)';
+// Shortened in the 2026-08-12 dialog restructure: the parenthetical moved to
+// the row's tooltip, so the flag labels are short and line up with each other.
+const TAXABLE_LABEL = 'Taxable';
 const NAME_PLACEHOLDER = 'e.g. Dual Run Capacitor 45/5 MFD 440V';
 
 const inventoryAbility = () =>
@@ -143,6 +145,9 @@ describe('Add/Edit Item dialog ships taxable from both mount points (SRVW-90)', 
 
     await userEvent.click(screen.getByRole('button', { name: /Add Item/ }));
     await userEvent.type(await screen.findByPlaceholderText(NAME_PLACEHOLDER), 'New Deadbolt');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(screen.getByLabelText(/^SKU/), 'DEAD-1');
     await userEvent.click(screen.getByRole('button', { name: 'Save Item' }));
 
     expect(h.upsertItemMutateAsync).toHaveBeenCalledWith(
@@ -177,6 +182,9 @@ describe('Add/Edit Item dialog ships taxable from both mount points (SRVW-90)', 
 
     await userEvent.click(await screen.findByRole('button', { name: /Add Item/ }));
     await userEvent.type(await screen.findByPlaceholderText(NAME_PLACEHOLDER), 'Stock Deadbolt');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(screen.getByLabelText(/^SKU/), 'DEAD-2');
     await userEvent.click(screen.getByRole('button', { name: 'Save Item' }));
 
     expect(h.upsertItemMutateAsync).toHaveBeenCalledWith(

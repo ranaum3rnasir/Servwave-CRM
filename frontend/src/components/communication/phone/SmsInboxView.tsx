@@ -65,6 +65,7 @@ import type {
   PhoneCustomer,
   SendSmsResult,
 } from "@/lib/api/communication";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 // v1 lanes: customer conversations + archive only. The Team / Group internal
 // lanes (and the "By job" roster) were prototype affordances wired to nothing
@@ -152,6 +153,7 @@ export function SmsInboxView({
 }) {
   // Data seam — module-scope arrays in Emanuel's monolith now come from hooks.
   const { data: customers = [] } = usePhoneCustomers();
+  const tz = useScheduleTimezone();
   // The server thread directory, consulted directly by the deep-link effect:
   // the `threads` prop lags one commit behind (TextPage's seed-merge effect),
   // and isFetched distinguishes "no thread yet" from "still loading".
@@ -710,7 +712,7 @@ export function SmsInboxView({
                           </span>
                         );
                       })()}
-                      <span className="text-[10px] text-text-secondary">{shortTime(m.ts)}</span>
+                      <span className="text-[10px] text-text-secondary">{shortTime(m.ts, tz)}</span>
                     </div>
                   </div>
                 </div>

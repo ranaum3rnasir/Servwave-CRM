@@ -39,7 +39,7 @@ function leadWithEstimate(performerIds: string[] = []) {
   return {
     ...LEAD_FIXTURE,
     // A walkthrough performer (OWN_WALKTHROUGH) is how a TECHNICIAN can read the lead.
-    walkthrough_performers: performerIds.map((id) => ({ user_id: id, user: { id, first_name: 'Test', last_name: 'Tech', email: 'tech@test.com' } })),
+    visit_assignees: performerIds.map((id) => ({ user_id: id, user: { id, first_name: 'Test', last_name: 'Tech', email: 'tech@test.com' } })),
     estimates: [
       {
         id: 'd0000000-0000-0000-0000-000000000001',

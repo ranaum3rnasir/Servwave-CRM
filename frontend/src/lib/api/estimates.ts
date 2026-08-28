@@ -24,15 +24,36 @@ import api from '@/lib/axios';
 // silently drift (same re-export convention as `@/lib/api/invoices.ts`).
 import type { Scope } from './jobs';
 export type { Scope };
+import type { EstimateStatusValue } from '@/constants/estimateStatus';
 
 /** POST /api/estimates/:id/mark-sent — stamp SENT without emailing; shares send()'s deposit/T&C ceremony. */
 export function markEstimateSent(id: string, body: { deposit_required: boolean; payment_methods: string[]; message_body?: string }) {
   return api.post(`/api/estimates/${id}/mark-sent`, body).then((r) => r.data);
 }
 
-/** PATCH /api/estimates/:id/status — narrow whitelist: backtodraft (same-row recall) or backtosent. */
+/** PATCH /api/estimates/:id/status — retained alias: backtodraft (same-row recall) or backtosent. */
 export function setEstimateStatus(id: string, transition: 'backtodraft' | 'backtosent') {
   return api.patch(`/api/estimates/${id}/status`, { transition }).then((r) => r.data);
+}
+
+/**
+ * PATCH /api/estimates/:id/status — the free setter (Spec B1). Estimate status is UNORDERED: any
+ * of the six exposed statuses is reachable from any other, forward or backward. Only integrity
+ * rules refuse:
+ *
+ *   400  leaving WON when the job is already invoiced or the deposit carries payments
+ *   400  DECLINED without a lost_reason
+ *
+ * SENT is not special here. It is a label, and setting it mints no customer link - only send,
+ * resend and mark-sent do that. (A 409 SEND_CEREMONY_REQUIRED used to guard this and pointed
+ * callers at POST /:id/mark-sent, which accepts DRAFT only, so the advice could not be followed.)
+ */
+export function setEstimateStatusTo(
+  id: string,
+  status: EstimateStatusValue,
+  reason?: { lost_reason?: string; cancelled_reason?: string },
+) {
+  return api.patch(`/api/estimates/${id}/status`, { status, ...reason }).then((r) => r.data);
 }
 
 /** POST /api/estimates/:id/approve-internal — staff-recorded verbal/off-platform win, no signature. */

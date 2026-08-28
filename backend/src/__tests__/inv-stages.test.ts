@@ -51,7 +51,7 @@ describe('POST /api/inventory/job-stages — FK population (V4/P1)', () => {
     mockAuthAs('admin');
     mockPrisma.job.findFirst.mockResolvedValue(null); // not in requesting org
     const res = await request(app).post('/api/inventory/job-stages').set(authHeader('admin'))
-      .send({ ...basePayload, jobId: '99555555-0224-9999-9999-995555550224' });
+      .send({ ...basePayload, jobId: '99999999-9999-9999-9999-999999999999' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/job/i);
     expect(mockPrisma.jobStage.create).not.toHaveBeenCalled();
@@ -97,7 +97,7 @@ describe('POST /api/inventory/job-stages/receive (B2/V5)', () => {
     mockAuthAs('admin');
     mockPrisma.jobStage.findFirst.mockResolvedValue(null);
     const res = await request(app).post('/api/inventory/job-stages/receive').set(authHeader('admin'))
-      .send({ stageId: '99555555-0224-9999-9999-995555550224', itemId: '88888888-8888-8888-8888-888888888888' });
+      .send({ stageId: '99999999-9999-9999-9999-999999999999', itemId: '88888888-8888-8888-8888-888888888888' });
     expect(res.status).toBe(404);
   });
 
@@ -139,14 +139,14 @@ describe('POST /api/inventory/job-stages/notify (B2)', () => {
     mockAuthAs('admin');
     mockPrisma.jobStage.updateMany.mockResolvedValue({ count: 0 });
     const res = await request(app).post('/api/inventory/job-stages/notify').set(authHeader('admin'))
-      .send({ stageId: '99555555-0224-9999-9999-995555550224' });
+      .send({ stageId: '99999999-9999-9999-9999-999999999999' });
     expect(res.status).toBe(404);
   });
 });
 
 // ─── POST /api/inventory/job-stages/email — pickup ticket real send ──────────
 describe('POST /api/inventory/job-stages/email (pickup ticket)', () => {
-  const BRAND = { id: ALPHA_ORG_ID, name: 'Alpha Security', logo_url: null, brand_color: '#0C2D3A' };
+  const BRAND = { id: ALPHA_ORG_ID, name: 'Northwind Services', logo_url: null, brand_color: '#0C2D3A' };
 
   it('sends the pickup ticket to the given recipients + records a StageAuditEntry', async () => {
     mockAuthAs('admin');
@@ -176,7 +176,7 @@ describe('POST /api/inventory/job-stages/email (pickup ticket)', () => {
     mockAuthAs('admin');
     mockPrisma.jobStage.findFirst.mockResolvedValue(null);
     const res = await request(app).post('/api/inventory/job-stages/email').set(authHeader('admin'))
-      .send({ stageId: '99555555-0224-9999-9999-995555550224', to: ['x@y.com'], subject: 'Pickup' });
+      .send({ stageId: '99999999-9999-9999-9999-999999999999', to: ['x@y.com'], subject: 'Pickup' });
     expect(res.status).toBe(404);
     expect(vi.mocked(sendStagePickupEmail)).not.toHaveBeenCalled();
   });
@@ -473,6 +473,13 @@ describe('POST /api/inventory/job-stages/receive — PO write-through (P2 4e, §
     purchase_order: { id: PO_ID, status: 'sent', po_number: 'PO-1001' },
   };
 
+  // `staged_location_id` has no foreign key behind it, so the receive path
+  // re-reads the location inside the tenant before crediting stock to it. These
+  // stages are all staged at STAGED_LOC, so it has to resolve.
+  beforeEach(() => {
+    mockPrisma.inventoryLocation.findFirst.mockResolvedValue({ id: STAGED_LOC });
+  });
+
   it('updates the PO line absolute qty_received and recomputes PO status in the same tx', async () => {
     mockAuthAs('admin');
     const stage = linkedStage();
@@ -670,7 +677,7 @@ describe('POST /api/inventory/job-stages - linkedPurchaseOrderId', () => {
     mockAuthAs('admin');
     mockPrisma.purchaseOrder.findFirst.mockResolvedValue(null); // not in requesting org
     const res = await request(app).post('/api/inventory/job-stages').set(authHeader('admin'))
-      .send({ ...basePayload, items, linkedPurchaseOrderId: '99555555-0224-9999-9999-995555550224' });
+      .send({ ...basePayload, items, linkedPurchaseOrderId: '99999999-9999-9999-9999-999999999999' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/purchase order/i);
@@ -711,6 +718,48 @@ describe('POST /api/inventory/job-stages/receive - destination location required
       .send({ stageId: stage.id, itemId: stage.items[0].id });
 
     expect(res.status).toBe(200);
+    expect(mockPrisma.stockMovement.create.mock.calls[0][0].data.to_location_id).toBe(INVENTORY_LOCATION_FIXTURE.id);
+  });
+
+  // `job_stages.staged_location_id` carries no foreign key (schema.prisma - the
+  // JobStage model), so it can outlive the location it names, and nothing
+  // validates it as this org's on write either. Crediting stock to it blind
+  // either trips the real stock_balances / stock_movements FKs (opaque 500) or
+  // books parts into a tenant that is not the caller's.
+  it('409s when the stage staged_location no longer resolves, without silently redirecting the stock', async () => {
+    mockAuthAs('admin');
+    const stage = { ...JOB_STAGE_FIXTURE, staged_location_id: 'aaaaaaa1-0000-0000-0000-0000000000ff' };
+    mockPrisma.jobStage.findFirst.mockResolvedValue(stage);
+    mockPrisma.inventoryLocation.findFirst.mockResolvedValue(null); // deleted, or another org's
+    mockPrisma.organization.findUnique.mockResolvedValue({ default_inventory_location_id: INVENTORY_LOCATION_FIXTURE.id });
+    mockPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockPrisma));
+
+    const res = await request(app).post('/api/inventory/job-stages/receive').set(authHeader('admin'))
+      .send({ stageId: stage.id, itemId: stage.items[0].id });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('STAGED_LOCATION_MISSING');
+    expect(res.body.message).toMatch(/no longer exists/i);
+    // Nothing moved, and the org default was NOT quietly substituted.
+    expect(mockPrisma.jobStageLine.update).not.toHaveBeenCalled();
+    expect(mockPrisma.stockMovement.create).not.toHaveBeenCalled();
+    expect(mockPrisma.organization.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('scopes the staged_location existence check to the requesting org', async () => {
+    mockAuthAs('admin');
+    const stage = { ...JOB_STAGE_FIXTURE, staged_location_id: INVENTORY_LOCATION_FIXTURE.id };
+    mockPrisma.jobStage.findFirst.mockResolvedValueOnce(stage).mockResolvedValueOnce(stage);
+    mockPrisma.inventoryLocation.findFirst.mockResolvedValue({ id: INVENTORY_LOCATION_FIXTURE.id });
+    mockPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockPrisma));
+
+    const res = await request(app).post('/api/inventory/job-stages/receive').set(authHeader('admin'))
+      .send({ stageId: stage.id, itemId: stage.items[0].id });
+
+    expect(res.status).toBe(200);
+    const where = mockPrisma.inventoryLocation.findFirst.mock.calls[0][0].where;
+    expect(where.id).toBe(INVENTORY_LOCATION_FIXTURE.id);
+    expect(where.organization_id).toBe(ALPHA_ORG_ID);
     expect(mockPrisma.stockMovement.create.mock.calls[0][0].data.to_location_id).toBe(INVENTORY_LOCATION_FIXTURE.id);
   });
 });

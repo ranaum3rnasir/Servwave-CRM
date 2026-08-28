@@ -1280,7 +1280,7 @@ function HistoryTable({
           cellClassName: "text-xs text-text-secondary",
           cell: () => (
             <>
-              — <span title="Three-way match ships in §7.4">i</span>
+              — <span title="Variance is calculated once the vendor bill is matched">i</span>
             </>
           ),
         },

@@ -5,6 +5,7 @@ import { env } from '../config/env';
 import { logger } from '../lib/logger';
 import { ingestCall, ingestSms, ingestSmsStatus, isOutboundTextActivity, unwrapActivity } from '../lib/ctm/ingest';
 import { ingestRecording } from '../lib/ctm/recordings';
+import { warmReceivingNumbers } from '../lib/ctm/receivingNumbers';
 
 /**
  * CTM webhook endpoint — POST /api/webhooks/ctm/:position?token=<CTM_WEBHOOK_TOKEN>
@@ -24,7 +25,7 @@ import { ingestRecording } from '../lib/ctm/recordings';
  *     present AND CTM_WEBHOOK_SIGNING_SECRET is configured — a DEDICATED secret,
  *     NOT the CTM_SECRET_KEY API secret. CTM signs sub-account webhooks with a
  *     different secret than the API key, so reusing the API secret here rejects
- *     every real webhook (401 storm, Alpha Doors 596375, 2026-07-13). Unset by
+ *     every real webhook (401 storm, Northwind Services 500001, 2026-07-13). Unset by
  *     default → gate skipped, token (gate 1) is the sole auth (Phase-0 posture).
  *  3. Basic auth (defense-in-depth): we provision hooks with
  *     username 'servwave' / password = webhook token; verified when present.
@@ -196,6 +197,24 @@ export async function processCtmEvent(
       return;
     }
 
+    // A forwarded call names nobody in its payload - only a receiving_number_id
+    // that CTM's roster can resolve. Warm that roster HERE, before the
+    // transaction opens: doing it inside would hold a database transaction open
+    // across an HTTP call, and Prisma's 5s interactive-transaction timeout would
+    // turn one slow CTM response into a lost call record. Cached with a TTL and
+    // fail-open, so this is at most a handful of requests an hour and never
+    // throws. Skipped when the payload already names its agent (nothing to
+    // resolve) or carries no receiving number at all.
+    if (
+      CALL_POSITIONS.has(position) &&
+      owningOrg.ctm_account_id &&
+      !activity.agent &&
+      activity.receiving_number_id !== undefined &&
+      activity.receiving_number_id !== null
+    ) {
+      await warmReceivingNumbers(owningOrg.ctm_account_id);
+    }
+
     // The transaction returns the call-ingest result (null on SMS/status paths)
     // so the post-response recording fetch can be scheduled outside of it.
     const callResult = await prisma.$transaction(async (tx) => {
@@ -211,7 +230,9 @@ export async function processCtmEvent(
 
       if (CALL_POSITIONS.has(position)) {
         const normalized = position === 'start_outbound' ? 'starts' : position;
-        return ingestCall(tx, owningOrg.id, payload as Record<string, any>, normalized);
+        return ingestCall(tx, owningOrg.id, payload as Record<string, any>, normalized, {
+          ctmAccountId: owningOrg.ctm_account_id ?? undefined,
+        });
       }
       // A text-shaped `status_change` IS an outbound-text event and must run the
       // full SMS ingest, not the lean delta path. Live evidence (staging,

@@ -65,7 +65,7 @@ const flushAsync = () => new Promise<void>((r) => setImmediate(r));
 const INGEST_ARGS = {
   orgId: 'org-1',
   callSessionId: 'cs-1',
-  ctmAccountId: '596375',
+  ctmAccountId: '500001',
   callSid: 'CA0001',
 };
 
@@ -85,7 +85,7 @@ describe('ingestRecording', () => {
 
     await ingestRecording(INGEST_ARGS);
 
-    expect(mockedGetRecording).toHaveBeenCalledWith('596375', 'CA0001');
+    expect(mockedGetRecording).toHaveBeenCalledWith('500001', 'CA0001');
     expect(supabaseAdmin.storage.from).toHaveBeenCalledWith('call-recordings');
     expect(storageApi.upload).toHaveBeenCalledTimes(1);
     const [key, body, opts] = storageApi.upload.mock.calls[0];
@@ -180,7 +180,7 @@ describe('ingestRecording', () => {
       ingestRecording({
         orgId: 'org-1',
         callSessionId: `cs-${i}`,
-        ctmAccountId: '596375',
+        ctmAccountId: '500001',
         callSid: `CA000${i}`,
       }),
     );
@@ -207,9 +207,9 @@ describe('CTM webhook → recording ingest wiring', () => {
   const CALL_END_PAYLOAD = {
     sid: 'CA0001',
     id: 12345,
-    account_id: 596375,
+    account_id: 500001,
     caller_number: '+12015551234',
-    tracking_number: '+15555550202',
+    tracking_number: '+12019037784',
     direction: 'inbound',
     dial_status: 'answered',
     duration: 62,
@@ -221,7 +221,7 @@ describe('CTM webhook → recording ingest wiring', () => {
   function mockWebhookHappyPath() {
     p.ctmEvent.findUnique.mockResolvedValue(null);
     p.ctmEvent.create.mockResolvedValue({ id: 'evt-1' });
-    p.organization.findFirst.mockResolvedValue({ id: 'org-1', ctm_account_id: '596375' });
+    p.organization.findFirst.mockResolvedValue({ id: 'org-1', ctm_account_id: '500001' });
     p.callSession.upsert.mockResolvedValue({ id: 'cs-1' });
     p.user.findFirst.mockResolvedValue(null);
     p.customer.findFirst.mockResolvedValue(null);
@@ -252,7 +252,7 @@ describe('CTM webhook → recording ingest wiring', () => {
         data: { recording_key: 'org-1/cs-1.mp3' },
       }),
     );
-    expect(mockedGetRecording).toHaveBeenCalledWith('596375', 'CA0001');
+    expect(mockedGetRecording).toHaveBeenCalledWith('500001', 'CA0001');
   });
 
   it('does NOT fetch a recording when the payload has none', async () => {

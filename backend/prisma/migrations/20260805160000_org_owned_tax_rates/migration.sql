@@ -9,7 +9,7 @@
 -- deleted; the other 51 stay in its list as hidden rows and can be switched back on in Settings.
 
 -- 1. New columns. `is_visible` defaults true so the hand-made custom rates orgs already created
---    (e.g. Alpha Doors' two Workiz rates) stay visible - only the rows seeded in step 3 are hidden.
+--    (e.g. Northwind Services' two Workiz rates) stay visible - only the rows seeded in step 3 are hidden.
 ALTER TABLE "org_tax_rates" ADD COLUMN IF NOT EXISTS "state_code" VARCHAR(2);
 ALTER TABLE "org_tax_rates" ADD COLUMN IF NOT EXISTS "is_visible" BOOLEAN NOT NULL DEFAULT true;
 

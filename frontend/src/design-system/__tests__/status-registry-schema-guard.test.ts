@@ -48,7 +48,7 @@
    AutomationRunStatus which together back the single `workflowStep` domain
    (the workflow activity feed is a union of both row types).
 
-   --- what is DELIBERATELY EXCLUDED (45 enums) -------------------------------
+   --- what is DELIBERATELY EXCLUDED (48 enums) -------------------------------
    Every one is listed by name in EXCLUDED_ENUMS below with its reason, so the
    exclusion is reviewable rather than implied by absence. The reasons fall into
    five groups: entity-type / polymorphic-owner discriminators, reason and
@@ -99,6 +99,7 @@ const EXCLUDED_ENUMS: Record<string, string> = {
   CustomerSegment: 'segmentation taxonomy (RESIDENTIAL|COMMERCIAL), not a state',
   InvoiceKind: 'kind taxonomy (DEPOSIT|STANDARD|PLAN), named in the registry inclusion rule',
   PriceBookItemType: 'item type (SERVICE|MATERIAL), not a state',
+  EstimateContainerKind: 'which parent shaped an estimate number (LEAD|CUSTOMER|JOB), not a state',
   AttachmentEntity: 'polymorphic owner discriminator for attachments',
   NoteEntity: 'polymorphic owner discriminator for notes',
   TagEntity: 'polymorphic owner discriminator for tags',
@@ -119,6 +120,8 @@ const EXCLUDED_ENUMS: Record<string, string> = {
   Plan: 'entitlement tier (STARTER|PRO|SCALE|ENTERPRISE), not a state',
   CustomFieldType: 'field-type taxonomy (TEXT|NUMBER|DATE|SELECT|CHECKBOX) on a definition, not a lifecycle state',
   CustomFieldEntity: 'polymorphic owner discriminator (LEAD|JOB|CUSTOMER|PRICE_BOOK_ITEM) for custom field definitions',
+  CalendarParticipantKind:
+    'which-party discriminator (USER|CUSTOMER) on a CalendarEntry participant row (Slice 02) - says whether the attached party is a staff user or a customer, not a lifecycle state. The API returns it as a plain `kind` field; no UI surface maps it to appearance or renders it as a status chip.',
 
   // Reason / provenance taxonomies - they annotate a state, they are not one.
   LostReason: 'reason taxonomy on a lost estimate; the state is EstimateStatus.DECLINED',
@@ -148,8 +151,11 @@ const EXCLUDED_ENUMS: Record<string, string> = {
   CopilotMsgStatus: 'lifecycle with zero UI, named in the registry inclusion rule',
   WorkflowEnrollmentStatus: 'lifecycle with zero UI, named in the registry inclusion rule',
   PunchStatus: 'IN_ZONE|OVERRIDE has zero frontend references; nothing renders it',
-  WalkthroughStatus:
+  // Multi-visit S1 renamed WalkthroughStatus -> VisitStatus; the exclusion reason is unchanged.
+  VisitStatus:
     'lifecycle with UI (LeadDetailPage WalkthroughDot/WalkthroughTabContent, the schedule board) but no UI surface maps ITS VALUES to appearance - they derive appearance from the current visit\'s timestamps (scheduled_at/completed_at/cancelled_at) instead, by design; see the divergence note on WalkthroughDot',
+  VisitPurpose:
+    'not a lifecycle at all - WORK|WALKTHROUGH says which parent a visit hangs off, and nothing renders it as a status',
 
   // Special cases.
   WorkflowStatus:

@@ -8,6 +8,7 @@ import {
   Pencil,
   Plus,
   ShieldCheck,
+  Trash2,
   Truck,
   Warehouse,
 } from "lucide-react";
@@ -23,6 +24,13 @@ type Props = {
   onAddNew: () => void;
   canManage?: boolean;
   onEditLocation?: (loc: Location) => void;
+  // REQUIRED on purpose, and NOT symmetrical with `onEditLocation` above.
+  // This was optional, and the routed Stock page simply never passed it - so
+  // the delete affordance silently did not render, with no type error and no
+  // failing test. The sole remaining call site (the routed Stock page) passes
+  // it; a new one that forgets now fails to compile. The `canManage` gate
+  // below still decides whether the affordance is shown at all.
+  onDeleteLocation: (loc: Location) => void;
 };
 
 export function LocationSelector({
@@ -33,6 +41,7 @@ export function LocationSelector({
   onAddNew,
   canManage,
   onEditLocation,
+  onDeleteLocation,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -87,13 +96,20 @@ export function LocationSelector({
 
       <PopoverContent
         align="start"
+        // Always BELOW the trigger. The panel is a fixed 420px tall, so Radix's
+        // collision handling used to flip it above the button whenever the
+        // toolbar sat past the middle of the viewport - the same control
+        // opening in two different directions depending on scroll position.
+        // The list clamps to the room actually below instead, and scrolls.
+        side="bottom"
+        avoidCollisions={false}
         sideOffset={6}
         // `border` dropped: PopoverContent's own base string already emits
         // an unconditional `border border-border` - this was a byte-for-byte
         // redundant restatement, not an override.
         className="w-[420px] max-w-[calc(100vw-1.5rem)] overflow-hidden p-0"
       >
-        <div className="max-h-[420px] overflow-y-auto py-1">
+        <div className="max-h-[min(420px,var(--radix-popover-content-available-height))] overflow-y-auto py-1">
           <LocationRow
             label="All Locations"
             sub={`Show items across all ${locations.length} locations`}
@@ -134,6 +150,19 @@ export function LocationSelector({
                       }
                     : undefined
                 }
+                /* `canManage` alone, deliberately NOT the same shape as
+                   `onEdit` above: `onDeleteLocation` is a required prop, so a
+                   second conjunct could never be falsy and would only suggest
+                   to a reader that the prop is still optional. `onEditLocation`
+                   really is optional, so its own check stays. */
+                onDelete={
+                  canManage
+                    ? () => {
+                        onDeleteLocation(loc);
+                        setOpen(false);
+                      }
+                    : undefined
+                }
               />
             );
           })}
@@ -157,7 +186,7 @@ export function LocationSelector({
           {canManage && (
             <p className="px-2.5 pb-1 pt-0.5 text-[10px] text-text-secondary">
               <ShieldCheck className="mr-0.5 inline h-2.5 w-2.5 text-success" />
-              Admin · hover any location to edit
+              Admin · hover any location to edit or delete
             </p>
           )}
         </div>
@@ -174,6 +203,7 @@ function LocationRow({
   active,
   onClick,
   onEdit,
+  onDelete,
 }: {
   label: string;
   sub: string;
@@ -182,6 +212,7 @@ function LocationRow({
   active: boolean;
   onClick: () => void;
   onEdit?: () => void;
+  onDelete?: () => void;
 }) {
   return (
     <div
@@ -238,6 +269,23 @@ function LocationRow({
           className="ml-1 rounded-md p-1 text-text-secondary opacity-0 transition hover:bg-secondary-light hover:text-text-primary group-hover:opacity-100 focus:opacity-100"
         >
           <Pencil className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {onDelete && (
+        // Raw by design: same reveal-on-hover row affordance as the edit button
+        // above, danger-toned. The minted ghost/danger cell carries no opacity
+        // toggle, so converting would need new SOFT classes on a governed
+        // component (see the edit button's note).
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          title="Delete location (admin)"
+          aria-label="Delete location"
+          className="rounded-md p-1 text-text-secondary opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100 focus:opacity-100"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
         </button>
       )}
     </div>

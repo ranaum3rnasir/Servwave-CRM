@@ -18,7 +18,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { buildAbility } from '@/lib/ability';
 
 const ORG_TZ = 'Asia/Manila'; // UTC+8, no DST
@@ -135,6 +135,7 @@ describe('JobDetailPage schedule rendering honours the org timezone', () => {
 
   it('prefills the Reschedule pickers with the org-zone wall clock', async () => {
     const dateFields = await openRescheduleDialog();
+    // Start date / start time / end date / end time, all four on the org's clock.
     expect(dateFields.map((f) => (f as HTMLInputElement).value)).toEqual([
       '08/20/2026',
       '08/20/2026',
@@ -168,7 +169,10 @@ describe('JobDetailPage schedule rendering honours the org timezone', () => {
     // 10:00 AM Aug 21 in Manila (UTC+8) === 02:00Z that day. A browser-local read
     // would send 14:00Z from New York or 10:00Z from UTC.
     expect((body as { scheduled_start: string }).scheduled_start).toBe('2026-08-21T02:00:00.000Z');
-    // Untouched end keeps its original instant exactly.
-    expect((body as { scheduled_end: string }).scheduled_end).toBe(END_ISO);
+    // The end TRAVELS with the start now, keeping the 2-hour slot a 2-hour slot: 12:00 PM
+    // Aug 21 in Manila === 04:00Z. It used to stay pinned to its original instant, which
+    // left a start moved past it denoting a negative range - and is converted through the
+    // org zone here too, which is what this test exists to prove.
+    expect((body as { scheduled_end: string }).scheduled_end).toBe('2026-08-21T04:00:00.000Z');
   }, SLOW_UI_TIMEOUT);
 });

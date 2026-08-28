@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/axios';
 import { toast } from '@/components/ui/use-toast';
 import { extractApiError } from '@/lib/utils';
-import type { AnchorKey } from '@/lib/workflows/anchors';
+import type { AnchorKey, WaitDirection } from '@/lib/workflows/anchors';
 
 // ── types (mirror backend/src/controllers/workflow.controller.ts + Prisma) ───
 
@@ -190,8 +190,19 @@ export interface WorkflowCatalog {
   actions: Record<AutomationActionType, ActionDef>;
   /** Legal v2.1 audiences per trigger+action pair, channel-constrained + entity-narrowed. */
   audiences: Record<AutomationTriggerType, Record<AutomationActionType, AudienceOption[]>>;
-  /** Legal anchor options per entity, for the builder's date-anchored trigger + anchored WAIT UI. */
-  anchors: Record<'job' | 'estimate' | 'invoice' | 'lead', Array<{ key: AnchorKey; label: string }>>;
+  /**
+   * Legal anchor options per entity, for the builder's date-anchored trigger + anchored WAIT UI.
+   *
+   * `directions` says which way round the offset may run for THIS anchor, and is served rather
+   * than inferred here: a lead stage clock records a moment as it happens, so counting BEFORE one
+   * can never fire, and the backend validator refuses to save it. Optional so a catalog fixture
+   * written before the field existed still typechecks - read it through `anchorDirections`, which
+   * treats an absent value as "both".
+   */
+  anchors: Record<
+    'job' | 'estimate' | 'invoice' | 'lead',
+    Array<{ key: AnchorKey; label: string; directions?: WaitDirection[] }>
+  >;
   merge_field_labels: Record<string, string>;
   sample_context: Record<string, string>;
   templates: AutomationTemplate[];

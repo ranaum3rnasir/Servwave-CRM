@@ -149,7 +149,7 @@ test.describe('Day 5 — Field Work', () => {
       first_name: 'Derek',
       last_name: 'Patel',
       email: `derek.patel.${api.suffix}@e2e.local`,
-      phone: '5555550206',
+      phone: '5128675309',
     });
     const loc = await api.addLocation(customer.id, {
       address_line1: '892 Willow Creek Blvd',

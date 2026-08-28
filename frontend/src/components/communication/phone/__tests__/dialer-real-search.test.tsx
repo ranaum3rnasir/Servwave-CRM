@@ -13,6 +13,14 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 const mockNavigate = vi.fn();
+// These specs render deep phone components without a QueryClientProvider - every
+// data hook is stubbed individually. Times now resolve against the ORG's zone, so
+// the org query joins that list; pinned here so the rendered clock is fixed rather
+// than the runner's.
+vi.mock("@/lib/api/organization", () => ({
+  useOrganization: () => ({ data: { timezone: "America/New_York" } }),
+}));
+
 vi.mock("react-router-dom", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router-dom")>();
   return { ...actual, useNavigate: () => mockNavigate };
@@ -29,7 +37,7 @@ const seam = vi.hoisted(() => ({ result: null as unknown }));
 const placeCall = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false }));
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   DISPOSITION_LABELS: {},
   fmtPhone: (n: string) => n,
   useCalls: () => ({ data: [] }),
@@ -67,7 +75,7 @@ const MATCH_RESULT = {
     {
       id: CUSTOMER_UUID,
       name: "ZZ-TEST CTM",
-      phone: "5555550212",
+      phone: "5555550199",
       site: "1 Main St, Newark",
       openJobs: [
         { id: JOB_77_UUID, number: "J00077", status: "SCHEDULED", location: "1 Main St, Newark" },
@@ -81,7 +89,7 @@ const MATCH_RESULT = {
       number: "J00088",
       status: "IN_PROGRESS",
       location: "2 Oak Ave, Jersey City",
-      customer: { id: CUSTOMER_UUID, name: "ZZ-TEST CTM", phone: "5555550212" },
+      customer: { id: CUSTOMER_UUID, name: "ZZ-TEST CTM", phone: "5555550199" },
     },
   ],
   identity: null,
@@ -113,7 +121,7 @@ const JOB_NO_CUSTOMER_RESULT = {
 
 const IDENTITY_RESULT = {
   ...MATCH_RESULT,
-  query: { isPhone: true, e164: "+15555550212" },
+  query: { isPhone: true, e164: "+15555550199" },
   identity: {
     kind: "customer",
     id: CUSTOMER_UUID,
@@ -157,7 +165,7 @@ describe("Dialer real search (slice 2.2)", () => {
 
     // Call seeds the softphone dial field with the customer's number.
     await userEvent.click(screen.getByRole("button", { name: "Call customer" }));
-    expect(screen.getByPlaceholderText("Enter a number")).toHaveValue("5555550212");
+    expect(screen.getByPlaceholderText("Enter a number")).toHaveValue("5555550199");
 
     // Text deep-links to the SMS center for this customer.
     await userEvent.click(screen.getByRole("button", { name: "Text customer" }));
@@ -221,7 +229,7 @@ describe("Dialer real search (slice 2.2)", () => {
     expect(placeCall.mutate).toHaveBeenCalledTimes(1);
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
     expect(body.customer_id).toBe(CUSTOMER_UUID);
-    expect(body.to_number).toBe("+15555550212");
+    expect(body.to_number).toBe("+15555550199");
     expect(body).not.toHaveProperty("job_id");
     expect(body).not.toHaveProperty("lead_id");
   });
@@ -246,7 +254,7 @@ describe("Dialer real search (slice 2.2)", () => {
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
     expect(body.job_id).toBe(JOB_88_UUID);
     expect(body.customer_id).toBe(CUSTOMER_UUID);
-    expect(body.to_number).toBe("+15555550212");
+    expect(body.to_number).toBe("+15555550199");
   });
 
   it("seeds the job context on the job pick itself — dialing the prefill posts job_id", async () => {
@@ -294,7 +302,7 @@ describe("Dialer real search (slice 2.2)", () => {
   it("renders the Recognized identity banner and selects that customer on click", async () => {
     seam.result = IDENTITY_RESULT;
     const input = setup();
-    await userEvent.type(input, "5555550212");
+    await userEvent.type(input, "5555550199");
 
     const banner = await screen.findByRole("button", {
       name: /Recognized: ZZ-TEST CTM \(customer\)/,

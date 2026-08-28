@@ -52,10 +52,7 @@ type Props = {
 
 const kindOpts: { value: ItemKind; label: string }[] = [
   { value: "material", label: "Material" },
-  { value: "labor", label: "Labor" },
   { value: "service", label: "Service" },
-  { value: "bundle", label: "Bundle" },
-  { value: "fee", label: "Fee" },
 ];
 const stockOpts: { value: StockState; label: string; tint: string }[] = [
   {

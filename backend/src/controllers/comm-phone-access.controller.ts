@@ -60,7 +60,7 @@ export async function createPhoneAccessToken(req: Request, res: Response) {
     // added in camelCase alongside CTM's fields per the embed's convention.
     //
     // `email` is REQUIRED for the same reason, and its absence is what left the
-    // softphone stuck on "Connecting..." (live, account 597911, 2026-08-06).
+    // softphone stuck on "Connecting..." (live, account 500002, 2026-08-06).
     // The shipped device_embed builds the WebRTC iframe URL straight off this
     // body:
     //   accessGranted(e){ const s=e.token, t=e.sessionId, i=e.email;

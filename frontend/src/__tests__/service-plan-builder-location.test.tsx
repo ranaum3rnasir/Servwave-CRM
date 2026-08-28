@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import api from '@/lib/axios';
 import { ADD_NEW_LOCATION, type PickOrAccreteLocationValue } from '@/components/crm/PickOrAccreteLocation';
-import { PlanBuilderDialog, resolveServiceLocationId } from '@/pages/service-plans/ServicePlansPage';
+import { PlanBuilderDialog } from '@/pages/service-plans/ServicePlansPage';
+import { resolveServiceLocationId } from '@/lib/service-plans/resolveServiceLocationId';
 
 vi.mock('@/lib/axios', () => ({ default: { get: vi.fn(), post: vi.fn() } }));
 vi.mock('@/lib/api/users', () => ({ useUsers: () => ({ data: [] }) }));

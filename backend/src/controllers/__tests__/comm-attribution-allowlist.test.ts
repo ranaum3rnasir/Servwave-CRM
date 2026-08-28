@@ -61,12 +61,12 @@ describe('POST /api/communication/calls/attribution — outbound allowlist guard
     const res = await request(app)
       .post('/api/communication/calls/attribution')
       .set(authHeader('dispatcher'))
-      .send({ to_number: '+15555550212', job_id: JOB_ID });
+      .send({ to_number: '+15555550199', job_id: JOB_ID });
 
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ queued: true });
     expect(p.pendingCallAttribution.create).toHaveBeenCalled();
-    expect(client.isOutboundAllowed).toHaveBeenCalledWith('+15555550212');
+    expect(client.isOutboundAllowed).toHaveBeenCalledWith('+15555550199');
   });
 
   it('the other allowlisted test number also stashes as before', async () => {
@@ -76,10 +76,10 @@ describe('POST /api/communication/calls/attribution — outbound allowlist guard
     const res = await request(app)
       .post('/api/communication/calls/attribution')
       .set(authHeader('dispatcher'))
-      .send({ to_number: '+15555550219' });
+      .send({ to_number: '+19294039424' });
 
     expect(res.status).toBe(202);
-    expect(client.isOutboundAllowed).toHaveBeenCalledWith('+15555550219');
+    expect(client.isOutboundAllowed).toHaveBeenCalledWith('+19294039424');
   });
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */

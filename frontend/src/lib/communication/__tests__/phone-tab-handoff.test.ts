@@ -41,21 +41,21 @@ describe('phoneTabHandoff', () => {
   it('first dial opens/navigates a window named servwave-phone with dial + ctx in the URL', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
 
-    requestCall('+15555550212', JOB_CONTEXT);
+    requestCall('+15555550199', JOB_CONTEXT);
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     const [url, name] = openSpy.mock.calls[0]!;
     expect(name).toBe(PHONE_TAB_NAME);
     const parsed = new URL(url as string, 'http://localhost');
     expect(parsed.pathname).toBe('/phone');
-    expect(parsed.searchParams.get('dial')).toBe('+15555550212');
+    expect(parsed.searchParams.get('dial')).toBe('+15555550199');
     expect(JSON.parse(parsed.searchParams.get('ctx')!)).toEqual(JOB_CONTEXT);
   });
 
   it('a dial with no entity context omits ctx from the URL entirely', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
 
-    requestCall('+15555550212');
+    requestCall('+15555550199');
 
     const [url] = openSpy.mock.calls[0]!;
     const parsed = new URL(url as string, 'http://localhost');
@@ -64,10 +64,10 @@ describe('phoneTabHandoff', () => {
 
   it('a second dial while the /phone tab is open does NOT re-navigate — it posts + focuses instead', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
-    requestCall('+15555550212');
+    requestCall('+15555550199');
     openSpy.mockClear();
 
-    requestCall('+15555550219', { customerId: 'c-2', customerName: 'Second Caller' });
+    requestCall('+19294039424', { customerId: 'c-2', customerName: 'Second Caller' });
 
     // Reuse path: window.open with an EMPTY url + the same tab name — per
     // spec this returns the existing named browsing context WITHOUT
@@ -79,16 +79,16 @@ describe('phoneTabHandoff', () => {
     expect(postMessageSpy).toHaveBeenCalledTimes(1);
     const posted = postMessageSpy.mock.calls[0]![0] as Record<string, unknown>;
     expect(posted).toMatchObject({
-      phone: '+15555550219',
+      phone: '+19294039424',
       ctx: { customerId: 'c-2', customerName: 'Second Caller' },
     });
   });
 
   it('the broadcast message carries a null ctx when the second dial has no entity context', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
-    requestCall('+15555550212', JOB_CONTEXT);
+    requestCall('+15555550199', JOB_CONTEXT);
 
-    requestCall('+15555550219');
+    requestCall('+19294039424');
 
     const posted = postMessageSpy.mock.calls[0]![0] as Record<string, unknown>;
     expect(posted.ctx).toBeNull();
@@ -96,24 +96,24 @@ describe('phoneTabHandoff', () => {
 
   it('stashes the subsequent dial to localStorage as a boot-race fallback', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
-    requestCall('+15555550212');
+    requestCall('+15555550199');
 
-    requestCall('+15555550219', { customerId: 'c-2', customerName: 'Second Caller' });
+    requestCall('+19294039424', { customerId: 'c-2', customerName: 'Second Caller' });
 
     const stashed = JSON.parse(localStorage.getItem(DIAL_STORAGE_KEY)!);
     expect(stashed).toMatchObject({
-      phone: '+15555550219',
+      phone: '+19294039424',
       ctx: { customerId: 'c-2', customerName: 'Second Caller' },
     });
   });
 
   it('re-navigates (treats it as a fresh open) once the previously-opened tab has been closed', async () => {
     const { requestCall } = await import('../phoneTabHandoff');
-    requestCall('+15555550212');
+    requestCall('+15555550199');
     fakeTab.closed = true;
     openSpy.mockClear();
 
-    requestCall('+15555550219');
+    requestCall('+19294039424');
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     const [url, name] = openSpy.mock.calls[0]!;
@@ -167,7 +167,7 @@ describe('openPhoneTab', () => {
     openPhoneTab();
     openSpy.mockClear();
 
-    requestCall('+15555550212');
+    requestCall('+15555550199');
 
     // The tab is already open, so requestCall must reuse it (empty-url focus),
     // NOT navigate a fresh window.

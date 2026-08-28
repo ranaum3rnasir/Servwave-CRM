@@ -20,7 +20,7 @@ const mockPrisma = prisma as unknown as {
   estimateVersionSnapshot: { create: ReturnType<typeof vi.fn> };
   appSetting: { findUnique: ReturnType<typeof vi.fn> };
   organization: { findUnique: ReturnType<typeof vi.fn> };
-  lead: { update: ReturnType<typeof vi.fn> };
+  lead: { update: ReturnType<typeof vi.fn>; updateMany: ReturnType<typeof vi.fn> };
   $transaction: ReturnType<typeof vi.fn>;
 };
 
@@ -81,7 +81,10 @@ function mockSuccessfulTransaction() {
       invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
       invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
-      lead: { update: vi.fn().mockResolvedValue({}) },
+      // Spec #1751: commitFirstSend now stamps the lead's first_estimate_sent_at clock (D2) and
+      // moves CONTACTED -> ESTIMATED through transitionLeadStatus (D6). Both write via
+      // `updateMany`, and both read `count` off the result — `{ count: 1 }` means the row moved.
+      lead: { update: vi.fn().mockResolvedValue({}), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     };
     return fn(tx);
   });

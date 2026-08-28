@@ -7,7 +7,7 @@ import { buildAbility } from '@/lib/ability';
 
 // Regression for the "Create Lead does nothing" bug (sibling of the JobFormPage
 // fix): selecting an EXISTING customer copies that customer's stored service
-// location into hidden address fields. Imported Alpha Doors data stores full
+// location into hidden address fields. Imported Northwind Services data stores full
 // state names ("New Jersey"), so the old schema — service_state: z.string().max(2)
 // — failed validation on a hidden field, silently aborting form.handleSubmit and
 // never firing the POST. See lead-form-schemas.ts.
@@ -115,11 +115,11 @@ describe('LeadFormPage — ?phone= create-prefill (dialer slice 2.2)', () => {
   it('seeds the phone field from /leads/new?phone=<e164>, country code stripped + masked', async () => {
     renderWithProviders(<LeadFormPage />, {
       ability: adminAbility,
-      initialEntries: ['/leads/new?phone=%2B15555550212'],
+      initialEntries: ['/leads/new?phone=%2B15555550199'],
     });
 
     await waitFor(() =>
-      expect(screen.getByDisplayValue('(555) 555-0212')).toBeInTheDocument(),
+      expect(screen.getByDisplayValue('(555) 555-0199')).toBeInTheDocument(),
     );
   });
 });

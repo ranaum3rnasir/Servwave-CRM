@@ -102,7 +102,7 @@ describe('comm-calls :id routes - a malformed id is a 404, never a 500', () => {
 
     const res = await request(app)
       .get('/api/communication/calls/outcome')
-      .query({ to_number: '+15555550219', since: '2026-08-06T13:23:00.000Z' })
+      .query({ to_number: '+19294039424', since: '2026-08-06T13:23:00.000Z' })
       .set(authHeader('dispatcher'));
 
     expect(res.status).toBe(200);

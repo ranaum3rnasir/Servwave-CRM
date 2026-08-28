@@ -153,15 +153,30 @@ describe('CreateTaskModal - FormField conversion', () => {
     expect(labelEl.parentElement?.textContent).toBe('Title *');
   });
 
-  it('leaves Owner/Watchers/Due Date/Priority/Linked To as plain, unwired labels - the recorded deferral', () => {
+  it('leaves Due Date/Priority/Linked To as plain, unwired labels - the recorded deferral', () => {
     renderModal();
 
-    for (const text of ['Owner', 'Watchers', 'Due Date', 'Priority', 'Linked To']) {
+    for (const text of ['Due Date', 'Priority', 'Linked To']) {
       const label = screen.getByText(text);
       expect(label.tagName).toBe('LABEL');
       // Deliberately NOT wired to a control via htmlFor/id - these wrap compound
       // pickers with no id prop of their own to receive FormField's fieldProps.
       expect(label).not.toHaveAttribute('for');
+    }
+  });
+
+  it('wires the Assignees and Watchers labels to their pickers', () => {
+    // These two shed the deferral above: the multi-assignee feature gave both
+    // controls an explicit id (they had to be told apart in the DOM once the
+    // drawer mounted two of them), and MultiAssigneeSelect forwards `id` to its
+    // trigger - so there is no longer anything stopping the label naming it.
+    renderModal();
+
+    for (const [text, id] of [['Assignees', 'new-task-assignees'], ['Watchers', 'new-task-watchers']] as const) {
+      const label = screen.getByText(text);
+      expect(label.tagName).toBe('LABEL');
+      expect(label).toHaveAttribute('for', id);
+      expect(document.getElementById(id)).not.toBeNull();
     }
   });
 });

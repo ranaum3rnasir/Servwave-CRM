@@ -3,7 +3,6 @@ import { safeHref } from "@/lib/safe-href";
 import { UploadedImage } from "@/components/ui/uploaded-image";
 import {
   ChevronRight,
-  Construction,
   ExternalLink,
   Eye,
   EyeOff,
@@ -21,6 +20,7 @@ import {
   adoptServerId,
   useInventoryItems,
   useBrands,
+  useFinishes,
   useItemGroups,
   useCategories,
   useVendors,
@@ -52,6 +52,7 @@ import { AddBrandDialog } from "@/components/inventory/AddBrandDialog";
 import { AddCategoryDialog } from "@/components/inventory/AddCategoryDialog";
 import { AddGroupDialog } from "@/components/inventory/AddGroupDialog";
 import { AddItemDialog } from "@/components/inventory/AddItemDialog";
+import { ItemIdentifiers } from "@/components/inventory/ItemIdentifiers";
 import { Button } from "@/components/ui/button";
 import { Heading } from "@/components/ui/heading";
 import { useConfirm } from "@/hooks/useConfirm";
@@ -72,7 +73,7 @@ import { toast } from "@/components/ui/use-toast";
  *                   (itemized). Lines reference Price Book items or are free-form
  *                   one-off charges. (Redesigned 2026-05-28 — see §6.11.)
  *   4. Categories — full CRUD for the cross-brand category vocabulary
- *   5. Catalog    — Phase B placeholder (product photos + customer-facing copy)
+ *   5. Catalog    — empty state; the customer-facing product-photo grid is not built yet
  *
  * Base lists come from the data seam (lib/api/inventory). CRUD persists
  * through the /api/price-book/* write hooks (P0 §D single write path); the
@@ -106,6 +107,12 @@ export function PriceBookPage() {
 
   // Base data from the seam.
   const { data: seedBrands = [] } = useBrands();
+  const { data: finishes = [] } = useFinishes();
+  // Finish is a foreign key - resolve id -> name once, not per rendered row.
+  const finishNameById = useMemo(
+    () => new Map(finishes.map((f) => [f.id, f.name])),
+    [finishes],
+  );
   const { data: seedGroups = [] } = useItemGroups();
   const { data: seedItems = [] } = useInventoryItems();
   const { data: seedVendors = [] } = useVendors();
@@ -297,6 +304,7 @@ export function PriceBookPage() {
             items={filteredItems}
             totalCount={items.length}
             brands={brands}
+            finishNameById={finishNameById}
             onAdd={() => setShowAddItem(true)}
             categories={allCategories}
             catalogCount={catalogCount}
@@ -485,7 +493,7 @@ export function PriceBookPage() {
           />
         )}
 
-        {tab === "catalog" && <CatalogPhaseBPlaceholder />}
+        {tab === "catalog" && <CatalogEmptyState />}
       </div>
 
       {/* Dialogs */}
@@ -595,6 +603,7 @@ export function PriceBookPage() {
               categoryId: payload.categoryId,
               vendorId: payload.vendorId,
               brandId: payload.brandId,
+              finishId: payload.finishId,
               trade: payload.trade,
               kind: payload.kind,
               uom: payload.uom,
@@ -640,6 +649,7 @@ export function PriceBookPage() {
                       vendor: payload.vendor,
                       photoUrl: payload.photoUrl ?? i.photoUrl,
                       brandId: payload.brandId,
+                      finishId: payload.finishId,
                       visibility: payload.visibility,
                       updatedAt: new Date().toISOString(),
                     }
@@ -685,6 +695,7 @@ function ItemsTab({
   items,
   totalCount,
   brands,
+  finishNameById,
   categories,
   catalogCount,
   internalCount,
@@ -711,6 +722,8 @@ function ItemsTab({
   items: Item[];
   totalCount: number;
   brands: Brand[];
+  /** finishId -> name, resolved by the page so this table stays prop-driven. */
+  finishNameById: Map<string, string>;
   categories: { id: string; name: string }[];
   catalogCount: number;
   internalCount: number;
@@ -869,6 +882,7 @@ function ItemsTab({
               <div>
                 <div className="font-medium text-text-primary">{it.customerName ?? it.name}</div>
                 <div className="text-[11px] text-text-secondary">{it.sku}</div>
+                <ItemIdentifiers item={it} finishName={finishNameById.get(it.finishId ?? "")} />
               </div>
             ),
           },
@@ -1520,63 +1534,26 @@ function CategoriesTab({
 }
 
 // ============================================================================
-// Catalog tab — Phase B placeholder
+// Catalog tab
 // ============================================================================
 
-function CatalogPhaseBPlaceholder() {
+function CatalogEmptyState() {
   return (
     <div className="flex items-start justify-center">
       <div
         role="status"
-        className="w-full max-w-[640px] rounded-xl border border-warning/20 bg-surface-light p-8 shadow-sm"
+        className="w-full max-w-[520px] rounded-xl border border-border bg-surface-light p-8 text-center shadow-sm"
       >
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-warning/10 text-warning">
-            <Construction className="h-5 w-5" />
-          </div>
-          <Heading level={2} scale="lg">
-            Catalog view ships in Phase B
-          </Heading>
+        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-background-light text-text-secondary">
+          <ImageIcon className="h-5 w-5" />
         </div>
-        <p className="mt-4 text-sm leading-relaxed text-text-secondary">
-          The Catalog tab is the customer-facing surface — a grid of product
-          cards with hero photos, marketing-friendly names, key features, and
-          list prices. Phase A (this rev) ships the data spine (Brand + Group
-          entities, taxonomy, visibility flag); Phase B layers the photo
-          upload UX + customer-copy editing surface + the grid rendering you
-          see here.
+        <Heading level={2} scale="lg" className="mt-4">
+          Catalog
+        </Heading>
+        <p className="mx-auto mt-2 max-w-[420px] text-sm leading-relaxed text-text-secondary">
+          A customer-facing view of your price book with photos and list
+          prices. Not available yet.
         </p>
-        <div className="mt-5 rounded-card bg-background-light p-4">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-            Coming next
-          </div>
-          <ul className="mt-2 space-y-1.5 text-sm text-text-primary">
-            <li className="flex gap-2">
-              <span className="text-primary">·</span>
-              <span>Multi-photo upload per item (drag-to-reorder, hero shot, mobile camera capture)</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="text-primary">·</span>
-              <span>Customer-facing name + description + key-features editor</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="text-primary">·</span>
-              <span>Grid of photo cards filterable by Brand / Group / Category</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="text-primary">·</span>
-              <span>Internal-only items hard-filtered from the customer view</span>
-            </li>
-          </ul>
-        </div>
-        <div className="mt-5 flex flex-wrap items-center gap-1.5 text-[11px]">
-          <span className="rounded-full bg-background-light px-2 py-0.5 font-medium text-text-secondary">
-            Owner: Emanuel
-          </span>
-          <span className="rounded-full bg-background-light px-2 py-0.5 font-medium text-text-secondary">
-            Phase A → B transition
-          </span>
-        </div>
       </div>
     </div>
   );

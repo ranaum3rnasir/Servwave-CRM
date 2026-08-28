@@ -20,14 +20,14 @@ const RESPONSE = {
   numbers: [
     {
       id: 'num-1',
-      e164: '+15555550212',
+      e164: '+15555550199',
       label: 'Main line',
       is_org_default: true,
       assignments: [{ user_id: 'u-emanuel', user_name: 'Emanuel Dahan', is_default: true }],
     },
     {
       id: 'num-2',
-      e164: '+15555550219',
+      e164: '+19294039424',
       label: 'Dispatch',
       is_org_default: false,
       assignments: [],
@@ -77,8 +77,8 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
 
     // Numbers render human-formatted (never raw E.164).
-    expect(await screen.findByText('(555) 555-0212')).toBeInTheDocument();
-    expect(screen.getByText('(555) 555-0219')).toBeInTheDocument();
+    expect(await screen.findByText('(555) 555-0199')).toBeInTheDocument();
+    expect(screen.getByText('(929) 403-9424')).toBeInTheDocument();
 
     // Assigned-user chip is shown.
     expect(screen.getByText('Emanuel Dahan')).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
 
   it('assigning a user PUTs the new assignment set for that number', async () => {
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0219');
+    await screen.findByText('(929) 403-9424');
 
     // Open the second number's assignment checklist (it has no users yet).
     const editButtons = screen.getAllByRole('button', { name: /edit users/i });
@@ -115,7 +115,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
 
   it('setting a number as org default PUTs the org-default endpoint', async () => {
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0219');
+    await screen.findByText('(929) 403-9424');
 
     // The second number is not the org default yet.
     fireEvent.click(screen.getByRole('button', { name: /set as organization default/i }));
@@ -138,7 +138,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
             numbers: [
               {
                 id: 'num-1',
-                e164: '+15555550212',
+                e164: '+15555550199',
                 label: 'Main line',
                 is_org_default: true,
                 assignments: [
@@ -155,7 +155,7 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     });
 
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0212');
+    await screen.findByText('(555) 555-0199');
 
     // Ran is assigned but not default → clicking his star makes him default.
     fireEvent.click(screen.getByRole('button', { name: "Make this Art Nakamura's default number" }));
@@ -191,95 +191,56 @@ describe('PhoneNumbersSettingsPage — Caller ID admin', () => {
     expect(mockApi.get).not.toHaveBeenCalledWith('/api/communication/number-assignments');
     // No management controls can render — they only exist in the data branch.
     expect(screen.queryByRole('button', { name: /edit users/i })).toBeNull();
-    expect(screen.queryByText('(555) 555-0212')).toBeNull();
+    expect(screen.queryByText('(555) 555-0199')).toBeNull();
   });
 
-  it('shows the manual CTM-scaffold guidance after a successful assignment (Task D2)', async () => {
-    mockApi.put.mockResolvedValue({
-      data: {
-        ok: true,
-        routing: {
-          synced: true,
-          voice_menu_id: 'VOM1',
-          voice_menu_name: 'Art Nakamura — Voicemail',
-          manual_scaffold: {
-            title: 'One-time setup step needed for (555) 555-0219',
-            summary:
-              'One call-routing step still has to be completed by ServWave support. Contact support with the details below.',
-            steps: [
-              'Number to set up: (555) 555-0219.',
-              'Ring this number to: "Art Nakamura".',
-              'Send unanswered calls to voicemail box "Art Nakamura — Voicemail" (reference: VOM1).',
-            ],
-          },
-        },
-      },
-    });
+  it('assigning a user reports no routing outcome and shows no routing guidance', async () => {
+    // Assignment used to re-point the number at a voicemail menu and hand back
+    // a `routing` block for this page to render as setup guidance. It no longer
+    // touches routing at all, so there is nothing to narrate - and narrating it
+    // anyway is what told owners their number was wired when it was not.
+    mockApi.put.mockResolvedValue({ data: { ok: true } });
 
     renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0219');
+    await screen.findByText('(929) 403-9424');
 
     const editButtons = screen.getAllByRole('button', { name: /edit users/i });
     fireEvent.click(editButtons[1]);
     const ranCheckbox = await screen.findByRole('checkbox', { name: 'Art Nakamura' });
     fireEvent.click(ranCheckbox);
 
-    expect(
-      await screen.findByText('One-time setup step needed for (555) 555-0219'),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/VOM1/)).toBeInTheDocument();
-    expect(screen.getByText(/Art Nakamura — Voicemail/)).toBeInTheDocument();
-    expect(screen.getByText(/Number to set up: \(555\) 555-0219/)).toBeInTheDocument();
-  });
-
-  it('shows a plain warning (no scaffold) when the routing sync did not happen (synced:false)', async () => {
-    mockApi.put.mockResolvedValue({
-      data: {
-        ok: true,
-        routing: { synced: false, reason: 'Organization is not connected to a phone system.' },
-      },
-    });
-
-    renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0219');
-
-    fireEvent.click(screen.getByRole('button', { name: /set as organization default/i }));
-
-    expect(
-      await screen.findByText(/Organization is not connected to a phone system\./),
-    ).toBeInTheDocument();
-  });
-
-  it('the guidance panel is dismissible', async () => {
-    mockApi.put.mockResolvedValue({
-      data: {
-        ok: true,
-        routing: {
-          synced: true,
-          voice_menu_id: 'VOM1',
-          voice_menu_name: 'Voicemail',
-          manual_scaffold: {
-            title: 'One-time setup step needed for (555) 555-0219',
-            summary: 'summary text',
-            steps: ['step one'],
-          },
-        },
-      },
-    });
-
-    renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
-    await screen.findByText('(555) 555-0219');
-    fireEvent.click(screen.getByRole('button', { name: /set as organization default/i }));
-
-    const panelTitle = await screen.findByText('One-time setup step needed for (555) 555-0219');
-    expect(panelTitle).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
     await waitFor(() =>
-      expect(
-        screen.queryByText('One-time setup step needed for (555) 555-0219'),
-      ).toBeNull(),
+      expect(mockApi.put).toHaveBeenCalledWith('/api/communication/numbers/num-2/assignments', {
+        user_ids: ['u-ran'],
+      }),
     );
+    expect(screen.queryByText(/voicemail/i)).toBeNull();
+    expect(screen.queryByText(/setup step/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /dismiss/i })).toBeNull();
+  });
+
+  it('setting the org default likewise shows no routing guidance', async () => {
+    mockApi.put.mockResolvedValue({ data: { ok: true } });
+
+    renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
+    await screen.findByText('(929) 403-9424');
+
+    fireEvent.click(screen.getByRole('button', { name: /set as organization default/i }));
+
+    await waitFor(() =>
+      expect(mockApi.put).toHaveBeenCalledWith('/api/communication/numbers/num-2/org-default', {
+        is_org_default: true,
+      }),
+    );
+    expect(screen.queryByText(/voicemail/i)).toBeNull();
+    expect(screen.queryByText(/couldn.t sync/i)).toBeNull();
+  });
+
+  it('tells the admin that assigning does not change where a number rings', async () => {
+    renderWithProviders(<PhoneNumbersSettingsPage />, { ability: ADMIN });
+    await screen.findByText('(929) 403-9424');
+
+    expect(screen.getByText(/does not change where the number rings/i)).toBeInTheDocument();
   });
 
   it('a comm-disabled org is gated even for a full admin (no admin fetch, no controls)', async () => {

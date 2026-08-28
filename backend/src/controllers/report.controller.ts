@@ -16,6 +16,7 @@ import {
 } from '../services/estimate-conversion-report';
 import { buildArAging, computeDso, DSO_WINDOW_DAYS, type ArInvoiceRow, type ArSegment } from '../services/ar-aging-report';
 import { buildJobsReport, type JobInput } from '../services/jobs-report';
+import { resolveJobScheduleWindow } from '../lib/job-schedule-projection';
 import { buildLeadsReport, type LeadInput } from '../services/leads-report';
 import { buildEstimatesReport, type EstimateSourceRow } from '../services/estimates-report';
 import { buildRevenueReport, type RevenueEvent } from '../services/revenue-report';
@@ -256,7 +257,7 @@ export async function getArAging(req: Request, res: Response) {
     // DSO denominator = credit sales actually ISSUED in the window. Anchored on
     // sent_at (falling back to created_at for never-sent rows) because the Workiz
     // importer backdates created_at, and DRAFT invoices were never issued at all.
-    // Verified against the B&G clone: this choice moves DSO from 65 to 26 days.
+    // Verified against the Lakeside clone: this choice moves DSO from 65 to 26 days.
     const since = new Date(Date.now() - DSO_WINDOW_DAYS * 86_400_000);
     const sales = await prisma.invoice.aggregate({
       where: {
@@ -295,15 +296,22 @@ const jobsReportSelect = {
   scope_notes: true,
   status: true,
   created_at: true,
-  scheduled_start: true,
-  scheduled_end: true,
   customer: {
     select: { company_name: true, first_name: true, last_name: true, email: true, phone: true, source: true },
   },
   service_location: {
     select: { address_line1: true, address_line2: true, city: true, state: true, zip: true },
   },
-  assignees: { select: { user: { select: { first_name: true, last_name: true } } } },
+  // S8 (D6): crew through the trips.
+  // S8 (A5, RATIFIED): also the source of scheduledStart/scheduledEnd below - the stored mirror
+  // (scheduled_start/scheduled_end) is DROPPED; found as a straggler via this PR's own Step 0
+  // re-grep, not named in the contract's snapshot list.
+  visits: {
+    select: {
+      status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+      assignees: { select: { user: { select: { first_name: true, last_name: true } } } },
+    },
+  },
   dispatcher: { select: { first_name: true, last_name: true } },
   invoices: {
     where: { voided_at: null, kind: { not: 'DEPOSIT' } },
@@ -320,7 +328,9 @@ const jobsReportSelect = {
 export async function getJobsReport(req: Request, res: Response) {
   try {
     const jobs = await prisma.job.findMany({ where: { ...tenantWhere(req) }, select: jobsReportSelect });
-    const rows: JobInput[] = jobs.map((j) => ({
+    const rows: JobInput[] = jobs.map((j) => {
+      const schedule = resolveJobScheduleWindow(j.visits);
+      return {
       jobNumber: j.job_number,
       scopeNotes: j.scope_notes,
       status: j.status,
@@ -334,12 +344,13 @@ export async function getJobsReport(req: Request, res: Response) {
       city: j.service_location.city,
       state: j.service_location.state,
       zip: j.service_location.zip,
-      assignees: j.assignees.map((a) => ({ firstName: a.user.first_name, lastName: a.user.last_name })),
+      // S8 (D6): the job's crew is the union across its trips.
+      assignees: j.visits.flatMap((v) => v.assignees).map((a) => ({ firstName: a.user.first_name, lastName: a.user.last_name })),
       dispatcher: j.dispatcher ? { firstName: j.dispatcher.first_name, lastName: j.dispatcher.last_name } : null,
       source: j.customer.source,
       createdAt: j.created_at,
-      scheduledStart: j.scheduled_start,
-      scheduledEnd: j.scheduled_end,
+      scheduledStart: schedule.scheduled_start,
+      scheduledEnd: schedule.scheduled_end,
       invoices: j.invoices.map((inv) => ({
         totalAmount: Number(inv.total_amount),
         amountDue: Number(inv.amount_due),
@@ -347,7 +358,8 @@ export async function getJobsReport(req: Request, res: Response) {
         taxAmount: Number(inv.tax_amount),
         creditsTotal: creditsTotalOf(inv.credits),
       })),
-    }));
+      };
+    });
     res.json({ jobs: buildJobsReport(rows) });
   } catch (err) {
     logger.error('Jobs report error:', err);
@@ -541,7 +553,8 @@ const invoicesReportSelect = {
   job: {
     select: {
       job_number: true,
-      assignees: { select: { user: { select: { first_name: true, last_name: true } } }, orderBy: { created_at: 'asc' }, take: 1 },
+      // S8 (D6): crew through the trips - the earliest trip's earliest crew row is the lead tech.
+      visits: { select: { assignees: { select: { user: { select: { first_name: true, last_name: true } } }, orderBy: { created_at: 'asc' } } }, orderBy: { created_at: 'asc' } },
     },
   },
   estimate: {
@@ -562,7 +575,7 @@ export async function getInvoicesReport(req: Request, res: Response) {
     });
     const rows: InvoiceReportInput[] = invoices.map((inv) => {
       const owner = inv.estimate?.lead?.commission_owner ?? null;
-      const tech = inv.job?.assignees[0]?.user ?? null;
+      const tech = inv.job?.visits.flatMap((v) => v.assignees)[0]?.user ?? null;
       return {
         invoiceNumber: inv.invoice_number,
         status: inv.status,

@@ -125,6 +125,18 @@ describe('POST /api/service-plans/:id/schedule-visit — materials → DRAFT LO'
         create: vi.fn().mockResolvedValue({ id: 'pv1', visit_number: 1 }),
       },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+      // S8 (D6): scheduleVisit books a real job VISIT and lands the plan's technician on it, so
+      // this tx client needs those delegates - a write to one a hand-listed fake omits throws
+      // inside the transaction and the route 500s with no useful message.
+      visit: {
+        create: vi.fn().mockResolvedValue({ id: 'jv1', job_id: 'job1', visit_seq: 1 }),
+        aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+      },
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue([]),
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       // instantiatePlanMaterials runs on the tx client: liveness read + LO create.
       priceBookItem: { findMany: txSpy(mockPrisma.priceBookItem.findMany) },
       logisticOrder: { create: vi.fn().mockResolvedValue({ id: 'lo1', number: 'LO-J00001-1' }) },

@@ -45,42 +45,11 @@ export type NumberAssignmentsResponse = {
   users: OrgUserOption[];
 };
 
-/**
- * Master plan Task D2 — the one-time manual CTM-UI scaffold instructions
- * (`describeManualQueueScaffold` on the backend) for the half of inbound
- * routing that isn't confirmed API-drivable (Queue creation / Agent
- * assignment / No-Answer target / Distribute mode). Mirrors
- * `backend/src/lib/ctm/routing.ts`'s `ManualQueueScaffoldInstructions`.
- */
-export type ManualQueueScaffoldInstructions = {
-  title: string;
-  summary: string;
-  steps: string[];
-};
-
-/**
- * Result of the backend's CTM inbound-routing sync (Task D2), returned by
- * the assignment + org-default mutations. `synced:true` means the CONFIRMED
- * half (voicemail voice-menu + number dial-route) succeeded, and
- * `manual_scaffold` is the exact instructions for the one remaining manual
- * CTM step. `synced:false` means the sync didn't happen (CTM not
- * configured/connected, a bring-your-own number, or a live API failure) —
- * `reason` is safe, human-readable text for a warning banner.
- */
-export type RoutingSyncResult =
-  | {
-      synced: true;
-      voice_menu_id: string;
-      voice_menu_name: string;
-      manual_scaffold: ManualQueueScaffoldInstructions;
-    }
-  | { synced: false; reason: string };
-
 /** PUT numbers/:id/assignments and PUT numbers/:id/org-default both return
- *  this shape — `routing` is `null` when no sync was attempted (e.g.
- *  unassigning to zero users, or unsetting the org default — see the
- *  backend controller for why that's a deliberate no-op, not a bug). */
-export type AssignmentMutationResponse = { ok: true; routing: RoutingSyncResult | null };
+ *  this. Assignment is a pure DB write: it records who is responsible for a
+ *  number, and deliberately does NOT change where that number rings (routing
+ *  lives on the number itself - see `useUpdateNumberForwarding`). */
+export type AssignmentMutationResponse = { ok: true };
 
 /** Shared query key — mutations invalidate this exact key. */
 const NUMBER_ASSIGNMENTS_KEY = ['communication', 'number-assignments'] as const;
@@ -98,8 +67,7 @@ export function useNumberAssignments(enabled = true) {
 }
 
 /** Set the exact set of users assigned to a number (PUT numbers/:id/assignments).
- *  The response's `routing` (Task D2) is what the page shows as post-assignment
- *  CTM setup guidance. */
+ *  The set is absolute - what is sent is what the number ends up with. */
 export function useSetNumberAssignments() {
   const qc = useQueryClient();
   return useMutation({
@@ -125,8 +93,7 @@ export function useSetUserDefaultNumber() {
 }
 
 /** Set/unset the single org-default number (PUT numbers/:id/org-default).
- *  Setting one clears any prior; `isOrgDefault: false` unsets. Same D2
- *  `routing` guidance shape as `useSetNumberAssignments`. */
+ *  Setting one clears any prior; `isOrgDefault: false` unsets. */
 export function useSetOrgDefaultNumber() {
   const qc = useQueryClient();
   return useMutation({
@@ -142,7 +109,7 @@ export function useSetOrgDefaultNumber() {
  * Task B3 — the `/phone` tab's caller-ID PICKER allow-list. ONLY the current
  * user's own assigned numbers plus the org default (deduped) — never the full
  * org roster (that's `useNumberAssignments` above, ADMIN-gated) and never
- * free text. Backs the from-number dropdown in `PhoneShell`.
+ * free text. Backs the from-number dropdown in `PhoneTabPage`.
  */
 export type MyNumberOption = {
   phone_number_id: string;

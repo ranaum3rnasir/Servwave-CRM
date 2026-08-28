@@ -16,7 +16,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
 import { SelectField } from '@/components/form/SelectField';
 import { DatePicker } from '@/components/form/DatePicker';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { MultiSelectFilter, ReportToolbar, ReportPager } from './_shared';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
@@ -24,7 +24,7 @@ import { exportCsvFile } from '@/lib/csv';
 import { STATUS_INTENT_CLASSES } from '@/design-system/status-registry';
 import {
   useInvoicesReport, JOB_TYPES, STATUSES, type InvoiceStatus,
-} from './invoices-data';
+} from '@/lib/reports/invoices-data';
 
 const money = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 

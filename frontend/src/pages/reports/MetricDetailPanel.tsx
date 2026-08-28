@@ -10,7 +10,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
 import { formatCurrency } from '@/lib/utils';
 import { token } from '@/design-system/tokens';
-import type { Division, UserActivity } from './activity-logic';
+import type { Division, UserActivity } from '@/lib/reports/activity-logic';
 import {
   type MetricKey,
   type BreakdownSource,
@@ -23,7 +23,7 @@ import {
   pctDelta,
   companyRows,
   leaderboard,
-} from './activity-logic';
+} from '@/lib/reports/activity-logic';
 
 /** Build the ranking sources for the current level from the filtered users. */
 function sourcesFor(

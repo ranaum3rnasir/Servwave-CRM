@@ -34,12 +34,11 @@ function job(over: Partial<JobInput>): JobInput {
 
 describe('jobStatusLabel', () => {
   it('maps each JobStatus enum value to a frontend label', () => {
-    expect(jobStatusLabel('UNASSIGNED')).toBe('Submitted');
+    expect(jobStatusLabel('UNSCHEDULED')).toBe('Submitted');
     expect(jobStatusLabel('SCHEDULED')).toBe('In progress - Scheduled');
-    // Spec B1 (B-8): EN_ROUTE/ON_SITE/IN_PROGRESS get distinct labels now — they used to all
-    // collapse to 'In progress', which this exact test previously asserted as correct.
-    expect(jobStatusLabel('EN_ROUTE')).toBe('En route');
-    expect(jobStatusLabel('ON_SITE')).toBe('On site');
+    // Spec B1 (B-8) gave EN_ROUTE/ON_SITE/IN_PROGRESS distinct labels here. S4 (D17) retired the
+    // first two from JobStatus - they describe a TRIP - so the report has one in-flight job label
+    // again, and the finer states are reported per visit.
     expect(jobStatusLabel('IN_PROGRESS')).toBe('In progress');
     expect(jobStatusLabel('COMPLETED')).toBe('Done');
     expect(jobStatusLabel('CANCELLED')).toBe('Canceled');

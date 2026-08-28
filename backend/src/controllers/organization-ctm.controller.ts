@@ -29,7 +29,7 @@ import {
 //
 // `outbound_text` is deliberately ABSENT. It was provisioned here from the
 // start and, measured live 2026-08-01, was registered on both connected CTM
-// accounts (596375 hook 274748, 597911 hook 274595 - `disabled: false`, no
+// accounts (500001 hook 274748, 500002 hook 274595 - `disabled: false`, no
 // conditions) and had fired ZERO times in 21 days. Every outbound text arrived
 // on `status_change` instead, as a full `direction: msg_outbound` activity.
 // CTM stores a position string it does not recognize rather than rejecting it
@@ -41,7 +41,7 @@ import {
 // A hook carries TWO independent names, and they are not always the same
 // string: `ctmPosition` is validated against CTM's own trigger list, while
 // `path` is the segment our route dispatches on (ctm-webhook.controller's
-// isKnownPosition). Probed live against account 596375 on 2026-08-05, CTM
+// isKnownPosition). Probed live against account 500001 on 2026-08-05, CTM
 // REJECTS `starts` outright - HTTP 406, {"position":["is not included in the
 // list"]} - and accepts `start`. So no org has ever had a call-start hook: the
 // connect logged one warning and moved on. Sending `start` while keeping the
@@ -303,7 +303,7 @@ export async function disconnectCtm(req: Request, res: Response) {
       return;
     }
 
-    // Delete only OUR hooks (weburl on our backend origin); Alpha Doors' own
+    // Delete only OUR hooks (weburl on our backend origin); Northwind Services' own
     // CTM config is never touched. Invisible-rollback guarantee (plan §7).
     const base = webhookBaseUrl();
     if (isCtmConfigured() && base) {

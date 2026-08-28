@@ -4,7 +4,7 @@ import { Prisma, Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { tenantWhere } from '../lib/tenant';
 import { logger } from '../lib/logger';
-import { DEFAULT_GRANTS } from '../lib/permissions/defaultGrants';
+import { DEFAULT_GRANTS, PRESERVED_ON_RESET } from '../lib/permissions/defaultGrants';
 import { clearPermissionCache } from '../lib/permissions/permissionCache';
 import {
   assembleRoleViewModel,
@@ -13,6 +13,7 @@ import {
   SENSITIVE,
   TOGGLES,
   isRepresentableScopeCondition,
+  isToggleGrant,
   type RoleViewModel,
   type ToggleKey,
 } from '../lib/permissions/roleViewModel';
@@ -51,7 +52,7 @@ function adminViewModel(): RoleViewModel {
   return {
     role: 'ADMIN',
     matrix,
-    sensitive: { seeFinancials: true, managePayments: true, viewReports: true },
+    sensitive: { seeFinancials: true, managePayments: true, viewReports: true, editRecordIds: true },
     toggles: allTogglesOn(),
     scope: {},
     general: { description: 'Full access (non-reducible)' },
@@ -61,7 +62,7 @@ function adminViewModel(): RoleViewModel {
 const keyOf = (g: { action: string; subject: string }) => `${g.action}:${g.subject}`;
 
 // Every (action:subject) pair a fully-enabled view-model can emit: MODULES CRUD x4 + both
-// SENSITIVE bundles + all 5 TOGGLES, filtered to catalog entries. Two callers: MANAGED_KEYS below
+// SENSITIVE bundles + all 10 TOGGLES, filtered to catalog entries. Two callers: MANAGED_KEYS below
 // (what a Save may add/remove) and createRole/resetRole's seed for an ADMIN-derived custom role -
 // such a role starts as "full access" so the admin SUBTRACTS from it ("full access minus
 // payroll"), rather than starting from nothing and having to name every permission it should hold.
@@ -71,7 +72,7 @@ function buildFullGrantSet(): Grant[] {
   const fullVm: RoleViewModel = {
     role: '',
     matrix: fullMatrix,
-    sensitive: { seeFinancials: true, managePayments: true, viewReports: true },
+    sensitive: { seeFinancials: true, managePayments: true, viewReports: true, editRecordIds: true },
     toggles: allTogglesOn(),
     scope: {},
     general: { description: '' },
@@ -85,7 +86,7 @@ function buildFullGrantSet(): Grant[] {
 const FROZEN_ON_LEGACY_SAVE = new Set([...SENSITIVE.seeFinancials, ...SENSITIVE.viewReports].map(keyOf));
 
 // The (action:subject) pairs the Roles editor actually manages = every pair a fully-enabled
-// view-model can emit (the full CRUD matrix + both sensitive bundles + all 5 SRVW-139 toggles).
+// view-model can emit (the full CRUD matrix + both sensitive bundles + all 10 TOGGLES).
 // A role Save only adds/removes within THIS surface; grants OUTSIDE it (lifecycle verbs like
 // revise/archive/delete-Lead/send/assign/complete) are PRESERVED, never stripped — the editor
 // can't represent them, so it must not delete them.
@@ -243,7 +244,20 @@ export const putRolePermissions = async (req: Request, res: Response) => {
       // untouched), so an admin's ability to REVOKE is unaffected.
       .map((g) => {
         const current = existingByKey.get(keyOf(g));
-        if (!current || isRepresentableScopeCondition(g.subject, current.conditions)) return g;
+        if (!current) return g;
+        // TOGGLE-sourced grants (roleViewModel.ts's TOGGLES) have no admin-facing scope control -
+        // unlike the CRUD-matrix chip, there is no UI input that means "change this grant's
+        // condition". The bundle's `conditions` is only ever a SEED for a brand-new row, so an
+        // existing row's condition must always survive a Save untouched. Skipping this for a
+        // toggle would silently re-stamp every role's grant with the bundle's single hardcoded
+        // condition - confirmed live on staging: DISPATCHER holds the five milestone-verb toggles
+        // (en_route/arrive/start/complete/reschedule on Job) UNCONDITIONALLY while TECHNICIAN
+        // holds them OWN_JOB-scoped, so a save of the DISPATCHER role for ANY unrelated reason
+        // would otherwise narrow their authority to "own job only".
+        if (isToggleGrant(g.action, g.subject)) {
+          return { ...g, conditions: current.conditions as Record<string, unknown> | null };
+        }
+        if (isRepresentableScopeCondition(g.subject, current.conditions)) return g;
         return { ...g, conditions: current.conditions as Record<string, unknown> | null };
       });
     const desiredByKey = new Map(desired.map((g) => [keyOf(g), g]));
@@ -320,6 +334,22 @@ export const resetRole = async (req: Request, res: Response) => {
     }
 
     const orgId = req.user!.organization_id;
+
+    // D15a: a reset must never remove a grant the PLATFORM stopped seeding while the ORG still
+    // legitimately holds it. Reset rebuilds purely from DEFAULT_GRANTS, so without this the first
+    // admin to press "reset to defaults" would silently take their technicians off `complete Job`
+    // - the opposite of D15's "on for existing orgs". Only rows the org actually has are carried
+    // forward: this preserves, it never re-seeds.
+    const held = await prisma.rolePermission.findMany({
+      where: { organization_id: orgId, role },
+      select: { action: true, subject: true, conditions: true },
+    });
+    const preserved = held.filter(
+      (h) =>
+        PRESERVED_ON_RESET.some((p) => p.action === h.action && p.subject === h.subject) &&
+        !baseGrants.some((g) => g.action === h.action && g.subject === h.subject),
+    );
+
     const defaults: Prisma.RolePermissionCreateManyInput[] = baseGrants.map((g) => {
       const conditions = (g as { conditions?: Record<string, unknown> }).conditions;
       return {
@@ -330,6 +360,15 @@ export const resetRole = async (req: Request, res: Response) => {
         conditions: conditions == null ? Prisma.JsonNull : (conditions as Prisma.InputJsonValue),
       };
     });
+    for (const p of preserved) {
+      defaults.push({
+        organization_id: orgId,
+        role,
+        action: p.action,
+        subject: p.subject,
+        conditions: p.conditions == null ? Prisma.JsonNull : (p.conditions as Prisma.InputJsonValue),
+      });
+    }
     await prisma.$transaction(async (tx) => {
       await tx.rolePermission.deleteMany({ where: { organization_id: orgId, role } });
       if (defaults.length) await tx.rolePermission.createMany({ data: defaults });

@@ -32,6 +32,14 @@ const ORG_ROW = {
   feature_overrides: null,
 };
 
+// S8 §2 (A4, RATIFIED): the anchored-WAIT/STOP_IF/terminal-staleness resolver now reads
+// context.ts's resolveNextJobVisit(isLiveVisit subset) instead of a flat Job.scheduled_start
+// column, so `state.jobScheduledStart` (and so `job_rescheduled`'s STOP_IF condition and every
+// JOB_DATE_ANCHORED staleness check below) tracks `visits[0].scheduled_at`, not the top-level
+// `scheduled_start` field. `scheduled_start` itself is kept on the fixture for parity with the
+// real Job row shape (other scenarios spread over JOB_ROW to change job.status, unrelated to
+// scheduling), but any override that means to move the effective anchor date MUST also override
+// `visits` — see the two PAST_START overrides below.
 const JOB_ROW = {
   id: JOB_ID,
   job_number: 'J00042',
@@ -47,7 +55,16 @@ const JOB_ROW = {
     phone: '+15551234567',
   },
   service_location: { address_line1: '18 Maple Ave', address_line2: null, city: 'Richmond', state: 'VA', zip: '23220' },
-  assignees: [{ user: { id: 'tech-1', email: 'mike@org.com', first_name: 'Mike', last_name: 'Torres' } }],
+  visits: [
+    {
+      id: 'visit-1',
+      status: 'SCHEDULED',
+      scheduled_at: new Date('2026-07-15T13:00:00.000Z'),
+      scheduled_end: null,
+      created_at: new Date('2026-07-01T00:00:00.000Z'),
+      assignees: [{ user: { id: 'tech-1', email: 'mike@org.com', first_name: 'Mike', last_name: 'Torres' } }],
+    },
+  ],
 };
 
 // ── step + definition + row builders ──────────────────────────────────────────
@@ -701,7 +718,13 @@ describe('advanceEnrollment', () => {
     const PAST_START = new Date('2026-07-14T10:00:00.000Z'); // before NOW (2026-07-14T15:00:00.000Z)
 
     it("JOB_DATE_ANCHORED direction:'before' stops once the anchor has already passed", async () => {
-      mockPrisma.job.findFirst.mockResolvedValueOnce({ ...JOB_ROW, scheduled_start: PAST_START });
+      mockPrisma.job.findFirst.mockResolvedValueOnce({
+        ...JOB_ROW,
+        scheduled_start: PAST_START,
+        // S8 §2 (A4): state.jobScheduledStart now tracks the live visit, not this top-level
+        // column — the visit itself must move too for this override to take effect.
+        visits: [{ ...JOB_ROW.visits[0], scheduled_at: PAST_START }],
+      });
       mockPrisma.workflowEnrollment.findUnique.mockResolvedValueOnce(
         enrollmentRow({
           occurrence_key: PAST_START.toISOString(),
@@ -723,7 +746,13 @@ describe('advanceEnrollment', () => {
     });
 
     it("JOB_DATE_ANCHORED direction:'after' does NOT stop on the SAME already-passed anchor", async () => {
-      mockPrisma.job.findFirst.mockResolvedValueOnce({ ...JOB_ROW, scheduled_start: PAST_START });
+      mockPrisma.job.findFirst.mockResolvedValueOnce({
+        ...JOB_ROW,
+        scheduled_start: PAST_START,
+        // S8 §2 (A4): state.jobScheduledStart now tracks the live visit, not this top-level
+        // column — the visit itself must move too for this override to take effect.
+        visits: [{ ...JOB_ROW.visits[0], scheduled_at: PAST_START }],
+      });
       mockPrisma.workflowEnrollment.findUnique.mockResolvedValueOnce(
         enrollmentRow({
           occurrence_key: PAST_START.toISOString(),
@@ -740,5 +769,77 @@ describe('advanceEnrollment', () => {
       expect(mockExecute).toHaveBeenCalledTimes(1);
       expect(mockPrisma.workflowEnrollment.update.mock.calls[0][0].data.status).toBe('COMPLETED');
     });
+  });
+});
+
+// ── D18: the dedupe key carries the visit id, the occurrence key does NOT ─────
+// Multi-visit S7/B1. Two visits on the SAME job under the SAME trigger must
+// enrol twice: keyed on the job alone, visit 2's notification is swallowed by
+// the [workflow_id, dedupe_key] unique constraint as a duplicate of visit 1's.
+//
+// The occurrence key is deliberately left byte-identical, because FOUR modules
+// read it as an ISO timestamp (stopIf.ts:54, terminalStale.ts:66/:81/:157) and
+// return a stale-reason - i.e. they SILENTLY kill the run - when the compare
+// fails. Widening that format would break every anchored wait with no test
+// anywhere seeing it, so these cases are the guard on it.
+describe('visit-scoped dedupe key (D18)', () => {
+  const V1 = 'd0000000-0000-0000-0000-0000000000a1';
+  const V2 = 'd0000000-0000-0000-0000-0000000000a2';
+
+  beforeEach(() => {
+    mockPrisma.workflow.findMany.mockResolvedValue([workflowRow()]);
+  });
+
+  it('two visits on one job produce two distinct enrollments, both with a bare occurrence key', async () => {
+    await enrollOnEvent(
+      { type: 'JOB_SCHEDULED', organizationId: ORG, entity: { type: 'job', id: JOB_ID, label: 'J00042' }, visitId: V1 },
+      NOW,
+    );
+    await enrollOnEvent(
+      { type: 'JOB_SCHEDULED', organizationId: ORG, entity: { type: 'job', id: JOB_ID, label: 'J00042' }, visitId: V2 },
+      NOW,
+    );
+
+    expect(mockPrisma.workflowEnrollment.create).toHaveBeenCalledTimes(2);
+    const first = mockPrisma.workflowEnrollment.create.mock.calls[0][0].data;
+    const second = mockPrisma.workflowEnrollment.create.mock.calls[1][0].data;
+
+    expect(first.dedupe_key).toBe(`JOB_SCHEDULED:${JOB_ID}:${V1}`);
+    expect(second.dedupe_key).toBe(`JOB_SCHEDULED:${JOB_ID}:${V2}`);
+    expect(first.dedupe_key).not.toBe(second.dedupe_key);
+
+    // Unchanged from today: JOB_SCHEDULED is not occurrence-scoped.
+    expect(first.occurrence_key).toBeNull();
+    expect(second.occurrence_key).toBeNull();
+  });
+
+  it('a rescheduled visit keeps occurrence_key as the bare new-start ISO, with no visit id inside it', async () => {
+    const newStart = new Date('2026-07-20T13:00:00.000Z');
+    mockPrisma.workflow.findMany.mockResolvedValue([workflowRow({ trigger_type: 'JOB_RESCHEDULED' })]);
+    await enrollOnEvent(
+      {
+        type: 'JOB_RESCHEDULED',
+        organizationId: ORG,
+        entity: { type: 'job', id: JOB_ID, label: 'J00042' },
+        occurrenceKey: newStart.toISOString(),
+        visitId: V1,
+      },
+      NOW,
+    );
+
+    const data = mockPrisma.workflowEnrollment.create.mock.calls[0][0].data;
+    expect(data.occurrence_key).toBe(newStart.toISOString());
+    expect(data.occurrence_key).not.toContain(V1);
+    expect(data.dedupe_key).toBe(`JOB_RESCHEDULED:${JOB_ID}:${V1}:${newStart.toISOString()}`);
+  });
+
+  it('an event with no visit id keys byte-identically to today (the cron and date-anchor paths)', async () => {
+    await enrollOnEvent(
+      { type: 'JOB_SCHEDULED', organizationId: ORG, entity: { type: 'job', id: JOB_ID, label: 'J00042' } },
+      NOW,
+    );
+    const data = mockPrisma.workflowEnrollment.create.mock.calls[0][0].data;
+    expect(data.dedupe_key).toBe(`JOB_SCHEDULED:${JOB_ID}`);
+    expect(data.occurrence_key).toBeNull();
   });
 });

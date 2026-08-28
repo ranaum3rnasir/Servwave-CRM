@@ -63,7 +63,7 @@ beforeEach(() => {
   client.updateNumberRouting.mockResolvedValue({});
   client.enableSms.mockResolvedValue('ok');
 
-  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+  p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
   p.phoneNumber.findMany.mockResolvedValue([dbRow()]);
   p.phoneNumber.findFirst.mockResolvedValue(dbRow());
   p.phoneNumber.upsert.mockResolvedValue(dbRow());
@@ -97,28 +97,28 @@ describe('buyNumberSchema (routing destination required)', () => {
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
       }).success,
     ).toBe(true);
     // The bare 10-digit spelling normalizes too.
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '5555550215',
+        forward_to_e164: '6462023002',
       }).success,
     ).toBe(true);
     // Optional flow metadata still validates as a uuid when present.
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
         call_flow_id: FLOW_ID,
       }).success,
     ).toBe(true);
     expect(
       numbersController.buyNumberSchema.safeParse({
         phone_number: '+12015550123',
-        forward_to_e164: '+15555550215',
+        forward_to_e164: '+16462023002',
         call_flow_id: 'main_ivr',
       }).success,
     ).toBe(false);
@@ -133,7 +133,7 @@ describe('buyNumberSchema (routing destination required)', () => {
       }).success,
     ).toBe(false);
     expect(
-      numbersController.buyNumberSchema.safeParse({ forward_to_e164: '+15555550215' }).success,
+      numbersController.buyNumberSchema.safeParse({ forward_to_e164: '+16462023002' }).success,
     ).toBe(false);
   });
 });
@@ -207,7 +207,7 @@ describe('searchNumbers', () => {
   it('proxies a local areacode search to the CTM client under the org account', async () => {
     const res = mockRes();
     await numbersController.searchNumbers(req({ areacode: '201', type: 'local' }), res);
-    expect(client.searchNumbers).toHaveBeenCalledWith('596375', { areacode: '201' });
+    expect(client.searchNumbers).toHaveBeenCalledWith('500001', { areacode: '201' });
   });
 
   // `type` is OUR API vocabulary, not CTM's. CTM has no `type` parameter: it
@@ -217,7 +217,7 @@ describe('searchNumbers', () => {
   it('translates type=tollfree into CTM searchby=tollfree', async () => {
     const res = mockRes();
     await numbersController.searchNumbers(req({ type: 'tollfree' }), res);
-    expect(client.searchNumbers).toHaveBeenCalledWith('596375', { searchby: 'tollfree' });
+    expect(client.searchNumbers).toHaveBeenCalledWith('500001', { searchby: 'tollfree' });
   });
 
   // A local areacode alongside searchby=tollfree flips CTM back to an area
@@ -225,13 +225,13 @@ describe('searchNumbers', () => {
   it('drops a local areacode from a toll-free search', async () => {
     const res = mockRes();
     await numbersController.searchNumbers(req({ areacode: '201', type: 'tollfree' }), res);
-    expect(client.searchNumbers).toHaveBeenCalledWith('596375', { searchby: 'tollfree' });
+    expect(client.searchNumbers).toHaveBeenCalledWith('500001', { searchby: 'tollfree' });
   });
 
   it('keeps a toll-free areacode, which CTM honours as a toll-free search', async () => {
     const res = mockRes();
     await numbersController.searchNumbers(req({ areacode: '833', type: 'tollfree' }), res);
-    expect(client.searchNumbers).toHaveBeenCalledWith('596375', {
+    expect(client.searchNumbers).toHaveBeenCalledWith('500001', {
       searchby: 'tollfree',
       areacode: '833',
     });
@@ -281,7 +281,7 @@ describe('searchNumbers', () => {
 // ─── POST /numbers/buy ───────────────────────────────────────────────────────
 
 describe('buyNumber', () => {
-  const FORWARD_TO = '+15555550215';
+  const FORWARD_TO = '+16462023002';
   const buyBody = { phone_number: '+12015550123', forward_to_e164: FORWARD_TO, call_flow_id: FLOW_ID };
 
   it('409s when the org is not CTM-connected', async () => {
@@ -315,7 +315,7 @@ describe('buyNumber', () => {
     try {
       const res = mockRes();
       await numbersController.buyNumber(req(buyBody), res);
-      expect(client.buyNumber).toHaveBeenCalledWith('596375', {
+      expect(client.buyNumber).toHaveBeenCalledWith('500001', {
         phone_number: '+12015550123',
         test: true,
       });
@@ -329,7 +329,7 @@ describe('buyNumber', () => {
     try {
       const res = mockRes();
       await numbersController.buyNumber(req(buyBody), res);
-      expect(client.buyNumber).toHaveBeenCalledWith('596375', {
+      expect(client.buyNumber).toHaveBeenCalledWith('500001', {
         phone_number: '+12015550123',
         test: false,
       });
@@ -343,15 +343,15 @@ describe('buyNumber', () => {
     await numbersController.buyNumber(req(buyBody), res);
 
     // NODE_ENV is 'test' under vitest → the CTM test flag must be set.
-    expect(client.buyNumber).toHaveBeenCalledWith('596375', {
+    expect(client.buyNumber).toHaveBeenCalledWith('500001', {
       phone_number: '+12015550123',
       test: true,
     });
 
     // Mandatory routing: receiving number registered, then the NEW TPN id
     // dial-routes to it (the PM blocker — a bought number must actually ring).
-    expect(client.createReceivingNumber).toHaveBeenCalledWith('596375', FORWARD_TO);
-    expect(client.updateNumberRouting).toHaveBeenCalledWith('596375', 'TPN-NEW', {
+    expect(client.createReceivingNumber).toHaveBeenCalledWith('500001', FORWARD_TO);
+    expect(client.updateNumberRouting).toHaveBeenCalledWith('500001', 'TPN-NEW', {
       dial_route: 'forward',
       numbers: [FORWARD_TO],
     });
@@ -395,16 +395,16 @@ describe('buyNumber', () => {
   // writing a corrupt row.
   it('a purchase response it cannot parse never becomes a garbage row - it warns instead', async () => {
     client.buyNumber.mockResolvedValue({
-      number: { id: 'TPN-WRAPPED', number: '+15555550211', formatted: '(555) 555-0211' },
+      number: { id: 'TPN-WRAPPED', number: '+16095968565', formatted: '(609) 596-8565' },
     });
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+15555550211', forward_to_e164: FORWARD_TO }),
+      req({ phone_number: '+16095968565', forward_to_e164: FORWARD_TO }),
       res,
     );
 
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
-    expect(upsert.create.e164).toBe('+15555550211');
+    expect(upsert.create.e164).toBe('+16095968565');
     expect(upsert.create.e164).not.toContain('object Object');
     expect(upsert.create.formatted).toBeNull();
     expect(upsert.create.ctm_number_id).toBeNull();
@@ -421,13 +421,13 @@ describe('buyNumber', () => {
     client.buyNumber.mockResolvedValue({ unexpected: { shape: true } });
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+15555550211', forward_to_e164: FORWARD_TO }),
+      req({ phone_number: '+16095968565', forward_to_e164: FORWARD_TO }),
       res,
     );
 
     const upsert = p.phoneNumber.upsert.mock.calls[0][0];
-    expect(upsert.create.e164).toBe('+15555550211');
-    expect(upsert.where.organization_id_e164.e164).toBe('+15555550211');
+    expect(upsert.create.e164).toBe('+16095968565');
+    expect(upsert.where.organization_id_e164.e164).toBe('+16095968565');
   });
 
   it('buys WITHOUT call_flow_id (optional metadata) — no flow lookup, flow persists null', async () => {
@@ -439,7 +439,7 @@ describe('buyNumber', () => {
 
     expect(p.callFlow.findFirst).not.toHaveBeenCalled();
     expect(client.buyNumber).toHaveBeenCalledTimes(1);
-    expect(client.updateNumberRouting).toHaveBeenCalledWith('596375', 'TPN-NEW', {
+    expect(client.updateNumberRouting).toHaveBeenCalledWith('500001', 'TPN-NEW', {
       dial_route: 'forward',
       numbers: [FORWARD_TO],
     });
@@ -452,12 +452,12 @@ describe('buyNumber', () => {
   it('normalizes a bare 10-digit forward_to_e164 before routing', async () => {
     const res = mockRes();
     await numbersController.buyNumber(
-      req({ phone_number: '+12015550123', forward_to_e164: '5555550215' }),
+      req({ phone_number: '+12015550123', forward_to_e164: '6462023002' }),
       res,
     );
 
-    expect(client.createReceivingNumber).toHaveBeenCalledWith('596375', FORWARD_TO);
-    expect(client.updateNumberRouting).toHaveBeenCalledWith('596375', 'TPN-NEW', {
+    expect(client.createReceivingNumber).toHaveBeenCalledWith('500001', FORWARD_TO);
+    expect(client.updateNumberRouting).toHaveBeenCalledWith('500001', 'TPN-NEW', {
       dial_route: 'forward',
       numbers: [FORWARD_TO],
     });
@@ -468,7 +468,7 @@ describe('buyNumber', () => {
     const res = mockRes();
     await numbersController.buyNumber(req(buyBody), res);
 
-    expect(client.updateNumberRouting).toHaveBeenCalledWith('596375', 'TPN-NEW', {
+    expect(client.updateNumberRouting).toHaveBeenCalledWith('500001', 'TPN-NEW', {
       dial_route: 'forward',
       numbers: [FORWARD_TO],
     });

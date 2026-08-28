@@ -33,6 +33,8 @@ router.get('/categories', canDo('read', 'PriceBook'), invCatalog.listCategories)
 router.post('/categories', gone);       // → POST/PATCH /api/price-book/categories
 router.get('/brands', canDo('read', 'PriceBook'), invCatalog.listBrands);
 router.post('/brands', gone);           // → POST /api/price-book/brands
+router.get('/finishes', canDo('read', 'PriceBook'), invCatalog.listFinishes);
+router.get('/uom-options', canDo('read', 'PriceBook'), invCatalog.listUomOptions);
 router.get('/item-groups', canDo('read', 'PriceBook'), invCatalog.listItemGroups);
 router.post('/item-groups', gone);      // → POST /api/price-book/item-groups
 

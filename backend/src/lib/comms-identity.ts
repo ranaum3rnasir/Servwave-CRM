@@ -1,4 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
+// The one definition of the three statuses a lead never moves on from. This module used to carry
+// a byte-identical private copy of the list; the lead status writer needs the same three for its
+// transition guard, and two copies of a list that must agree is how a fourth terminal status ends
+// up honoured in one place and ignored in the other.
+import { TERMINAL_LEAD_STATUSES } from '../services/lead-stage.service';
 
 /**
  * Provider-agnostic comms↔CRM identity resolver (DEC6).
@@ -25,8 +30,6 @@ export interface IdentityMatch {
   vendorId: string | null;
   label: string;         // human-friendly name for "unmatched"-vs-linked UI
 }
-
-const TERMINAL_LEAD_STATUSES = ['WON', 'LOST', 'CANCELLED'] as const;
 
 /** Normalize a North-American phone string to E.164 (+1XXXXXXXXXX), or null. */
 export function normalizeNAPhone(raw: string): string | null {

@@ -25,6 +25,15 @@ import {
 import type { CallSession, PhoneCustomer } from "@/lib/api/communication";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DatePicker } from "@/components/form/DatePicker";
+import {
+  useScheduleTimezone,
+  formatInstant,
+  isoToOrgDay,
+  addOrgDays,
+  orgToday,
+  orgDayStart,
+  orgDayEnd,
+} from "@/lib/schedule-tz";
 
 /* ─────────────────── Shared types ─────────────────── */
 
@@ -46,9 +55,8 @@ export function customerById(
 
 /* ─────────────────── Pure helpers ─────────────────── */
 
-export function shortTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString('en-US', { hour: "numeric", minute: "2-digit" });
+export function shortTime(iso: string, tz: string): string {
+  return formatInstant(iso, tz, { hour: "numeric", minute: "2-digit" });
 }
 
 /** The external party's number on a call — the customer side. On inbound that's
@@ -84,27 +92,28 @@ const ORDINAL = (d: number) => {
   }
 };
 
-export function dayLabel(iso: string): string {
-  const d = new Date(iso);
-  const wd = d.toLocaleDateString('en-US', { weekday: "short" });
-  const mo = d.toLocaleDateString('en-US', { month: "short" });
-  return `${wd} ${mo} ${d.getDate()}${ORDINAL(d.getDate())}`;
+export function dayLabel(iso: string, tz: string): string {
+  const day = isoToOrgDay(iso, tz);
+  if (!day) return "";
+  // The day-of-month comes from the org-zone day token, never `d.getDate()` -
+  // that reads the viewer's calendar, and the ordinal would then disagree with
+  // the weekday and month beside it on any evening that straddles midnight.
+  const dom = Number(day.slice(8, 10));
+  const wd = formatInstant(iso, tz, { weekday: "short" });
+  const mo = formatInstant(iso, tz, { month: "short" });
+  return `${wd} ${mo} ${dom}${ORDINAL(dom)}`;
 }
 
 /** Numeric calendar date, month-day-year (e.g. "07-17-2026"). */
-export function dateNumeric(iso: string): string {
-  const d = new Date(iso);
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${mm}-${dd}-${d.getFullYear()}`;
+export function dateNumeric(iso: string, tz: string): string {
+  const day = isoToOrgDay(iso, tz);
+  if (!day) return "";
+  return `${day.slice(5, 7)}-${day.slice(8, 10)}-${day.slice(0, 4)}`;
 }
 
-/** Wall-clock time of day the call happened (e.g. "3:27 PM"). */
-export function timeLabel(iso: string): string {
-  return new Date(iso).toLocaleTimeString('en-US', {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+/** Wall-clock time of day the call happened, on the ORG's clock (e.g. "3:27 PM"). */
+export function timeLabel(iso: string, tz: string): string {
+  return formatInstant(iso, tz, { hour: "numeric", minute: "2-digit" });
 }
 
 export function clock(sec: number): string {
@@ -130,7 +139,10 @@ export function primaryPhone(c: PhoneCustomer): string {
  * presets stay anchored to that prototype date; real orgs must anchor to the
  * actual current time or every preset except "All time" hides real CTM data. */
 
-export const DEMO_NOW = new Date("2026-05-30T23:59:59");
+// Trailing 'Z' is deliberate. Without it this parses against the BROWSER's zone,
+// so the demo anchor itself slid by up to a day between viewers - the same defect
+// the presets below had, one line earlier in the chain.
+export const DEMO_NOW = new Date("2026-05-30T23:59:59Z");
 
 export type RangePreset =
   | "today"
@@ -150,32 +162,18 @@ export const RANGE_PRESETS: { key: RangePreset; label: string }[] = [
   { key: "all", label: "All time" },
 ];
 
-export function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-export function endOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
-}
-export function addDays(d: Date, n: number): Date {
-  const x = new Date(d);
-  x.setDate(x.getDate() + n);
-  return x;
-}
-
-/** Count calls whose `startedAt` falls on the same calendar day as `anchor`.
+/** Count calls whose `startedAt` falls on the same ORG calendar day as `anchor`.
  * The KPI passes `DEMO_NOW` for demo orgs and the real `new Date()` otherwise —
  * the SAME anchor the date-range presets use — so "Calls today" agrees with the
  * "Today" preset instead of showing the all-time `calls.length`. */
 export function countCallsOnDay(
   calls: Array<{ startedAt: string }>,
   anchor: Date,
+  tz: string,
 ): number {
-  const lo = startOfDay(anchor).getTime();
-  const hi = endOfDay(anchor).getTime();
+  const day = orgToday(tz, anchor);
+  const lo = orgDayStart(day, tz).getTime();
+  const hi = orgDayEnd(day, tz).getTime();
   return calls.reduce((n, c) => {
     const t = new Date(c.startedAt).getTime();
     return Number.isFinite(t) && t >= lo && t <= hi ? n + 1 : n;
@@ -184,45 +182,54 @@ export function countCallsOnDay(
 
 export type DateRange = { start: Date | null; end: Date | null };
 
+/** Preset -> a pair of true instants, with both edges on the ORG's midnights.
+ *  These bound which calls the table shows, so building them on the viewer's
+ *  clock made "Today" a different set of rows in Manila than in New York. */
 export function computeRange(
   preset: RangePreset,
   customStart: string,
   customEnd: string,
+  tz: string,
   isDemoOrg = false,
 ): DateRange {
-  const now = isDemoOrg ? DEMO_NOW : new Date();
-  const end = endOfDay(now);
+  const today = orgToday(tz, isDemoOrg ? DEMO_NOW : new Date());
+  const end = orgDayEnd(today, tz);
+  const from = (n: number) => orgDayStart(addOrgDays(today, n), tz);
   switch (preset) {
     case "today":
-      return { start: startOfDay(now), end };
+      return { start: from(0), end };
     case "7d":
-      return { start: startOfDay(addDays(now, -6)), end };
+      return { start: from(-6), end };
     case "30d":
-      return { start: startOfDay(addDays(now, -29)), end };
+      return { start: from(-29), end };
     case "month":
-      return { start: new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0), end };
+      return { start: orgDayStart(`${today.slice(0, 7)}-01`, tz), end };
     case "90d":
-      return { start: startOfDay(addDays(now, -89)), end };
+      return { start: from(-89), end };
     case "all":
       return { start: null, end: null };
     case "custom":
+      // The two custom inputs are DatePicker 'YYYY-MM-DD' strings - already
+      // zoneless day tokens, so they need no parsing, only org-zone anchoring.
       return {
-        start: customStart ? startOfDay(new Date(customStart + "T00:00:00")) : null,
-        end: customEnd ? endOfDay(new Date(customEnd + "T00:00:00")) : null,
+        start: customStart ? orgDayStart(customStart, tz) : null,
+        end: customEnd ? orgDayEnd(customEnd, tz) : null,
       };
   }
 }
 
-export function longDate(d: Date): string {
-  const mo = d.toLocaleDateString('en-US', { month: "short" });
-  return `${mo} ${d.getDate()}${ORDINAL(d.getDate())}, ${d.getFullYear()}`;
+export function longDate(d: Date, tz: string): string {
+  const day = isoToOrgDay(d.toISOString(), tz);
+  const dom = Number(day.slice(8, 10));
+  const mo = formatInstant(d, tz, { month: "short" });
+  return `${mo} ${dom}${ORDINAL(dom)}, ${day.slice(0, 4)}`;
 }
 
-export function rangeSubLabel(range: DateRange): string {
+export function rangeSubLabel(range: DateRange, tz: string): string {
   if (!range.start && !range.end) return "All recorded calls";
-  if (range.start && range.end) return `${longDate(range.start)} – ${longDate(range.end)}`;
-  if (range.start) return `From ${longDate(range.start)}`;
-  return `Until ${longDate(range.end as Date)}`;
+  if (range.start && range.end) return `${longDate(range.start, tz)} – ${longDate(range.end, tz)}`;
+  if (range.start) return `From ${longDate(range.start, tz)}`;
+  return `Until ${longDate(range.end as Date, tz)}`;
 }
 
 /* ─────────────────── Shared components ─────────────────── */
@@ -306,6 +313,7 @@ export function DateRangeControl({
   onCustom: (start: string, end: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const tz = useScheduleTimezone();
   const title =
     preset === "custom"
       ? "Custom range"
@@ -321,7 +329,7 @@ export function DateRangeControl({
           <span className="flex flex-col">
             <span className="text-[11px] font-semibold text-text-secondary">{title}</span>
             <span className="text-[13px] font-semibold text-text-primary">
-              {rangeSubLabel(range)}
+              {rangeSubLabel(range, tz)}
             </span>
           </span>
           <ChevronDown

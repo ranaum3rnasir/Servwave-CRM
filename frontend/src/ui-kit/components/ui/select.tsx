@@ -62,15 +62,15 @@ function SelectContent({
         data-slot="select-content"
         position={position}
         className={cn(
-          "bg-kit-popover text-kit-popover-foreground relative z-50 min-w-[8rem] overflow-hidden rounded-lg border shadow-popover",
+          "bg-kit-popover text-kit-popover-foreground relative z-floating min-w-[8rem] overflow-hidden rounded-lg border shadow-popover",
           // Cap to measured space and scroll inside - a 24-item list must never
           // run past the bottom of the viewport.
-          "max-h-(--radix-select-content-available-height) overscroll-contain",
-          "origin-(--radix-select-content-transform-origin)",
+          "max-h-[var(--radix-select-content-available-height)] overscroll-contain",
+          "origin-[var(--radix-select-content-transform-origin)]",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
           position === "popper" &&
-            "data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1 w-full min-w-(--radix-select-trigger-width)",
+            "data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1 w-full min-w-[var(--radix-select-trigger-width)]",
           className,
         )}
         {...props}

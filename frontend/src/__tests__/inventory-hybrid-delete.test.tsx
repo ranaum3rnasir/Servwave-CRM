@@ -19,8 +19,20 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
+
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_MAIN: 'aaaaaaa1-0000-4000-8000-000000000001',
@@ -99,7 +111,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('InventoryPage - hybrid delete (Task 3)', () => {
+describe('v2 InventoryPage - hybrid delete (Task 3)', () => {
   it('hides archived rows by default and reveals them via "Show archived"', async () => {
     renderWithProviders(<InventoryPage />, {
       initialEntries: ['/inventory'],
@@ -130,7 +142,7 @@ describe('InventoryPage - hybrid delete (Task 3)', () => {
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(`/api/price-book/items/${h.ACTIVE_ID}`);
     });
-    expect(await screen.findByText('✓ ACT-1 deleted')).toBeInTheDocument();
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('✓ ACT-1 deleted'));
     // Dialog closes on success.
     expect(screen.queryByRole('button', { name: 'Delete Item' })).toBeNull();
   });
@@ -149,9 +161,9 @@ describe('InventoryPage - hybrid delete (Task 3)', () => {
     await userEvent.click(await screen.findByText('Delete item'));
     await userEvent.click(await screen.findByRole('button', { name: 'Delete Item' }));
 
-    expect(
-      await screen.findByText('✓ ACT-1 archived · on 3 records, kept for history'),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith('✓ ACT-1 archived · on 3 records, kept for history'),
+    );
   });
 
   it('toasts a failure message and leaves the item in place if the delete request rejects', async () => {
@@ -166,7 +178,7 @@ describe('InventoryPage - hybrid delete (Task 3)', () => {
     await userEvent.click(await screen.findByText('Delete item'));
     await userEvent.click(await screen.findByRole('button', { name: 'Delete Item' }));
 
-    expect(await screen.findByText('✗ Could not delete ACT-1 - try again')).toBeInTheDocument();
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('✗ Could not delete ACT-1 - try again'));
   });
 
   it('offers "Restore item" (not "Delete item") for an archived row and restores it', async () => {
@@ -190,6 +202,6 @@ describe('InventoryPage - hybrid delete (Task 3)', () => {
         is_active: true,
       });
     });
-    expect(await screen.findByText('✓ ARC-1 restored')).toBeInTheDocument();
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith('✓ ARC-1 restored'));
   });
 });

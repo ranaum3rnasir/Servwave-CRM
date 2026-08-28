@@ -124,7 +124,7 @@ describe('Settings -> Tax Rates', () => {
   });
 
   it('shows the rate at the precision it stores, not a float artifact', async () => {
-    // 0.0946 * 100 is 9.459995555550224. That must not be what lands in the edit field.
+    // 0.0946 * 100 is 9.459999999999999. That must not be what lands in the edit field.
     vi.spyOn(api, 'listOrgTaxRates').mockResolvedValue([
       rate({ id: 'otr-al', name: 'Alabama', rate: 0.0946, state_code: 'AL' }),
     ]);

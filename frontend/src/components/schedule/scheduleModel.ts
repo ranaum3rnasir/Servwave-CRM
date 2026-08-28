@@ -9,12 +9,47 @@
 // what that means and why — react-big-calendar (the consumer downstream of this module) has no
 // timezone concept, so the whole board operates in wall-clock space between the two boundaries.
 
+import { isSameDay } from 'date-fns';
 import type { WallClock } from '@/lib/schedule-tz';
 
-export type EventType = 'job' | 'walkthrough' | 'service-plan';
+// Slice 03 (calendar-entries spec §3): 'calendar-entry' is the internal EventType member for
+// the user-facing "Event" (ADR 0002 - sits on the board, joins nothing). Widening this union is
+// the forcing function: every Record<EventType, ...> table below becomes a compile error until
+// it answers the new member, which is deliberate - see the note on EVENT_TYPE_META.
+export type EventType = 'job' | 'walkthrough' | 'service-plan' | 'calendar-entry';
 
 export interface SchedulableEvent {
-  id: string;                       // board id: job.id for jobs, `wt-${lead.id}` for walkthroughs
+  /**
+   * The card's identity ON THE BOARD - unique per card. `jv-${visit.id}` for a job visit,
+   * `wt-${lead.id}` for a walkthrough, and the bare job id for a job that holds no visit row yet
+   * (the unassigned bucket and the first-booking path).
+   *
+   * Multi-visit S6 DELETED the old `id` field rather than repointing it, and that is the whole
+   * mitigation: `id` was simultaneously the React key, the GRID_EVENT_ID drag payload, the
+   * conflict-set key AND the path segment in `/api/jobs/${ev.id}/assign|unassign|complete`. All
+   * of those are `string`, so silently changing what it held would have typechecked perfectly and
+   * broken every write at runtime. Removing the name turns each of those ~25 sites into a compile
+   * error that has to be answered with either `boardId` or `parentId`.
+   */
+  boardId: string;
+  /** The row every mutation addresses: the job id for a job, the LEAD id for a walkthrough. */
+  parentId: string;
+  /** The visit this card is. Absent for a job that has no visit row behind it yet. */
+  visitId?: string;
+  /** D13 - creation-order label, not the position in the time-sorted board. */
+  visitSeq?: number;
+  /**
+   * THIS trip's own status, when the card is a trip. The job's status is a derived
+   * roll-up across every visit, so colouring a card by it paints all of a job's cards
+   * the same: a COMPLETED trip on a live job rendered in the in-flight treatment,
+   * byte-identical to its own SCHEDULED sibling, and a future SCHEDULED trip on a
+   * completed job rendered faded grey and read as finished (MV-BOARD-10).
+   */
+  visitStatus?: string;
+  /** How many live trips the parent holds. 1 (or undefined) means "do not label this card". */
+  visitCount?: number;
+  /** The visit's own all-day flag, carried so the drop modal can seed from the trip it dragged. */
+  isAllDay?: boolean;
   type: EventType;
   number: string;                   // J00041 / L00012 / SP0003
   title: string;
@@ -30,6 +65,35 @@ export interface SchedulableEvent {
   // consume it and `raw` is Record<string, unknown> - declaring the shape once beats
   // casting it three times.
   tags?: { id: string; name: string; color: string }[];
+  /**
+   * Slice 06 (calendar-entries spec §3, ADR 0002) - the USER participants on a calendar entry,
+   * used ONLY by `isOnBoardFor` to place an entry in a member's column. OPTIONAL for the same
+   * reason `tags` is: every existing job/walkthrough fixture across the schedule test files
+   * stays valid with the field absent.
+   *
+   * Deliberately NEVER folded into `crew` - `crew` means "people doing the work", and a
+   * participant is not working the entry. `deriveState`, `eventDangerState`'s state-4 read and
+   * `conflictedEventIds` all key off `crew`; populating it from participants would make every
+   * entry with a participant read as crewed work, painting the board red and rejecting a real
+   * job's write with a 409 over an entry as harmless as a birthday - precisely the alternative
+   * ADR 0002 rejects.
+   */
+  participantUserIds?: string[];
+  /**
+   * Post-QA fix (drag/resize "notify participants" toast; PO-reported 2026-08-25) — whether the
+   * entry has any participant at all, i.e. whether the "Notify" toast action has a real
+   * recipient. The bug it closes: the action offered itself on an entry with nobody on it and
+   * then claimed participants had been notified.
+   *
+   * BOTH kinds (product-owner change, 2026-08-25). Briefly customer-only, on the reasoning that
+   * a teammate had already been told — which was true of the in-app notice the drag's own PATCH
+   * emits, and false of email, which that PATCH never sends. `notifyMoved` now emails both kinds
+   * with the in-app channel suppressed, so a user-only entry has someone to reach. OPTIONAL for
+   * the same reason `tags`/`participantUserIds` are: every job/walkthrough fixture across the
+   * schedule test files stays valid with it absent, and SchedulePage.tsx treats an absent value
+   * as "nobody to notify".
+   */
+  hasParticipants?: boolean;
 }
 
 /**
@@ -61,16 +125,43 @@ export function deriveState(e: Pick<SchedulableEvent, 'crew' | 'start'>): Assign
   return 1;
 }
 
-export const DEFAULT_DURATION_MIN: Record<EventType, number> = { job: 120, walkthrough: 60, 'service-plan': 90 };
+export const DEFAULT_DURATION_MIN: Record<EventType, number> = { job: 120, walkthrough: 60, 'service-plan': 90, 'calendar-entry': 60 };
 export const HOURLESS_DEFAULT_START_MIN = 8 * 60; // 08:00 fallback for day-granularity drops
 
 // Type-keyed presentation — Tailwind tokens ONLY (job=info, walkthrough=warning, service-plan=ai).
 // `accent`/`soft`/`text` are class fragments components compose; a 3rd type slots in additively.
 export interface EventTypeMeta { label: string; accent: string; soft: string; text: string }
+// 'calendar-entry' -> 'Event' (spec §3): a MUTED scheme that reads "on the calendar", not
+// "assigned work" - a `--event` token (tokens.css/tokens.ts/tailwind.config.js), an olive hue
+// chosen specifically because it sits outside every hue already claimed on this board (info=blue
+// job, warning=amber walkthrough, ai=indigo service-plan, danger=terracotta, success=green,
+// neutral=cool blue-grey completed) - so it cannot be mistaken for a status tint at a glance.
+//
+// CORRECTED post-slice-03 (§9 risk 4): the original bronze/taupe value (~4.7:1 estimated on
+// WHITE) actually painted 3.70:1 on the card's real background - a low-alpha tint of --event
+// over the board canvas, not white - failing AA, and its hue sat close enough to warning/amber
+// that an Event and a Walkthrough card read as near-siblings. Olive clears AA on that real
+// composite (5.48:1) and separates further from every sibling accent; see the tokens.css comment
+// on `--olive-700` for the full measurement and why green/teal alternatives were rejected (both
+// collided with the success/in-progress treatment instead). Still a DEFAULT-only token, matching
+// info/warning/ai above, not the -surface/-border/-text/-strong badge quartet.
+//
+// The honest limit, unresolved by any hex: this card's BACKGROUND fill still reads as near-
+// identical to the completed treatment's neutral-surface grey (both are compositing something
+// at low alpha over the same near-white canvas - no candidate hue closed that gap past ~30 on a
+// 0-441 scale). A colour swap fixes the WCAG contrast failure on the text; it does not give a dispatcher
+// a background they can tell apart from "this job is done" at a glance. A non-colour signal (a
+// distinct border style, or a visible "Event" label on the card - today's number/type badge slot
+// is blank for a calendar entry, since it carries no record number) would close that gap more
+// robustly, but touches the Standard-view renderer in SchedulePage.tsx, which another team's PR
+// (#1737) is actively editing - deliberately left as a follow-up rather than risking that file.
+// See boardCardScheme's own note just below for why this does NOT resolve through STATUS_REGISTRY
+// either.
 export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
-  job:            { label: 'Job',          accent: 'border-l-info',    soft: 'bg-info/5',    text: 'text-info' },
-  walkthrough:    { label: 'Walkthrough',  accent: 'border-l-warning', soft: 'bg-warning/5', text: 'text-warning' },
-  'service-plan': { label: 'Service Plan', accent: 'border-l-ai',      soft: 'bg-ai/5',      text: 'text-ai' },
+  job:             { label: 'Job',          accent: 'border-l-info',    soft: 'bg-info/5',    text: 'text-info' },
+  walkthrough:     { label: 'Walkthrough',  accent: 'border-l-warning', soft: 'bg-warning/5', text: 'text-warning' },
+  'service-plan':  { label: 'Service Plan', accent: 'border-l-ai',      soft: 'bg-ai/5',      text: 'text-ai' },
+  'calendar-entry':{ label: 'Event',        accent: 'border-l-event',   soft: 'bg-event/5',   text: 'text-event' },
 };
 
 /**
@@ -87,13 +178,13 @@ export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
  *   - EVENT_TYPE_META (see just above) paints job=info, walkthrough=warning and
  *     service-plan=ai. That is the type-accent language the on-screen board legend
  *     advertises to the user. Resolving per status through the registry would repaint
- *     every SCHEDULED and UNASSIGNED block amber and delete those type accents outright.
+ *     every SCHEDULED and UNSCHEDULED block amber and delete those type accents outright.
  *   - COMPLETED_STATUSES (below) deliberately buckets COMPLETED and CANCELLED together as
  *     one "this is over" treatment for jobs (isCompletedEvent adds the walkthrough case
  *     separately, off walkthrough_completed_at rather than a status value - see there). The
  *     registry splits the job bucket into a success tone and a neutral tone.
- *   - The in-flight treatment here is green; the registry maps EN_ROUTE / ON_SITE /
- *     IN_PROGRESS to amber, where it would collide with SCHEDULED.
+ *   - The in-flight treatment here is green; the registry maps the in-flight statuses to amber,
+ *     where they would collide with SCHEDULED.
  * So a registry migration of this helper is a repaint of the busiest screen in the app,
  * not a consolidation. Any change to it is a deliberate design decision, not a cleanup.
  */
@@ -107,12 +198,70 @@ export function boardCardScheme(type: EventType, isCompleted: boolean, isInProg:
 }
 
 /**
- * M3 — the one column-membership predicate both member views share: an event sits on a
- * member's board lane iff the member is on its crew. (Owner is OFF-BOARD — never a column.)
- * Any same-day narrowing is a view concern and stays local to the views.
+ * D13 - the ONE sentence any board is allowed to use to say which trip a card is.
+ *
+ * Returns null for the case that must stay silent, so a renderer's whole obligation is
+ * `{visitLabel(e) && <span ...>{visitLabel(e)}</span>}` - it never restates the condition and
+ * never words the label itself.
+ *
+ * Labelled by CREATION order (visit_seq), never by the card's position in the time-sorted
+ * board, because the customer holds an email naming "Visit 2". Silent for the single-trip case,
+ * which is 99% of jobs: a badge reading "Visit 1 of 1" on every card is noise, not information.
+ *
+ * It lives here, next to boardCardScheme, rather than in any one card component because THREE
+ * independent renderers paint schedule cards - ScheduleCardBody (MemberWeekBoard +
+ * TechnicianGridView) and ScheduleEvent (the Standard week board, which shares no JSX with the
+ * other two). S6 first shipped this label into ScheduleCardBody alone and the Standard board -
+ * the one a dispatcher lands on - painted three identical unlabelled cards for a three-trip job.
+ * That is the #1551 class exactly: a duplicated schedule surface edited in only some of its
+ * copies. Only the STYLING is per-renderer; the wording and the condition are not.
  */
-export function isOnBoardFor(e: Pick<SchedulableEvent, 'crew'>, memberId: string): boolean {
-  return e.crew.includes(memberId);
+export function visitLabel(e: Pick<SchedulableEvent, 'visitSeq' | 'visitCount'>): string | null {
+  if ((e.visitCount ?? 1) <= 1 || e.visitSeq == null) return null;
+  return `Visit ${e.visitSeq} of ${e.visitCount}`;
+}
+
+/**
+ * The SAME statement as visitLabel, for the ONE surface that measurably cannot hold the
+ * sentence: the week-view all-day strip pill.
+ *
+ * This is a deliberate, measured exception to the rule above, not a second wording anyone may
+ * reach for. Measured on deployed staging at a 1280px viewport, in a 96.3px pill row (the
+ * default layout, Jobs panel open), for job J00314:
+ *
+ *   "J00314 - QA-AllDayChip Overflow"          254px   natural
+ *   "J00314"                                    54.6px
+ *   "Visit 1 of 5"                              49.7px  -> number + sentence = 132.7px, DOES NOT FIT
+ *   "1/5"                                       ~20px   -> number + this     =  78.5px, fits
+ *
+ * With the sentence, flexbox squeezed the job number down to FOUR characters - `J003` - which is
+ * what J00315 also renders. Two different jobs, same four characters: the trip number told you
+ * which trip, of a job the pill declined to name. The abbreviation is what buys the number back.
+ *
+ * Every roomier surface - the full card, the overflow panel, the hover preview - keeps
+ * visitLabel's sentence. Do not "unify" these two by abbreviating those.
+ */
+export function visitLabelCompact(e: Pick<SchedulableEvent, 'visitSeq' | 'visitCount'>): string | null {
+  // Deliberately delegates the CONDITION rather than restating it - the silent-when-single rule
+  // has to be one decision, or the two labels drift apart on exactly the edge case D13 is about.
+  return visitLabel(e) === null ? null : `${e.visitSeq}/${e.visitCount}`;
+}
+
+/**
+ * M3 — the one column-membership predicate both member views share: an event sits on a
+ * member's board lane iff the member is on its crew, OR (slice 06, calendar-entries spec §3) the
+ * member is one of its user participants. (Owner is OFF-BOARD — never a column.)
+ * Any same-day narrowing is a view concern and stays local to the views.
+ *
+ * `participantUserIds` is read here and ONLY here — this is the one place ADR 0002 allows
+ * participation to affect placement. It must never leak into `crew` itself (see the field's own
+ * doc comment on SchedulableEvent for why).
+ */
+export function isOnBoardFor(
+  e: Pick<SchedulableEvent, 'crew' | 'participantUserIds'>,
+  memberId: string,
+): boolean {
+  return e.crew.includes(memberId) || (e.participantUserIds ?? []).includes(memberId);
 }
 
 // ─── D9 — role-gated board capabilities (TG13) ───────────────────────────────
@@ -138,8 +287,16 @@ export function boardCapabilitiesFor(role: string | undefined): BoardCapabilitie
 // (see isCompletedEvent below).
 export const COMPLETED_STATUSES = new Set(['COMPLETED', 'CANCELLED']);
 
-/** Statuses that render as "work is happening right now". */
-export const IN_FLIGHT_STATUSES = new Set(['EN_ROUTE', 'ON_SITE', 'IN_PROGRESS']);
+/**
+ * Statuses that render as "work is happening right now".
+ *
+ * Multi-visit S4 (D17) collapsed this to one value: EN_ROUTE and ON_SITE retired from JobStatus
+ * and became VisitStatus values, so neither can appear on a job any more. The visible consequence
+ * is deliberate and spec-mandated - a job whose crew is on the way or on site reads SCHEDULED
+ * until somebody STARTS a visit (D12), so the board's in-flight colouring now begins at "work
+ * started" rather than at "tech left the depot". The finer state is on the visit chip.
+ */
+export const IN_FLIGHT_STATUSES = new Set(['IN_PROGRESS']);
 
 // Walkthrough-as-entity redesign, PR-C2: WALKTHROUGH_COMPLETED left LeadStatus - completing a
 // visit is now purely a fact recorded on the Walkthrough row, not a lead-pipeline transition,
@@ -147,8 +304,21 @@ export const IN_FLIGHT_STATUSES = new Set(['EN_ROUTE', 'ON_SITE', 'IN_PROGRESS']
 // a status value. Jobs are unaffected - COMPLETED/CANCELLED are still real JobStatus values.
 export const isCompletedEvent = (e: BoardEvent): boolean => {
   if (e.type === 'walkthrough') return Boolean(e.raw?.walkthrough_completed_at);
-  return COMPLETED_STATUSES.has((e.raw?.status as string | undefined) ?? '');
+  return COMPLETED_STATUSES.has(boardEventStatus(e) ?? '');
 };
+
+/**
+ * The status a CARD should be coloured by.
+ *
+ * A job fans out into one card per visit but every card shares `raw: job`, so reading
+ * `raw.status` gives each trip the roll-up rather than its own state. Where the card is
+ * a trip, the trip's status wins; everything else - walkthroughs, service plans, and a
+ * job with no visit row behind it - still reads the parent's, which is the only status
+ * those cards have. Read `?.` throughout for the same reason rescheduleGate does:
+ * react-big-calendar calls the accessors on its untyped outside-drag preview stub too.
+ */
+export const boardEventStatus = (e: Pick<BoardEvent, 'type' | 'raw' | 'visitStatus'>): string | undefined =>
+  (e.type === 'job' ? e.visitStatus : undefined) ?? (e.raw?.status as string | undefined);
 
 /**
  * The drag/resize gate for the calendar and member boards (Spec B1, B-2). Dragging or
@@ -164,6 +334,12 @@ export const isCompletedEvent = (e: BoardEvent): boolean => {
 export type RescheduleGateResult = { ok: true } | { ok: false; reason: string };
 
 export function rescheduleGate(e: Pick<SchedulableEvent, 'type' | 'raw'>): RescheduleGateResult {
+  // A calendar entry carries no invoices and joins nothing (ADR 0002), so money can never freeze
+  // it. Own early branch rather than falling through to the invoice read below - `raw` on a
+  // CalendarEntry has no `invoices` key, so falling through happens to also read as ok:true today,
+  // but that is an accident of an absent field, not a decision, and slice 08 (drag comes back on)
+  // needs this to be the explicit answer.
+  if (e.type === 'calendar-entry') return { ok: true };
   if (e.type === 'walkthrough') {
     return isCompletedEvent(e as BoardEvent)
       ? { ok: false, reason: 'This walkthrough already happened.' }
@@ -175,13 +351,68 @@ export function rescheduleGate(e: Pick<SchedulableEvent, 'type' | 'raw'>): Resch
     : { ok: true };
 }
 
+/**
+ * Slice 03 — calendar entries were drag-INERT, independent of `rescheduleGate` (a money gate, not
+ * an inertness gate; it already answers `ok: true` for a calendar entry above), until
+ * `dragChannels.ts`'s `parseBoardDragId` grew its `ce-` case in slice 08. Kept, unused, WITH its
+ * existing test (its own describe title names the slice this stopped mattering) rather than
+ * deleted: slice 08 replaced its one call site in `draggableAccessor`/`resizableAccessor` with an
+ * explicit `ability.can('update', 'CalendarEntry')` check instead of turning it universally
+ * inert-or-not — a calendar entry is draggable now, conditionally, which this predicate has no
+ * way to express.
+ */
+export function isDragInert(e: Pick<SchedulableEvent, 'type'>): boolean {
+  return e.type === 'calendar-entry';
+}
+
+/**
+ * Multi-visit S6: all-day is a fact about the TRIP, so the CARD's own flag is the answer.
+ *
+ * `raw` is the shared job row - every card a job fans out into points at the same object - and
+ * `Job.is_all_day` is a write-through mirror of the NEXT upcoming visit (D14). Reading it here
+ * therefore let one trip's flag decide the placement of all of the job's cards: mark the Monday
+ * trip all-day from the job page and Friday's timed 14:00-16:00 visit was routed into the
+ * all-day strip and painted as a pill with its time thrown away - and the mirror flips to the
+ * next trip the moment Monday completes, so the finished card starts rendering all-day too.
+ *
+ * The `raw` fallback is NOT dead: a plan-mode ghost is built from a source job row rather than
+ * from a visit (SchedulePage's ghostCalendarEvents), so the mirror is the only flag it has.
+ */
 export const isAllDayEvent = (e: BoardEvent): boolean => {
+  if (e.type === 'job') return Boolean(e.isAllDay ?? e.raw?.is_all_day);
+  // Slice 05 (calendar-entries spec §3) — same shape as the job branch above, but with none of
+  // its mirror hazard: `is_all_day` is a real column on the entry itself, not a write-through
+  // mirror of a child row, so there is no "which trip's flag wins" question to answer. `isAllDay`
+  // is what calendarEntryToEvent carries onto the card; `raw.is_all_day` is the fallback for
+  // anything built straight from the source row instead (there is no calendar-entry ghost today,
+  // but the job branch keeps this fallback for exactly that shape, so this mirrors it).
+  if (e.type === 'calendar-entry') return Boolean(e.isAllDay ?? e.raw?.is_all_day);
   if (!e.raw) return false;
-  if (e.type === 'job') return Boolean(e.raw.is_all_day);
   if (e.type === 'walkthrough') {
     return ((e.raw.walkthrough_duration_minutes as number | null) ?? 60) >= 1440;
   }
   return false;
+};
+
+/**
+ * Does this event get rendered into react-big-calendar's all-day strip?
+ *
+ * NOT the same question as isAllDayEvent, and the gap between the two is a bug we
+ * shipped: rbc's TimeGrid routes an event to the all-day strip when
+ *   accessors.allDay(event) || startAndEndAreDateOnly || (!showMultiDayTimes && !isSameDate(start,end))
+ * We never pass showMultiDayTimes, so ANY event crossing a calendar-day boundary lands
+ * in the strip regardless of its is_all_day flag. The page then gates the strip's
+ * visibility (`has-allday-events` → max-height 0 in schedule-dark.css) on isAllDayEvent,
+ * so a timed cross-midnight job rendered into a collapsed container and simply vanished
+ * from the week - it was in the DOM, zero pixels tall.
+ *
+ * Mirror rbc's own predicate rather than a tidier one: an event ending at exactly
+ * midnight is "a different day" to rbc, so it must be one here too.
+ */
+export const occupiesAllDayStrip = (e: BoardEvent): boolean => {
+  if (isAllDayEvent(e)) return true;
+  if (!e.start || !e.end) return false;
+  return !isSameDay(e.start, e.end);
 };
 
 // ─── The two reds (D7 + §3.8 state 4) ────────────────────────────────────────
@@ -200,8 +431,12 @@ export type EventDangerState = 'needs-crew' | 'double-booked' | null;
  */
 export function eventDangerState(e: BoardEvent, conflictIds: Set<string>): EventDangerState {
   if (e.isGhost) return null;
+  // ADR 0002 - a calendar entry has no crew by design (participants are not crew), so it would
+  // otherwise paint red as state 4 "needs assignment" on EVERY entry. Checked before deriveState
+  // for exactly that reason - it is not a job/walkthrough missing a crew, it never had one to miss.
+  if (e.type === 'calendar-entry') return null;
   if (deriveState(e) === 4) return 'needs-crew';
-  if (conflictIds.has(e.id)) return 'double-booked';
+  if (conflictIds.has(e.boardId)) return 'double-booked';
   return null;
 }
 
@@ -223,9 +458,15 @@ export function conflictedEventIds(events: SchedulableEvent[]): Set<string> {
       const a = events[i];
       const b = events[j];
       if (!a || !b) continue;
+      // ADR 0002 - a calendar entry neither reports a double-booking nor causes one, on EITHER
+      // side of the pair: excluded as `a` and as `b`. A crew-less entry would never match the
+      // `crew.some(...)` test anyway (its crew is always []), but a job/walkthrough sharing a
+      // PARTICIPANT with an entry must also stay silent, and participants are not read here at
+      // all - this guard is what keeps that true regardless of how participants are modelled later.
+      if (a.type === 'calendar-entry' || b.type === 'calendar-entry') continue;
       if (a.crew.some((c) => b.crew.includes(c)) && timeOverlap(a, b)) {
-        out.add(a.id);
-        out.add(b.id);
+        out.add(a.boardId);
+        out.add(b.boardId);
       }
     }
   }
@@ -319,7 +560,7 @@ export function conflictNoteFor(
   if (draft.crew.length === 0) return null;
   const end = new Date(draft.start.getTime() + draft.durationMin * 60_000);
   for (const other of events) {
-    if (other.id === draft.eventId) continue;
+    if (other.boardId === draft.eventId) continue;
     if (!other.start || !other.end) continue;
     const shared = draft.crew.find((c) => other.crew.includes(c));
     if (shared === undefined) continue;
@@ -341,7 +582,7 @@ export function draftFromDrop(
     event.start && event.end
       ? Math.round((event.end.getTime() - event.start.getTime()) / 60_000)
       : opts.defaultDurationMin;
-  const base = { eventId: event.id, durationMin, crew: [...event.crew] };
+  const base = { eventId: event.boardId, durationMin, crew: [...event.crew] };
   switch (target.kind) {
     case 'member-day':
       return { ...base, start: target.start, crew: [target.memberId], autoDate: true, autoTime: true, autoMember: true };

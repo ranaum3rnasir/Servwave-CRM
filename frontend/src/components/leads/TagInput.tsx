@@ -5,6 +5,10 @@ import { X, Plus, ArrowDownAZ, ArrowUpAZ } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { EmptyState } from '@/components/ui/empty-state';
+import { toast } from '@/components/ui/use-toast';
+import { extractApiError } from '@/lib/utils';
+import { TAG_COLORS } from '@/lib/tag-colors';
+import { TAG_ENTITY_ROUTES, TAG_EMBEDDING_QUERY_KEYS, type TagEntityType } from '@/lib/tag-entities';
 
 interface Tag {
   id: string;
@@ -12,23 +16,10 @@ interface Tag {
   color: string;
 }
 
-// Preset palette for new tags — also the swatch picker options
-const TAG_COLORS = [
-  '#EF4444', '#F97316', '#EAB308', '#22C55E', '#06B6D4',
-  '#3B82F6', '#8B5CF6', '#EC4899', '#6B7280', '#14B8A6',
-];
-
-type EntityType = 'CUSTOMER' | 'LEAD' | 'ESTIMATE' | 'JOB' | 'INVOICE';
-
 // SRVW-103 - one lookup per TagEntity value: the write route segment, and the detail
-// query key the host page reads so an add/remove refetches it.
-const ENTITY_ROUTES: Record<EntityType, { path: string; key: string }> = {
-  CUSTOMER: { path: 'customers', key: 'customer' },
-  LEAD: { path: 'leads', key: 'lead' },
-  ESTIMATE: { path: 'estimates', key: 'estimate' },
-  JOB: { path: 'jobs', key: 'job' },
-  INVOICE: { path: 'invoices', key: 'invoice' },
-};
+// query key the host page reads so an add/remove refetches it. Shared with
+// TagsSettingsCard via `@/lib/tag-entities` so the two cannot disagree on the set.
+type EntityType = TagEntityType;
 
 interface TagInputProps {
   /** @deprecated Use entityType + entityId. Kept so existing call sites compile. */
@@ -42,7 +33,7 @@ export function TagInput(props: TagInputProps) {
   const { tags } = props;
   const entityType: EntityType = props.entityType ?? 'LEAD';
   const entityId: string = (props.entityId ?? props.leadId) as string;
-  const { path: resourcePath, key: invalidationKey } = ENTITY_ROUTES[entityType];
+  const { path: resourcePath, detailKey: invalidationKey } = TAG_ENTITY_ROUTES[entityType];
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [color, setColor] = useState<string>(TAG_COLORS[0]!);
@@ -50,13 +41,68 @@ export function TagInput(props: TagInputProps) {
   const queryClient = useQueryClient();
 
   // Fetch all tags for autocomplete
-  const { data: allTags } = useQuery({
+  const { data: allTags, refetch: refetchTags } = useQuery({
     queryKey: ['tags'],
     queryFn: async () => {
       const { data } = await api.get('/api/tags');
       return data.tags as Tag[];
     },
   });
+
+  // Attaching or detaching a tag changes this record's chip row AND every other
+  // cached payload that carries a copy of that tag: the list pages, which each
+  // render a Tags column, and the schedule board, which reads the very same
+  // /api/jobs and /api/leads list endpoints (tags attached) under its own four
+  // keys. Both writers drop the same set - a detached chip is exactly as visible
+  // on a list row or a board card as an attached one.
+  //
+  // ['tags'] is the tag vocabulary - this picker's autocomplete and the Settings
+  // management card now read the very same key, so a write on either side lands
+  // in one cache rather than two that can disagree.
+  //
+  // Derived from the shared entity map rather than hand-listed - hand-listing is
+  // how the settings card came to cover two of the five taggable types (#1753).
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: [invalidationKey, entityId] });
+    void queryClient.invalidateQueries({ queryKey: ['tags'] });
+    for (const key of TAG_EMBEDDING_QUERY_KEYS) {
+      // Skip this entity's bare detail key: only THIS record's detail changed,
+      // and it was just dropped record-scoped above. Dropping the prefix too
+      // would cancel and restart that same in-flight refetch, because
+      // invalidateQueries defaults to cancelRefetch: true - one tag click, two
+      // GETs of the record.
+      if (key === invalidationKey) continue;
+      void queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  // A tag write can fail because someone else changed the vocabulary underneath
+  // this page: an admin deletes a tag in Settings, and a colleague who has not
+  // reloaded still has it in their picker. The API answers 404 with a `code`
+  // saying so. Both branches must be LOUD - the click used to be swallowed
+  // silently, which reads as the app ignoring you, and the dead entry stayed in
+  // the list to be clicked again.
+  const handleWriteError = (err: unknown, fallbackTitle: string) => {
+    const code = (err as { response?: { data?: { code?: string } } })?.response?.data?.code;
+
+    if (code === 'TAG_NOT_FOUND' || code === 'TAG_NOT_ATTACHED') {
+      // Self-heal on the same click that exposed the staleness, so the entry
+      // leaves the picker instead of failing identically on the next attempt.
+      invalidate();
+      toast({
+        variant: 'destructive',
+        title: 'That tag is no longer available',
+        description: 'Someone else changed or deleted it. The tag list has been refreshed.',
+      });
+      return;
+    }
+
+    toast({
+      variant: 'destructive',
+      title: fallbackTitle,
+      description: extractApiError(err, 'Please try again.'),
+    });
+  };
 
   // Add tag mutation
   const addTag = useMutation({
@@ -65,11 +111,11 @@ export function TagInput(props: TagInputProps) {
       return data.tag;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [invalidationKey, entityId] });
-      queryClient.invalidateQueries({ queryKey: ['tags'] });
+      invalidate();
       setSearch('');
       setOpen(false);
     },
+    onError: (err) => handleWriteError(err, "Couldn't add tag"),
   });
 
   // Remove tag mutation
@@ -78,8 +124,9 @@ export function TagInput(props: TagInputProps) {
       await api.delete(`/api/${resourcePath}/${entityId}/tags/${tagId}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [invalidationKey, entityId] });
+      invalidate();
     },
+    onError: (err) => handleWriteError(err, "Couldn't remove tag"),
   });
 
   // Available tags: exclude already-attached; suggestions additionally match search
@@ -118,6 +165,12 @@ export function TagInput(props: TagInputProps) {
         open={open}
         onOpenChange={value => {
           setOpen(value);
+          // The vocabulary is shared and small, and the app's default staleTime is
+          // five minutes - long enough for a tag deleted in Settings to still be
+          // sitting in this list. Refetching on open is the cheapest way to shrink
+          // that window to nothing that matters; handleWriteError covers the race
+          // that remains.
+          if (value) void refetchTags();
           if (!value) { setSearch(''); setColor(TAG_COLORS[0]!); }
         }}
       >

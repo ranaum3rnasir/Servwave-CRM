@@ -22,9 +22,11 @@ import { Heading } from '@/components/ui/heading';
 import { ChartCard } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { chartPalette, token } from '@/design-system/tokens';
-import type { ReportDef, ReportGroup } from './report-catalog';
+import type { ReportDef, ReportGroup } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
-import { MultiSelectFilter, Delta, Sparkline, hashStr, mulberry32, rangeRnd } from './_shared';
+import { MultiSelectFilter } from './_shared';
+import { Delta, Sparkline } from '@/components/reports/ReportIndicators';
+import { hashStr, mulberry32, rangeRnd } from '@/lib/reports/random';
 
 // Trend up/down = positive/negative data signal → success / danger.
 const TREND_UP = chartPalette[0] ?? token('--success');

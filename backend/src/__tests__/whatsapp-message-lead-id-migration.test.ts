@@ -15,7 +15,7 @@ import { join } from 'path';
  * fragment onto whatsapp_messages would have matched NOTHING rather than failing
  * loudly - a filter that looks correct and hides everything.
  *
- * Verified read-only against the live staging DB (shared staging) while
+ * Verified read-only against the live staging DB (redacted-staging-ref) while
  * writing this: whatsapp_messages has no lead_id today, and messages_lead_id_fkey
  * is `ON UPDATE CASCADE ON DELETE SET NULL` - which is what this migration
  * mirrors and what the assertions below require.

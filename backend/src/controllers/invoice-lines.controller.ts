@@ -46,6 +46,7 @@ import {
 } from './inv-stock.controller';
 import { logAudit } from '../lib/audit';
 import { isInvoiceEditable, amountPaidOf, creditsTotalOf, isSentInvoice } from '../lib/invoice-editable';
+import { LINE_DESCRIPTION_MAX } from '../lib/line-items';
 
 function param(req: Request, name: string): string {
   return req.params[name] as string;
@@ -58,7 +59,7 @@ function round2(n: number): number {
 // --- Zod Schemas (validate() calls schema.parse(req.body) directly — no body: wrapper) ---
 
 export const addLineSchema = z.object({
-  description: z.string().min(1).max(5000),
+  description: z.string().min(1).max(LINE_DESCRIPTION_MAX),
   quantity: z.number().positive(),
   unit_price: z.number().min(0),
   is_taxable: z.boolean().optional(),
@@ -72,7 +73,7 @@ export const addLineSchema = z.object({
 });
 
 export const updateLineSchema = z.object({
-  description: z.string().max(5000).optional(),
+  description: z.string().max(LINE_DESCRIPTION_MAX).optional(),
   quantity: z.number().positive().optional(),
   unit_price: z.number().min(0).optional(),
   is_taxable: z.boolean().optional(),
@@ -144,7 +145,7 @@ const invoiceGuardSelect = {
   customer: { select: { tax_exempt: true } },
   job: {
     select: {
-      assignees: { select: { user_id: true } },
+      visits: { select: { assignees: { select: { user_id: true } } } },
       customer: { select: { tax_exempt: true } },
       estimate: { select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } },
     },

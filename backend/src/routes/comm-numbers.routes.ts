@@ -33,7 +33,14 @@ router.get('/numbers', canDo('read', 'Communication'), commNumbersController.lis
 router.post('/numbers/search', canDo('update', 'Organization'), validate(commNumbersController.searchNumbersSchema), commNumbersController.searchNumbers);
 router.post('/numbers/buy', canDo('update', 'Organization'), validate(commNumbersController.buyNumberSchema), commNumbersController.buyNumber);
 router.post('/numbers/register-byo', canDo('update', 'Organization'), validate(commNumbersController.registerByoSchema), commNumbersController.registerByoNumber);
-// Flow reassign — call_flow_id is the only writable field.
+// Re-read the provider's list and make ours match. Read-only against the
+// provider (buys nothing, enables nothing) but it is org plumbing, so it
+// carries the same ADMIN gate as the rest of this block.
+router.post('/numbers/refresh', canDo('update', 'Organization'), commNumbersController.refreshNumbers);
+// Release - ends a paid subscription and is irreversible at the provider, so
+// it carries the ADMIN idiom rather than a plain Communication grant.
+router.delete('/numbers/:id', canDo('update', 'Organization'), commNumbersController.releaseNumberById);
+// Flow + forwarding destination.
 router.patch('/numbers/:id', canDo('update', 'Communication'), validate(commNumbersController.updateNumberSchema), commNumbersController.updateNumber);
 
 export default router;

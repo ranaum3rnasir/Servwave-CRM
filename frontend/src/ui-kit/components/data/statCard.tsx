@@ -1,17 +1,34 @@
 "use client";
 
 import * as React from "react";
-import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { cn } from "@/ui-kit/lib/utils";
-import { Badge } from "@/ui-kit/components/ui/badge";
 import { Skeleton } from "@/ui-kit/components/ui/skeleton";
 
-export interface StatCardProps extends Omit<React.ComponentProps<"button">, "value"> {
+/**
+ * NOT HERE: `meta` and `delta`.
+ *
+ * The card used to carry a caption line under the value and a tinted chip
+ * beside it, with a sentiment model behind the chip (`direction` plus a
+ * `goodDirection`, so a falling cost read green). Both are gone at the owner's
+ * explicit call: a KPI tile shows its title and its number, and nothing else.
+ * That includes the real trend figures - "-54%", "+4pp vs last mo" - which were
+ * put to them directly and ruled out with the rest.
+ *
+ * They are REMOVED rather than accepted-and-ignored. This component already
+ * shipped one silently-dropped prop (`children`, beaten by the JSX children the
+ * card supplies itself), and the fix for that was to make it a type error;
+ * leaving `meta`/`delta` declared would rebuild exactly that defect on purpose.
+ * A call site that still has a caption to show now fails to compile, which is
+ * the only way it gets looked at.
+ */
+
+// `children` is omitted rather than accepted: the component supplies its own
+// JSX children, and JSX children beat a spread `children` prop, so anything a
+// call site passed used to vanish without a word. It is a type error now.
+export interface StatCardProps extends Omit<React.ComponentProps<"button">, "value" | "children"> {
   label: string;
   value: React.ReactNode;
-  /** Change since the last period. `direction` drives the arrow and tint. */
-  delta?: { value: string; direction?: "up" | "down" | "flat" };
   /** Renders a 3px semantic rail on the left edge. */
   tone?: "brand" | "green" | "blue" | "amber" | "red" | "purple";
   /** Pressed state - set when the card is acting as an active filter. */
@@ -28,8 +45,6 @@ const railTones = {
   purple: "before:bg-status-purple",
 };
 
-const deltaVariant = { up: "softGreen", down: "softRed", flat: "softNeutral" } as const;
-
 /**
  * KPI tile.
  *
@@ -45,16 +60,15 @@ const deltaVariant = { up: "softGreen", down: "softRed", flat: "softNeutral" } a
  * honest reason to give it a hover lift.
  */
 function StatCard({
-  className, label, value, delta, tone, active, loading, ...props
+  className, label, value, tone, active, loading, ...props
 }: StatCardProps) {
   if (loading) {
+    // Two bars for two lines. The tile has nothing under the value any more, so
+    // a third would grow the row and then lose the height when the data lands.
     return (
       <div className="bg-kit-card flex flex-col gap-2.5 rounded-lg border p-3.5 shadow-sm">
         <Skeleton className="h-3 w-24" />
-        <div className="flex items-center justify-between gap-2">
-          <Skeleton className="h-6 w-16" />
-          <Skeleton className="h-5 w-14 rounded-full" />
-        </div>
+        <Skeleton className="h-6 w-16" />
       </div>
     );
   }
@@ -82,16 +96,7 @@ function StatCard({
       {...props}
     >
       <span className="text-muted-foreground text-[12.5px] font-semibold">{label}</span>
-      <span className="flex items-center justify-between gap-2">
-        <span className="text-2xl leading-none font-bold tracking-[-0.035em] tabular-nums">{value}</span>
-        {delta && (
-          <Badge variant={deltaVariant[delta.direction ?? "flat"]} size="pill">
-            {delta.direction === "up" && <ArrowUp className="size-3 stroke-[2.5]" />}
-            {delta.direction === "down" && <ArrowDown className="size-3 stroke-[2.5]" />}
-            {delta.value}
-          </Badge>
-        )}
-      </span>
+      <span className="text-2xl leading-none font-bold tracking-[-0.035em] tabular-nums">{value}</span>
     </Comp>
   );
 }

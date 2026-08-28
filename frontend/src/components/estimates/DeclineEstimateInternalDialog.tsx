@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { declineEstimateInternal } from '@/lib/api/estimates';
+import { setEstimateStatusTo } from '@/lib/api/estimates';
+import { ESTIMATE_STATUS } from '@/constants/estimateStatus';
 import { extractApiError } from '@/lib/utils';
 import {
   Dialog,
@@ -48,7 +49,11 @@ export function DeclineEstimateInternalDialog({
   const [reason, setReason] = useState<string>('');
 
   const mutation = useMutation({
-    mutationFn: () => declineEstimateInternal(estimateId, reason),
+    // Spec B1 — routes through the free status setter, not POST /decline-internal. That endpoint
+    // still gates on SENT/PENDING, so declining a won estimate (legal now) would 400 there. The
+    // setter raises the same `estimate.declined` verb and fires the same ESTIMATE_DECLINED
+    // automation trigger, and it clears the stamps of whichever status is being left.
+    mutationFn: () => setEstimateStatusTo(estimateId, ESTIMATE_STATUS.DECLINED, { lost_reason: reason }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['estimate', estimateId] });
       queryClient.invalidateQueries({ queryKey: ['estimates'] });

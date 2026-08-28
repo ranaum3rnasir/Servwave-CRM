@@ -39,7 +39,7 @@ function mockMessageCreate() {
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
   p.organization.findUnique.mockResolvedValue({
-    ctm_account_id: '596375',
+    ctm_account_id: '500001',
     ctm_sms_ready: true,
     sms_sending_enabled: true,
     plan: 'PRO',
@@ -292,7 +292,7 @@ describe('POST /api/communication/sms — compose to an arbitrary number', () =>
     expect(res.status).toBe(201);
     expect(res.body.delivery).toBe('sent');
     expect(res.body.threadId).toBe('th-new');
-    expect(client.sendSms).toHaveBeenCalledWith('596375', {
+    expect(client.sendSms).toHaveBeenCalledWith('500001', {
       from: 'TPN-A',
       to: E164,
       msg: 'clean send',

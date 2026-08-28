@@ -33,6 +33,7 @@ import {
   type SortKey,
   type SortState,
 } from '@/components/communication/phone/CallsView';
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 export function CallsTable({
   calls,
@@ -46,6 +47,7 @@ export function CallsTable({
   const { data: customers = [] } = usePhoneCustomers();
   const { data: agents = [] } = usePhoneAgents();
   const [sort, setSort] = useState<SortState | null>(null);
+  const tz = useScheduleTimezone();
 
   function toggleSort(key: SortKey) {
     setSort((prev) =>
@@ -114,7 +116,7 @@ export function CallsTable({
           min: 110,
           cell: (c) => (
             <>
-              <p className="font-semibold text-text-primary">{dayLabel(c.startedAt)}</p>
+              <p className="font-semibold text-text-primary">{dayLabel(c.startedAt, tz)}</p>
               <p className="text-[11px] text-text-secondary">{durationLabel(c.durationSec)}</p>
             </>
           ),

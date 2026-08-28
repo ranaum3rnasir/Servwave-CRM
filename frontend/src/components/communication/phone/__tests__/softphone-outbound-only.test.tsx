@@ -29,7 +29,7 @@ type FakeDevice = {
 const softphone = vi.hoisted(() => ({ current: null as null | FakeDevice }));
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   fmtPhone: (n: string) => n,
   usePhoneCustomers: () => ({ data: [] }),
   usePlaceCall: () => placeCall,

@@ -11,7 +11,8 @@
 import { prisma } from '../../lib/prisma';
 import { env } from '../../config/env';
 import { DEFAULT_TIMEZONE } from '../../lib/timezone';
-import { resolveCurrentWalkthrough } from '../walkthrough.service';
+import { isLiveVisit } from '../../lib/visit-status';
+import { resolveCurrentWalkthrough, resolveNextJobVisit } from '../walkthrough.service';
 import type { ExecutionBundle, RecipientUser } from './executors';
 
 export interface EntityState {
@@ -30,7 +31,17 @@ export interface EntityState {
   // and LEAD_DATE_ANCHORED('before') staleness guards key off THIS, not leadStatus - after
   // this redesign, scheduleWalkthrough only ever advances a NEW lead to CONTACTED (D5), so
   // lead.status is no longer a reliable "is a visit currently scheduled" signal.
-  leadWalkthroughStatus?: string | null;
+  leadVisitStatus?: string | null;
+  // ── Lead stage clocks (spec #1751 D8) ────────────────────────────────────
+  // Read by anchorDateFor for the three new lead anchors, and by terminalStale's
+  // "…and it still has not happened" guard, which needs the NEXT clock along to decide whether
+  // the thing the owner was waiting for has since occurred. Both halves have to see the same
+  // snapshot, which is why they are loaded here rather than re-queried at either site.
+  leadCreatedAt?: Date | null;
+  leadContactedAt?: Date | null;
+  leadWalkthroughFirstBookedAt?: Date | null;
+  leadLastVisitCompletedAt?: Date | null;
+  leadFirstEstimateSentAt?: Date | null;
 }
 
 export interface LoadedExecution {
@@ -72,6 +83,42 @@ function fmtTime(date: Date | null | undefined, timeZone: string): string {
   } catch {
     return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: DEFAULT_TIMEZONE }).format(date);
   }
+}
+
+/**
+ * Multi-visit D18: the merge fields a VISIT-scoped occurrence overrides on its parent job.
+ *
+ * The job branch below renders `job.scheduled_date` / `job.scheduled_time` off
+ * Job.scheduled_start, which under D14 is a MIRROR of the job's next upcoming visit - so a
+ * workflow enrolled by visit 3 would tell the customer visit 2's date, and `technician.names`
+ * would name the job-level union rather than the crew going on that trip. The enrollment is
+ * visit-scoped (dedupe.ts); this is what makes what it SENDS visit-scoped too.
+ *
+ * Written by the dispatching controller into event_payload.mergeFields, which is persisted on the
+ * enrollment and re-applied on EVERY step load - so the override survives however many WAIT steps
+ * sit before the send. The same channel `event.reason` already travels on.
+ *
+ * NOT the whole of D18: EntityState (and so the BEFORE_JOB_START anchored wait) is still resolved
+ * per ENTITY, so a per-visit wait still anchors on the job's OWN next-live-visit resolution
+ * (S8 §2 / A4: resolveNextJobVisit over the live set below), never the triggering visit. That
+ * half needs the visit id persisted on the enrollment and is deliberately not smuggled in
+ * through a string bag.
+ */
+export function visitMergeFields(
+  visit: { scheduled_at?: Date | null },
+  crew: { first_name: string; last_name: string }[],
+  timeZone: string,
+): Record<string, string> {
+  const names = crew.map((u) => `${u.first_name} ${u.last_name}`.trim()).filter(Boolean);
+  return {
+    'job.scheduled_date': fmtDate(visit.scheduled_at ?? null, timeZone),
+    'job.scheduled_time': fmtTime(visit.scheduled_at ?? null, timeZone),
+    'technician.first_name': crew[0]?.first_name ?? '',
+    // Matches the hard-coded email path (job.controller.ts sendJobVisitScheduledEmail /
+    // lead.controller.ts): an empty crew says "our team" rather than naming nobody, so a
+    // seeded template's "Who's coming: {{technician.names}}." never renders "coming: .".
+    'technician.names': names.join(', ') || 'Our team',
+  };
 }
 
 interface CustomerRow {
@@ -170,7 +217,8 @@ async function loadEntityBundle(args: {
           customer: CUSTOMER_INCLUDE,
           service_location: true,
           sub_status: { select: { label: true } },
-          assignees: { include: { user: { select: { id: true, email: true, first_name: true, last_name: true } } } },
+          // S8 (D6): crew through the trips.
+          visits: { include: { assignees: { include: { user: { select: { id: true, email: true, first_name: true, last_name: true } } } } } },
           dispatcher: { select: { id: true, email: true, first_name: true, last_name: true } },
           salesperson: { select: { id: true, email: true, first_name: true, last_name: true } },
           // Salesperson fallback path (job.salesperson_id unset): job → estimate → lead → commission_owner.
@@ -184,9 +232,28 @@ async function loadEntityBundle(args: {
         },
       });
       if (!job) return null;
-      const assignees: RecipientUser[] = (job.assignees ?? []).map(
-        (a: { user: RecipientUser }) => a.user,
-      );
+      // S8 (D6): deduped union across the job's trips - a person on two trips is one recipient.
+      const seen = new Set<string>();
+      const assignees: RecipientUser[] = [];
+      for (const v of job.visits ?? []) {
+        for (const a of v.assignees ?? []) {
+          if (seen.has(a.user.id)) continue;
+          seen.add(a.user.id);
+          assignees.push(a.user);
+        }
+      }
+      // S8 §2 (A4, RATIFIED): the anchored-WAIT resolver moves OFF the Job.scheduled_start
+      // mirror and onto the same LIVE-visit resolution syncJobFromVisits uses to WRITE that
+      // mirror (walkthrough.service.ts's resolveNextJobVisit, called on the isLiveVisit subset -
+      // exactly as syncJobFromVisits itself does), so anchorDateFor() and the
+      // job.scheduled_date/_time merge fields below read the job's next upcoming live visit
+      // fresh rather than trusting a column that is only ever correct between writes.
+      // context.ts has no per-visit context on the enrollment (see visitMergeFields above), so
+      // this stays a per-JOB resolution, not the specific visit that triggered enrollment.
+      // A job with no live visits (none booked, all cancelled, or - per resolveNextJobVisit's
+      // own fallback - all elapsed and unactioned) resolves nextVisit to null exactly like the
+      // mirror does once D16's collapse applies.
+      const nextVisit = resolveNextJobVisit((job.visits ?? []).filter(isLiveVisit));
       const loc = job.service_location;
       const address = loc ? [loc.address_line1, loc.city, loc.state].filter(Boolean).join(', ') : '';
       const techNames = assignees.map((u) => [u.first_name, u.last_name].filter(Boolean).join(' ')).join(', ');
@@ -203,17 +270,19 @@ async function loadEntityBundle(args: {
             ...orgCtx,
             ...customerCtx(job.customer),
             'job.number': job.job_number,
-            'job.scheduled_date': fmtDate(job.scheduled_start, tz),
-            'job.scheduled_time': fmtTime(job.scheduled_start, tz),
+            'job.scheduled_date': fmtDate(nextVisit?.scheduled_at ?? null, tz),
+            'job.scheduled_time': fmtTime(nextVisit?.scheduled_at ?? null, tz),
             'job.address': address,
             'job.type': job.job_type ?? '',
             'job.scope_notes': job.scope_notes ?? '',
             'technician.first_name': assignees[0]?.first_name ?? '',
-            'technician.names': techNames,
+            // Same fallback as visitMergeFields above / the hard-coded email path: no
+            // assignees on the job's trips must say "our team", not render a bare "".
+            'technician.names': techNames || 'Our team',
             'job.sub_status': job.sub_status?.label ?? '',
           },
         },
-        state: { jobStatus: job.status, jobScheduledStart: job.scheduled_start, jobCompletedAt: job.completed_at },
+        state: { jobStatus: job.status, jobScheduledStart: nextVisit?.scheduled_at ?? null, jobCompletedAt: job.completed_at },
       };
     }
 
@@ -298,12 +367,12 @@ async function loadEntityBundle(args: {
           // against the lead's CURRENT visit - the next upcoming SCHEDULED one; else the most
           // recent one that happened (completed or cancelled) - not the legacy flat columns,
           // which mixed data across visits once a lead could have more than one.
-          walkthroughs: {
+          visits: {
             select: {
               id: true, status: true, scheduled_at: true, duration_minutes: true,
               completed_at: true, cancelled_at: true, cancelled_reason: true, cancelled_by: true,
               customer_email_sent_at: true, notes: true, created_at: true,
-              performers: {
+              assignees: {
                 include: { user: { select: { id: true, email: true, first_name: true, last_name: true } } },
               },
             },
@@ -317,8 +386,8 @@ async function loadEntityBundle(args: {
         ? [lead.customer.first_name, lead.customer.last_name].filter(Boolean).join(' ')
         : '';
       const request = (lead.service_request ?? '').slice(0, 60);
-      const currentVisit = resolveCurrentWalkthrough(lead.walkthroughs);
-      const assignees: RecipientUser[] = (currentVisit?.performers ?? []).map(
+      const currentVisit = resolveCurrentWalkthrough(lead.visits);
+      const assignees: RecipientUser[] = (currentVisit?.assignees ?? []).map(
         (p: { user: RecipientUser }) => p.user,
       );
       const performerNames = assignees.map((u) => [u.first_name, u.last_name].filter(Boolean).join(' ')).join(', ');
@@ -350,7 +419,18 @@ async function loadEntityBundle(args: {
         state: {
           leadStatus: lead.status,
           leadWalkthroughScheduledAt: currentVisit?.scheduled_at ?? null,
-          leadWalkthroughStatus: currentVisit?.status ?? null,
+          leadVisitStatus: currentVisit?.status ?? null,
+          // Straight off the lead row (this loader uses `include`, so every scalar is already
+          // here). Note these are the STORED clocks, not the current-visit projection above:
+          // leadWalkthroughScheduledAt moves both ways with the visit set by design, whereas
+          // leadLastVisitCompletedAt only ever moves FORWARD and only when a trip is actually
+          // completed - booking, moving or cancelling a visit never touches it. That difference
+          // is the whole point of D3.
+          leadCreatedAt: lead.created_at,
+          leadContactedAt: lead.contacted_at,
+          leadWalkthroughFirstBookedAt: lead.walkthrough_first_booked_at,
+          leadLastVisitCompletedAt: lead.last_visit_completed_at,
+          leadFirstEstimateSentAt: lead.first_estimate_sent_at,
         },
       };
     }

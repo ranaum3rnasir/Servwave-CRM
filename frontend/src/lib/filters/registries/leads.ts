@@ -61,8 +61,13 @@ export const leadsRegistry: FacetConfig[] = [
     // Kept static (not a dynamic optionSource): the wire VALUE is always the fixed enum, and the
     // filter dropdown's own label rename/reorder/hide is a smaller win than the risk of making a
     // previously-synchronous, always-populated facet depend on a network round-trip. Rendered
-    // status BADGES (LeadsPage's Status column, LeadDetailPage) resolve the org's label override
-    // via StatusBadge's labelOverride prop instead - see useLeadStatusOverrides().
+    // status BADGES used to make up for that: the legacy LeadsPage column and the legacy lead
+    // detail page both passed StatusBadge a `labelOverride` from useLeadStatusOverrides(). NO
+    // ROUTED SURFACE STILL DOES. The routed pages (pages/v2/leads/*) paint status through
+    // _shared/statusChip and _shared/statusMenu, which read design-system/status-registry only,
+    // so an org's rename/hide is honoured on its config screen (settings/LeadStatusesPage) and
+    // nowhere else. That is a gap, not a decision - see the SRVW-111 note in
+    // __tests__/lead-detail-page.test.tsx. This entry stays static either way.
     options: LEAD_STATUSES.map((s) => ({ value: s, label: STATUS_REGISTRY.lead[s]?.label ?? s })),
   },
   {

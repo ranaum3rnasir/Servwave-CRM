@@ -165,6 +165,17 @@ async function purgeSubtreeChildren(tx: Tx, orgId: string, ids: SubtreeIds): Pro
   await tx.invoiceLineItem.deleteMany({ where: { invoice_id: ID_IN(invoiceIds) } });
   await tx.invoice.deleteMany({ where: { id: ID_IN(invoiceIds), organization_id: orgId } });
 
+  // Multi-visit S1: visits are deleted EXPLICITLY rather than left to cascade. Both parent FKs
+  // (lead_id, job_id) are nullable - exactly one is set, enforced by a DB CHECK - so no single
+  // non-null FK proves the cascade to the purge-coverage checker, even though every row does in
+  // fact hang off a purged parent. Deleting them here states the intent instead of relying on it.
+  await tx.visitAssignee.deleteMany({
+    where: { organization_id: orgId, visit: { OR: [{ lead_id: ID_IN(leadIds) }, { job_id: ID_IN(jobIds) }] } },
+  });
+  await tx.visit.deleteMany({
+    where: { organization_id: orgId, OR: [{ lead_id: ID_IN(leadIds) }, { job_id: ID_IN(jobIds) }] },
+  });
+
   await tx.job.deleteMany({ where: { id: ID_IN(jobIds), organization_id: orgId } });
 
   await tx.estimateLineItem.deleteMany({ where: { estimate_id: ID_IN(estimateIds) } });
@@ -348,9 +359,6 @@ export const PURGE_EXEMPT: Record<string, string> = {
   TextAutomation: RESTRICT_1027,
   EmailGroup: RESTRICT_1027,
   EmailForwardRule: RESTRICT_1027,
-  // Email slice 10 (guided domain verification) — same RESTRICT FK to
-  // organizations as every other #1027 entry above.
-  OrganizationDomain: RESTRICT_1027,
   CallFlow: RESTRICT_1027,
   PhoneNumber: RESTRICT_1027,
   PendingCallAttribution: RESTRICT_1027,
@@ -413,6 +421,16 @@ export async function purgeOrganization(tx: Tx, orgId: string, nameGuard: string
   await tx.timelineEvent.deleteMany({ where: { organization_id: orgId } });
   await tx.priceBookItem.deleteMany({ where: { organization_id: orgId } });
   await tx.priceBookCategory.deleteMany({ where: { organization_id: orgId } });
+  // Ordered AFTER priceBookItem: price_book_items.finish_id is ON DELETE SET
+  // NULL, so deleting finishes first would needlessly rewrite every item row on
+  // its way to deleting them. UomOption has no dependents at all - items store
+  // the unit CODE string, not a foreign key to it.
+  //
+  // Unlike Brand, which is still parked in PURGE_EXEMPT under #1027, these two
+  // are deleted for real: they are new, nothing outside this pass points at
+  // them, and there was no reason to grow that backlog.
+  await tx.finish.deleteMany({ where: { organization_id: orgId } });
+  await tx.uomOption.deleteMany({ where: { organization_id: orgId } });
   // Email slice 8b: EmailThread carries organization_id and a real FK to
   // Organization, but nothing cascades INTO it - Email.thread_id -> EmailThread
   // is the other direction (ON DELETE SET NULL FROM EmailThread, not a cascade
@@ -452,6 +470,16 @@ export async function purgeOrganization(tx: Tx, orgId: string, nameGuard: string
   await tx.copilotMessage.deleteMany({ where: { organization_id: orgId } });
   await tx.copilotConversation.deleteMany({ where: { organization_id: orgId } });
   await tx.copilotAuditEvent.deleteMany({ where: { organization_id: orgId } });
+
+  //     Calendar Entries (Slice 02, #869 same defect class): calendar_entries carries
+  //     organization_id as a plain column with NO relation to Organization (mirrors
+  //     NotificationRecipient / TermsAcceptance - see the schema.prisma header comment on
+  //     CalendarEntry), so nothing at the DB level cleans it up on an org purge. Deleted here,
+  //     explicitly. calendar_entry_participants needs NO explicit delete of its own: its FK to
+  //     calendar_entries is a REQUIRED `onDelete: Cascade` relation, so Postgres removes those
+  //     rows the instant the parent row goes - purge-tenant-coverage.test.ts's cascade closure
+  //     recognises this edge and covers it without a second deleteMany.
+  await tx.calendarEntry.deleteMany({ where: { organization_id: orgId } });
 
   // 3. Users (Restrict→org) and departments (Restrict→org) before the org; locations Cascade.
   await tx.user.deleteMany({ where: { organization_id: orgId } });

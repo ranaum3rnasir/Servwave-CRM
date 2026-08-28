@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { PaymentMethod } from '@prisma/client';
 import { prisma } from '../lib/prisma';
+import { transitionLeadStatus } from '../services/lead-stage.service';
 // Creator tracking (audit only) - stamped at every create, never read for authorization here.
 import { CREATED_BY_CLIENT } from '../lib/created-by';
 import { constructWebhookEvent, retrieveAccount, getStripeForOrg, computeServiceFee, CARD_SERVICE_FEE_BPS } from '../lib/stripe';
@@ -46,7 +47,7 @@ function readUuidMetadata(metadata: unknown, key: 'invoiceId'): string | null {
  * MULTI-TENANT NOTE (2026-05-13):
  * Stripe webhook handlers do NOT currently validate that metadata.invoiceId,
  * etc., belong to the org resolved by resolveOrgFromEvent().
- * For B&G launch this is acceptable because B&G has no Stripe (CARD not in
+ * For Lakeside launch this is acceptable because Lakeside has no Stripe (CARD not in
  * accepted_payment_methods, gate below short-circuits). Alpha continues to use
  * Stripe in prod — the gap is theoretical (would require crafting a malicious
  * checkout with someone else's invoice ID in metadata). Fix scheduled for
@@ -394,6 +395,8 @@ export async function processStripeEvent(
                   customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
                   lead: { select: {
                     commission_owner_id: true,
+                    // Spec #1751 D6 — the transition writer records `from` on the ledger entry.
+                    status: true,
                     customer: { select: { id: true, first_name: true, last_name: true, company_name: true, email: true } },
                   } },
                 },
@@ -542,10 +545,18 @@ export async function processStripeEvent(
                 where: { id: est.id },
                 data: { status: 'WON', approved_at: new Date() },
               });
+              // Spec #1751 D6 — the one status writer. actorId null: a Stripe webhook has no
+              // signed-in user, and the ledger says so by naming no actor rather than by
+              // borrowing one.
               if (est.lead_id) {
-                await tx.lead.updateMany({
-                  where: { id: est.lead_id, status: { notIn: ['WON', 'LOST', 'CANCELLED'] } },
-                  data: { status: 'WON' },
+                await transitionLeadStatus(tx, {
+                  leadId: est.lead_id,
+                  orgId: invoice.organization_id,
+                  to: 'WON',
+                  from: est.lead!.status,
+                  actorId: null,
+                  description: 'Lead won — deposit invoice paid by card',
+                  metadata: { estimate_id: est.id, estimate_number: est.estimate_number, invoice_id: invoiceId, via: 'stripe_deposit_paid' },
                 });
               }
               await tx.timelineEvent.create({
@@ -741,6 +752,8 @@ export async function processStripeEvent(
               customerId: c.id,
               jobId: invoice.job?.id,
               jobLabel: invoice.job?.job_number,
+              entityType: 'invoice',
+              entityId: invoice.id,
             };
             sendPaymentReceivedEmail({
               organizationId: invoice.organization_id,

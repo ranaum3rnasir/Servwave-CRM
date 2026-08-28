@@ -22,10 +22,25 @@ export const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/heic', 'image/heif',
   'video/mp4', 'video/quicktime',
   'application/pdf',
+  // Office documents. Field-service paperwork is not only photos and PDFs: evaluations,
+  // install sheets and parts lists arrive as Word/Excel, and rejecting them sent users
+  // back to their old system. Macro-enabled variants (.docm/.xlsm) are deliberately
+  // absent - they are the executable-content shape of these formats.
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/msword',
+  'application/vnd.ms-excel',
+  'application/vnd.ms-powerpoint',
+  'text/csv', 'text/plain',
 ];
 
+/** Human-readable form of ALLOWED_MIME_TYPES for the 400 body. Exported alongside the
+ *  list itself so the email compose path cannot advertise a different set than it takes. */
+export const ALLOWED_TYPES_LABEL = 'JPG, PNG, HEIC, MP4, PDF, Word, Excel, PowerPoint, CSV, TXT';
+
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB — images, HEIC/HEIF, PDF
-const MAX_VIDEO_FILE_SIZE = 50 * 1024 * 1024; // 50MB — video/mp4, video/quicktime
+export const MAX_VIDEO_FILE_SIZE = 50 * 1024 * 1024; // 50MB — video/mp4, video/quicktime
 const MAX_ENTITY_SIZE = 200 * 1024 * 1024; // 200MB
 
 const VALID_ENTITY_TYPES: AttachmentEntity[] = ['CUSTOMER', 'LEAD', 'ESTIMATE', 'JOB', 'INVOICE'];
@@ -59,6 +74,20 @@ async function checkEntityExists(entityType: AttachmentEntity, entityId: string,
   }
 }
 
+/**
+ * Multi-visit S8 (D6): is this user on ANY of the record's visits?
+ *
+ * One flatten, shared by the three ownership checks below, so the job arm and the two lead arms
+ * cannot drift on what "on the crew" means. The relation is one array level deeper than the join
+ * tables it replaces, which is why each call site needed a real edit rather than a rename.
+ */
+function isOnAnyVisit(
+  record: { visits?: Array<{ assignees?: Array<{ user_id: string }> | null }> | null } | null | undefined,
+  userId: string,
+): boolean {
+  return (record?.visits ?? []).some((v) => (v.assignees ?? []).some((a) => a.user_id === userId));
+}
+
 export async function checkEntityAccess(entityType: AttachmentEntity, entityId: string, req: Request): Promise<boolean> {
   const { role, id: userId } = req.user!;
   const orgFilter = tenantWhere(req);
@@ -76,8 +105,11 @@ export async function checkEntityAccess(entityType: AttachmentEntity, entityId: 
 
   if (role === 'SALES') {
     if (entityType === 'LEAD') {
-      const lead = await prisma.lead.findUnique({ where: { id: entityId, ...orgFilter }, select: { lead_assignees: { select: { user_id: true } }, walkthrough_performers: { select: { user_id: true } } } });
-      return (lead?.lead_assignees?.some((a) => a.user_id === userId) ?? false) || (lead?.walkthrough_performers?.some((p) => p.user_id === userId) ?? false);
+      // S8 (D6): a lead's walkthrough crew is reached through its VISITS. `visit_assignees.lead_id`
+      // is dropped, so the direct back-relation no longer exists - and this is an ACCESS decision,
+      // which is why the S3 migration refused to drop that column until this moved.
+      const lead = await prisma.lead.findUnique({ where: { id: entityId, ...orgFilter }, select: { lead_assignees: { select: { user_id: true } }, visits: { select: { assignees: { select: { user_id: true } } } } } });
+      return (lead?.lead_assignees?.some((a) => a.user_id === userId) ?? false) || isOnAnyVisit(lead, userId);
     }
     if (entityType === 'ESTIMATE') {
       const est = await prisma.estimate.findUnique({ where: { id: entityId, ...orgFilter }, select: { lead: { select: { lead_assignees: { select: { user_id: true } } } } } });
@@ -88,12 +120,15 @@ export async function checkEntityAccess(entityType: AttachmentEntity, entityId: 
 
   if (role === 'TECHNICIAN') {
     if (entityType === 'JOB') {
-      const job = await prisma.job.findUnique({ where: { id: entityId, ...orgFilter }, select: { assignees: { select: { user_id: true } } } });
-      return job?.assignees?.some((a) => a.user_id === userId) ?? false;
+      // S8 (D6): the job-assignee table is gone; "on this job" means "on one of its trips".
+      // `...orgFilter` stays on the findUnique exactly as before - the relation moved, the
+      // tenancy did not.
+      const job = await prisma.job.findUnique({ where: { id: entityId, ...orgFilter }, select: { visits: { select: { assignees: { select: { user_id: true } } } } } });
+      return isOnAnyVisit(job, userId);
     }
     if (entityType === 'LEAD') {
-      const lead = await prisma.lead.findUnique({ where: { id: entityId, ...orgFilter }, select: { walkthrough_performers: { select: { user_id: true } } } });
-      return lead?.walkthrough_performers?.some((p) => p.user_id === userId) ?? false;
+      const lead = await prisma.lead.findUnique({ where: { id: entityId, ...orgFilter }, select: { visits: { select: { assignees: { select: { user_id: true } } } } } });
+      return isOnAnyVisit(lead, userId);
     }
     return false;
   }
@@ -202,6 +237,31 @@ export async function listAttachments(req: Request, res: Response) {
   }
 }
 
+/**
+ * Supabase Storage rejections carry a real reason - a bucket-level mime rejection, an object
+ * over the bucket's own size ceiling, a duplicate key - and the handler used to log it and send
+ * a blanket 500 with "Failed to upload file". Winston is console-only, so on Render that reason
+ * was unrecoverable: the .docx outage (#1605) had to be diagnosed from the Supabase dashboard's
+ * storage logs. Map the rejection to a status that says what happened and repeat what storage
+ * said, so the next one explains itself in the toast.
+ */
+function mapStorageError(err: { message?: string; statusCode?: string | number; error?: string }): {
+  status: number;
+  error: string;
+} {
+  const message = err?.message || err?.error || 'the storage service rejected it';
+  const code = Number.parseInt(String(err?.statusCode ?? ''), 10);
+  const detail = `Storage rejected the file: ${message}`;
+
+  // A bucket whose allowed_mime_types has drifted behind ALLOWED_MIME_TYPES answers 400 here.
+  // 415 is the honest status for the client: the file is the problem, not the request shape.
+  if (/mime type/i.test(message)) return { status: 415, error: detail };
+  if (code === 413 || /maximum allowed size|too large/i.test(message)) return { status: 413, error: detail };
+  if (code === 409 || /already exists|duplicate/i.test(message)) return { status: 409, error: detail };
+  // Everything else is the upstream failing us, not the caller failing validation.
+  return { status: 502, error: detail };
+}
+
 export async function uploadAttachment(req: Request, res: Response) {
   try {
     const entityType = param(req, 'entityType').toUpperCase();
@@ -230,7 +290,7 @@ export async function uploadAttachment(req: Request, res: Response) {
 
     // Validate MIME type
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      res.status(400).json({ error: `File type not allowed. Accepted: JPG, PNG, HEIC, MP4, PDF` });
+      res.status(400).json({ error: `File type not allowed. Accepted: ${ALLOWED_TYPES_LABEL}` });
       return;
     }
 
@@ -289,8 +349,15 @@ export async function uploadAttachment(req: Request, res: Response) {
       });
 
     if (uploadError) {
-      logger.error('Supabase storage upload error:', uploadError);
-      res.status(500).json({ error: 'Failed to upload file' });
+      const { status, error } = mapStorageError(uploadError);
+      logger.error('Supabase storage upload error', {
+        storagePath,
+        mimetype: file.mimetype,
+        size: file.size,
+        status,
+        storageMessage: uploadError.message,
+      });
+      res.status(status).json({ error });
       return;
     }
 
@@ -301,7 +368,10 @@ export async function uploadAttachment(req: Request, res: Response) {
     // URL expires in 1h and storage_path is the canonical source of truth.
     // listAttachments / deleteAttachment re-mint from storage_path. Avoids
     // stale dead data in the DB column.
-    const created = await prisma.attachment.create({
+    // The object is already in the bucket at this point. If the row insert fails the file is
+    // orphaned - invisible to the app, still billed, and indistinguishable from a real
+    // attachment when auditing the bucket. Best-effort sweep before the error propagates.
+    const createRow = () => prisma.attachment.create({
       data: {
         entity_type: entityType as AttachmentEntity,
         entity_id: entityId,
@@ -332,6 +402,14 @@ export async function uploadAttachment(req: Request, res: Response) {
         uploader: { select: { id: true, first_name: true, last_name: true } },
       },
     });
+
+    let created: Awaited<ReturnType<typeof createRow>>;
+    try {
+      created = await createRow();
+    } catch (err) {
+      await supabaseAdmin.storage.from(STORAGE_BUCKET).remove([storagePath]).catch(() => undefined);
+      throw err;
+    }
 
     const attachment = { ...created, file_url: fileUrl };
 

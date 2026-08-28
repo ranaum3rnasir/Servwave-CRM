@@ -32,7 +32,7 @@ import { mockAuthAs, authHeader } from './helpers';
 import { assembleRoleViewModel, viewModelToGrants } from '../lib/permissions/roleViewModel';
 import { DEFAULT_GRANTS } from '../lib/permissions/defaultGrants';
 
-const OWN_JOB = { assignees: { some: { user_id: '{{userId}}' } } };
+const OWN_JOB = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } };
 const CREATED_BY_ME = { created_by_id: '{{userId}}' };
 const OWN_OR_CREATED = { OR: [OWN_JOB, CREATED_BY_ME] };
 

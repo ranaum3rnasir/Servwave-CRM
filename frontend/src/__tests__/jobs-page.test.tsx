@@ -6,6 +6,7 @@ import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
 import JobsPage from '@/pages/JobsPage';
 import { startOfMonthDay, endOfMonthDay } from '@/lib/date-range';
+import { DEFAULT_SCHEDULE_TIMEZONE } from '@/lib/schedule-tz';
 
 const mockApi = vi.mocked(api);
 
@@ -172,7 +173,7 @@ describe('JobsPage — generalized filter registry (Task 11)', () => {
     });
   });
 
-  it('clicking the "Unscheduled" (all-time) KPI tile applies {status:[UNASSIGNED]} with no date range', async () => {
+  it('clicking the "Unscheduled" (all-time) KPI tile applies {status:[UNSCHEDULED]} with no date range', async () => {
     renderWithProviders(<JobsPage />);
 
     await waitFor(() => {
@@ -185,7 +186,7 @@ describe('JobsPage — generalized filter registry (Task 11)', () => {
       const calls = jobsApiCalls();
       const lastCall = calls[calls.length - 1];
       expect(lastCall[1]).toEqual(
-        expect.objectContaining({ params: expect.objectContaining({ status: 'UNASSIGNED' }) })
+        expect.objectContaining({ params: expect.objectContaining({ status: 'UNSCHEDULED' }) })
       );
       // Only the status facet is active — no leftover scheduled range, assignee,
       // or needs_invoice from a previous preset (guards the KPI preset's exact shape).
@@ -216,8 +217,14 @@ describe('JobsPage — generalized filter registry (Task 11)', () => {
     // which would otherwise also match an unanchored /completed/i.
     fireEvent.click(screen.getByRole('button', { name: /^completed/i }));
 
-    const monthStart = startOfMonthDay();
-    const monthEnd = endOfMonthDay();
+    // #1634: the "scheduled" facet's month bounds are now the ORG's month, not
+    // the browser's. This harness's single mockApi.get resolver (JOB_LIST_FIXTURE,
+    // no `timezone` key) makes useOrganization()'s data.timezone undefined, so
+    // useScheduleTimezone() falls back to DEFAULT_SCHEDULE_TIMEZONE - exactly
+    // what JobsPage resolves too. Pinned explicitly rather than relying on the
+    // test runner's own local zone happening to agree.
+    const monthStart = startOfMonthDay(DEFAULT_SCHEDULE_TIMEZONE);
+    const monthEnd = endOfMonthDay(DEFAULT_SCHEDULE_TIMEZONE);
 
     await waitFor(() => {
       const calls = jobsApiCalls();

@@ -9,7 +9,7 @@
 --     Supabase-only objects.
 --   * IDEMPOTENT — each WHERE only matches non-canonical rows, so a second run
 --     touches 0 rows.
---   * SENTINEL CARVE-OUT — B&G-import placeholder phones ('bg-import-phone:%' and
+--   * SENTINEL CARVE-OUT — Lakeside-import placeholder phones ('bg-import-phone:%' and
 --     '(000) 000-0000') are deliberately left byte-for-byte unchanged so the
 --     frontend's isPlaceholderPhone() keeps hiding them (they must never become
 --     real-looking dialable digits).

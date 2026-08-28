@@ -52,6 +52,24 @@ describe('catalog — LogisticOrder subject', () => {
   });
 });
 
+// Editable record IDs (2026-08-19 plan, decision #7) - defense in depth, same shape as the
+// `approve` catalog check above: 'renumber' is deliberately scoped to Customer/Lead/Estimate/Job/
+// Invoice ONLY, so it must never become a catalog entry (and therefore never a role grant, see
+// THE GATE note in catalog.ts) on any subject outside that set.
+describe('catalog - renumber is scoped to exactly the 5 editable-record-id subjects', () => {
+  for (const subject of ['Customer', 'Lead', 'Estimate', 'Job', 'Invoice']) {
+    it(`has a catalog entry for renumber ${subject}`, () => {
+      expect(isCatalogEntry('renumber', subject)).toBe(true);
+    });
+  }
+
+  for (const subject of ['PurchaseOrder', 'LogisticOrder', 'Vendor', 'Inventory', 'User', 'Communication']) {
+    it(`does NOT expose renumber on ${subject}`, () => {
+      expect(isCatalogEntry('renumber', subject)).toBe(false);
+    });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // THE EMITTER half of the role-permission write path.
 //
@@ -75,8 +93,11 @@ describe('role-permission emitter — no cell can produce a capability-only acti
     return {
       role: 'DISPATCHER',
       matrix,
-      sensitive: { seeFinancials: true, managePayments: true, viewReports: true },
-      toggles: { dashboard: true, accountSettings: true, notifications: true, modifyDoneJobs: true, cancelJobs: true },
+      sensitive: { seeFinancials: true, managePayments: true, viewReports: true, editRecordIds: true },
+      toggles: {
+        dashboard: true, accountSettings: true, notifications: true, modifyDoneJobs: true, cancelJobs: true,
+        enRouteJobs: true, arriveJobs: true, startJobs: true, completeJobs: true, rescheduleJobs: true,
+      },
       scope: {},
       general: { description: '' },
     };

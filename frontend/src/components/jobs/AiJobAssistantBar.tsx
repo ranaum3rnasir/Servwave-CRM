@@ -18,7 +18,7 @@ export interface JobAssistantContext {
   customerName?: string | null;
   /** The job type / service, e.g. "Access Control Installation". */
   service?: string | null;
-  /** Job status (UNASSIGNED · SCHEDULED · IN_PROGRESS · COMPLETED · …). */
+  /** Job status (UNSCHEDULED · SCHEDULED · IN_PROGRESS · COMPLETED · …). */
   status?: string | null;
 }
 

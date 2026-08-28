@@ -24,20 +24,20 @@ const members: AssignableUser[] = [
 ];
 
 const freshJob: SchedulableEvent = {
-  id: 'job-1', type: 'job', number: 'J00041', title: 'Furnace tune-up', customer: 'Acme',
+  boardId: 'job-1', parentId: 'job-1', type: 'job', number: 'J00041', title: 'Furnace tune-up', customer: 'Acme',
   crew: [], ownerId: null, start: null, end: null, raw: {},
 };
 const secondJob: SchedulableEvent = {
-  id: 'job-2', type: 'job', number: 'J00042', title: 'Duct repair', customer: 'Globex',
+  boardId: 'job-2', parentId: 'job-2', type: 'job', number: 'J00042', title: 'Duct repair', customer: 'Globex',
   crew: [], ownerId: null, start: null, end: null, raw: {},
 };
 // State 3 — crewed but unscheduled (crew kept, no time).
 const crewedJob: SchedulableEvent = {
-  id: 'job-3', type: 'job', number: 'J00043', title: 'Rooftop swap', customer: 'Initech',
+  boardId: 'job-3', parentId: 'job-3', type: 'job', number: 'J00043', title: 'Rooftop swap', customer: 'Initech',
   crew: ['m-alice'], ownerId: null, start: null, end: null, raw: {},
 };
 const walkthrough: SchedulableEvent = {
-  id: 'wt-lead-1', type: 'walkthrough', number: 'L00012', title: 'Walkthrough · Acme', customer: 'Acme',
+  boardId: 'wt-lead-1', parentId: 'lead-1', type: 'walkthrough', number: 'L00012', title: 'Walkthrough · Acme', customer: 'Acme',
   crew: [], ownerId: null, start: null, end: null, raw: { id: 'lead-1' },
 };
 
@@ -130,13 +130,13 @@ describe('UnassignedBuckets — TG11 extensible bucket stack (Q8)', () => {
     expect(card).not.toBeNull();
     fireEvent.dragStart(card!, { dataTransfer: { setData: vi.fn(), effectAllowed: 'none' } });
     expect(onDragStartCard).toHaveBeenCalledTimes(1);
-    expect((onDragStartCard as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ id: 'job-1' });
+    expect((onDragStartCard as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ boardId: 'job-1' });
   });
 
   it('clicking a card calls onCardClick with the event', () => {
     const { onCardClick } = renderBuckets([freshJob]);
     fireEvent.click(screen.getByText('J00041'));
-    expect(onCardClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1' }));
+    expect(onCardClick).toHaveBeenCalledWith(expect.objectContaining({ boardId: 'job-1' }));
   });
 
   it('collapsing a bucket hides its cards (default expanded)', async () => {
@@ -207,7 +207,7 @@ describe('UnassignedBuckets — TG11 extensible bucket stack (Q8)', () => {
     it('clicks still open the (view-only) editor; the board-drag unschedule hint hides', () => {
       const { onCardClick } = renderBuckets([freshJob], { dragDisabled: true });
       fireEvent.click(screen.getByText('J00041'));
-      expect(onCardClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1' }));
+      expect(onCardClick).toHaveBeenCalledWith(expect.objectContaining({ boardId: 'job-1' }));
       expect(screen.queryByText(/Drag a board card back here/)).not.toBeInTheDocument();
     });
 

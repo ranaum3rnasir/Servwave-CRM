@@ -7,9 +7,6 @@ import { toast } from '@/components/ui/use-toast';
 import { extractApiError } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Heading } from '@/components/ui/heading';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -22,12 +19,16 @@ import {
 } from '@/components/ui/dialog';
 
 /**
- * Settings → Phone & SMS (master plan §5.6). Mirrors PaymentsListsPage's
- * gating pattern (`hasStripe` → `hasCtm`) with two additions Payments lacks:
- * a loading skeleton while the org loads and an error row on query failure.
- * Connection state is read from the org record; connect / disconnect /
- * check-a2p are page-local mutations against /api/organization (admin-only —
- * the same `update Organization` ability that reveals this nav entry).
+ * Settings -> Phone & SMS (master plan §5.6). Mirrors PaymentsListsPage's
+ * gating pattern with two additions Payments lacks: a loading skeleton while
+ * the org loads and an error row on query failure.
+ *
+ * The provider is never named or identified here: this page presents the
+ * phone service as ServWave's own (see the naming boundary in CLAUDE.md).
+ * Provisioning is therefore an ops action, not a self-serve form - an org
+ * that isn't set up is pointed at support rather than asked for an account
+ * identifier. Disconnect and the readiness refresh stay in the product
+ * because they are the customer's own decisions to make.
  */
 export default function PhoneSmsPage() {
   const { data: org, isLoading, isError } = useOrganization();
@@ -35,48 +36,24 @@ export default function PhoneSmsPage() {
   const canManage = ability.can('update', 'Organization');
   const qc = useQueryClient();
 
-  const [accountId, setAccountId] = useState('');
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
-  const connect = useMutation({
-    mutationFn: (ctm_account_id: string) =>
-      api.post('/api/organization/connect-ctm', { ctm_account_id }).then((r) => r.data),
-    onSuccess: (data: { numbers_imported?: number; sms_ready?: boolean; warnings?: string[] }) => {
-      qc.invalidateQueries({ queryKey: ['organization'] });
-      setAccountId('');
-      toast({
-        title: 'Phone system connected',
-        description: [
-          `${data.numbers_imported ?? 0} number(s) imported.`,
-          data.sms_ready ? 'SMS is ready.' : 'SMS not ready yet — check A2P status below.',
-          ...(data.warnings ?? []),
-        ].join(' '),
-      });
-    },
-    onError: (err) =>
-      toast({
-        variant: 'destructive',
-        title: "Couldn't connect the phone system",
-        description: extractApiError(err, 'Connection failed — try again.'),
-      }),
-  });
-
-  const checkA2p = useMutation({
+  const refreshSmsStatus = useMutation({
     mutationFn: () => api.post('/api/organization/connect-ctm/check-a2p').then((r) => r.data),
     onSuccess: (data: { sms_ready?: boolean }) => {
       qc.invalidateQueries({ queryKey: ['organization'] });
       toast({
-        title: data.sms_ready ? 'SMS is ready' : 'SMS not ready yet',
+        title: data.sms_ready ? 'Text messaging is active' : 'Registration still pending',
         description: data.sms_ready
-          ? 'The A2P campaign is approved — outgoing texts are enabled.'
-          : 'The A2P campaign is not approved yet. Check again later.',
+          ? 'Your business is registered - outgoing texts are enabled.'
+          : 'Your registration has not been approved yet. Check again later.',
       });
     },
     onError: (err) =>
       toast({
         variant: 'destructive',
-        title: "Couldn't check A2P status",
-        description: extractApiError(err, 'Status check failed — try again.'),
+        title: "Couldn't refresh the text messaging status",
+        description: extractApiError(err, 'Status check failed - try again.'),
       }),
   });
 
@@ -85,19 +62,19 @@ export default function PhoneSmsPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['organization'] });
       setConfirmDisconnect(false);
-      toast({ title: 'Phone system disconnected' });
+      toast({ title: 'Phone service turned off' });
     },
     onError: (err) => {
       setConfirmDisconnect(false);
       toast({
         variant: 'destructive',
-        title: "Couldn't disconnect the phone system",
-        description: extractApiError(err, 'Disconnect failed — try again.'),
+        title: "Couldn't turn off the phone service",
+        description: extractApiError(err, 'Disconnect failed - try again.'),
       });
     },
   });
 
-  // Loading skeleton (§5.6 — an addition over the Payments page).
+  // Loading skeleton (§5.6 - an addition over the Payments page).
   if (isLoading) {
     return (
       <div className="grid items-start gap-6 lg:grid-cols-2">
@@ -112,41 +89,35 @@ export default function PhoneSmsPage() {
     );
   }
 
-  // Error row (§5.6 — an addition over the Payments page).
+  // Error row (§5.6 - an addition over the Payments page).
   if (isError || !org) {
     return (
       <Card>
         <p className="text-sm text-danger">
-          Couldn&apos;t load the phone &amp; SMS settings — refresh the page to try again.
+          Couldn&apos;t load the phone &amp; SMS settings - refresh the page to try again.
         </p>
       </Card>
     );
   }
 
-  const hasCtm = Boolean(org.ctm_account_id);
+  const phoneActive = Boolean(org.ctm_account_id);
 
   return (
     <div className="space-y-6">
       <div className="grid items-start gap-6 lg:grid-cols-2">
-        {/* Connection card */}
+        {/* Phone service */}
         <Card className="space-y-4">
           <div>
-            <Heading level={3}>Phone System</Heading>
+            <h3 className="text-sm font-semibold text-text-primary">Phone System</h3>
             <p className="text-xs text-text-secondary">
-              Calls and texts run through the organization&apos;s connected phone system. Numbers
-              are managed under Communication → Phone → Numbers.
+              Calls and texts run on your ServWave phone service. Numbers are managed under
+              Communication &rarr; Phone &rarr; Numbers.
             </p>
           </div>
 
-          {hasCtm ? (
+          {phoneActive ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-text-primary">Connected</p>
-                <p className="truncate text-xs text-text-secondary">
-                  Phone system account ID:{' '}
-                  <span className="font-mono">{org.ctm_account_id}</span>
-                </p>
-              </div>
+              <Badge intent="success">Active</Badge>
               {canManage && (
                 <Button
                   variant="solid" tone="danger"
@@ -154,65 +125,37 @@ export default function PhoneSmsPage() {
                   onClick={() => setConfirmDisconnect(true)}
                   disabled={disconnect.isPending}
                 >
-                  Disconnect
+                  Turn off
                 </Button>
               )}
             </div>
-          ) : canManage ? (
-            <div className="space-y-2">
-              <Label className="text-xs">Phone system account ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  value={accountId}
-                  onChange={(e) => setAccountId(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && accountId.trim() && !connect.isPending) {
-                      e.preventDefault();
-                      connect.mutate(accountId.trim());
-                    }
-                  }}
-                  placeholder="Account ID"
-                  className="flex-1"
-                  maxLength={40}
-                />
-                <Button
-                  size="sm"
-                  onClick={() => connect.mutate(accountId.trim())}
-                  disabled={!accountId.trim() || connect.isPending}
-                >
-                  {connect.isPending ? 'Connecting…' : 'Connect'}
-                </Button>
-              </div>
-              <p className="text-xs text-text-secondary">
-                Numbers and webhooks are imported automatically on connect.
-              </p>
-            </div>
           ) : (
             <p className="text-sm text-text-secondary">
-              (Phone system not connected — contact support)
+              The phone service isn&apos;t set up for this organization yet - contact support to
+              enable it.
             </p>
           )}
         </Card>
 
-        {/* SMS readiness card */}
+        {/* Text messaging readiness */}
         <Card className="space-y-4">
           <div>
-            <Heading level={3}>Text Messaging (SMS)</Heading>
+            <h3 className="text-sm font-semibold text-text-primary">Text Messaging</h3>
             <p className="text-xs text-text-secondary">
-              Outgoing texts require an approved A2P campaign on the connected phone system
-              account.
+              Outgoing texts require carrier registration for your business. ServWave handles the
+              registration for you.
             </p>
           </div>
 
-          {hasCtm ? (
+          {phoneActive ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
               <div className="flex min-w-0 items-center gap-2">
                 <Badge intent={org.ctm_sms_ready ? 'success' : 'warning'}>
-                  {org.ctm_sms_ready ? 'SMS ready' : 'Not ready'}
+                  {org.ctm_sms_ready ? 'Active' : 'Pending registration'}
                 </Badge>
                 {!org.ctm_sms_ready && (
                   <span className="truncate text-xs text-text-secondary">
-                    A2P campaign pending approval
+                    Awaiting carrier approval
                   </span>
                 )}
               </div>
@@ -220,49 +163,40 @@ export default function PhoneSmsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => checkA2p.mutate()}
-                  disabled={checkA2p.isPending}
+                  onClick={() => refreshSmsStatus.mutate()}
+                  disabled={refreshSmsStatus.isPending}
                 >
-                  {checkA2p.isPending ? 'Checking…' : 'Check A2P status'}
+                  {refreshSmsStatus.isPending ? 'Refreshing…' : 'Refresh status'}
                 </Button>
               )}
             </div>
           ) : (
             <p className="text-sm italic text-text-secondary">
-              Connect the phone system to enable texting.
+              Set up the phone service to enable texting.
             </p>
           )}
         </Card>
       </div>
 
-      {/* Manual per-org phone-system onboarding steps (owner-executed — plan §2):
-          the consent greeting + recording retention live with the provider, never
-          here. Provider is never named in user-facing copy. */}
-      <p className="text-xs text-text-secondary">
-        Manual setup: the recording-consent greeting and the recording retention policy are
-        configured with your phone system provider, not in ServWave. Contact support if you need
-        these changed.
-      </p>
-
       <Dialog open={confirmDisconnect} onOpenChange={(o) => !o && setConfirmDisconnect(false)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Disconnect the phone system?</DialogTitle>
+            <DialogTitle>Turn off the phone service?</DialogTitle>
             <DialogDescription>
-              Calls and texts will stop syncing into ServWave. Your phone system account, its
-              numbers, and its call history are not affected, and you can reconnect at any time.
+              Calls and texts will stop syncing into ServWave. Your numbers and call history are
+              kept, and you can turn the service back on at any time.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setConfirmDisconnect(false)}>
-              Keep connected
+              Keep it on
             </Button>
             <Button
               variant="solid" tone="danger"
               onClick={() => disconnect.mutate()}
               disabled={disconnect.isPending}
             >
-              {disconnect.isPending ? 'Disconnecting…' : 'Disconnect'}
+              {disconnect.isPending ? 'Turning off…' : 'Turn off'}
             </Button>
           </DialogFooter>
         </DialogContent>

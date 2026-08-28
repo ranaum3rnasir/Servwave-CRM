@@ -7,7 +7,7 @@ export const dashboardSeed: DashboardResponse = {
     jobs_today: { total: 18, scheduled: 8, in_progress: 7, completed: 10, vs_yesterday: 2 },
     revenue_mtd: { invoiced: 312000, collected: 277312, target: 300000, pct_of_goal: 92, vs_last_month_pct: 18 },
     ar: { total: 1454732, current: 731366, over_30: 311000, over_60: 412366 },
-    leads_open: { count: 28, unassigned: 6, need_followup_today: 9 },
+    leads_open: { count: 28, unassigned: 6 },
     close_rate: { rate: 44, won: 22, lost: 28, vs_last_period_pp: 3 },
     collected_today: { amount: 30755, jobs_done: 10 },
     recurring: { mrr: 48200, active_plans: 142 },
@@ -86,9 +86,11 @@ export const dashboardSeed: DashboardResponse = {
     { id: 'cu4', in_label: 'in 18 hours', title: 'LVD', address: '2170 University Ave, The Bronx NY' },
   ],
   activity: [
-    { id: 'e1', event_type: 'ESTIMATE_VIEWED', description: 'Client viewed estimate E04188', created_at: new Date(Date.now() - 18 * 60_000).toISOString(), creator_name: null },
-    { id: 'e2', event_type: 'PAYMENT_RECEIVED', description: 'Payment of $1,450 collected', created_at: new Date(Date.now() - 42 * 60_000).toISOString(), creator_name: 'Priya' },
-    { id: 'e3', event_type: 'JOB_COMPLETED', description: 'Job J04201 marked complete', created_at: new Date(Date.now() - 70 * 60_000).toISOString(), creator_name: 'Rami' },
+    { id: 'e1', event_type: 'ESTIMATE_VIEWED', description: 'Client viewed estimate E04188', created_at: new Date(Date.now() - 18 * 60_000).toISOString(), creator_name: null, entity_deleted: false, entity_label: null },
+    { id: 'e2', event_type: 'PAYMENT_RECEIVED', description: 'Payment of $1,450 collected', created_at: new Date(Date.now() - 42 * 60_000).toISOString(), creator_name: 'Priya', entity_deleted: false, entity_label: null },
+    { id: 'e3', event_type: 'JOB_COMPLETED', description: 'Job J04201 marked complete', created_at: new Date(Date.now() - 70 * 60_000).toISOString(), creator_name: 'Rami', entity_deleted: false, entity_label: null },
+    // A task's timeline outlives the task, so the feed's deleted-entity branch has a fixture here.
+    { id: 'e4', event_type: 'DELETED', description: 'deleted the task', created_at: new Date(Date.now() - 95 * 60_000).toISOString(), creator_name: 'Priya', entity_deleted: true, entity_label: 'T00042 · Inspect compressor' },
   ],
   generated_at: new Date().toISOString(),
 };

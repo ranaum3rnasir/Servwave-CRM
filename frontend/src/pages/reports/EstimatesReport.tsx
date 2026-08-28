@@ -9,13 +9,14 @@ import { Heading } from '@/components/ui/heading';
 import { ChartCard } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { chartPalette, token } from '@/design-system/tokens';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
-import { MultiSelectFilter, Sparkline } from './_shared';
+import { MultiSelectFilter } from './_shared';
+import { Sparkline } from '@/components/reports/ReportIndicators';
 import { EstimateDetailPanel } from './EstimateDetailPanel';
-import { useEstimatesReport } from './estimates-report-data';
-import { bucketStatus, BUCKET_LABEL, type EstimateRow, type StatusKey } from './estimates-report-logic';
+import { useEstimatesReport } from '@/lib/reports/estimates-report-data';
+import { bucketStatus, BUCKET_LABEL, type EstimateRow, type StatusKey } from '@/lib/reports/estimates-report-logic';
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, Cell, LabelList, Legend,

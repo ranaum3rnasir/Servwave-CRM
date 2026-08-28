@@ -5,13 +5,7 @@ import { extractApiError } from '@/lib/utils';
 import { useLogisticOrders, type LogisticOrderListRow } from '@/lib/api/logisticOrders';
 import { useModuleAccess } from '@/lib/entitlements';
 import { StatusBadge } from '@/components/data/status-badge';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
+import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 
 interface DeleteInvoiceDialogProps {
@@ -68,57 +62,57 @@ export function DeleteInvoiceDialog({
   });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Delete Invoice</DialogTitle>
-          <DialogDescription>This action cannot be undone.</DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          {loRows.length > 0 && (
-            <div className="space-y-2 rounded-lg border border-border bg-background-light p-3 text-sm">
-              <p className="font-medium text-text-primary">Logistic orders on this invoice</p>
-              <ul className="space-y-1.5">
-                {loRows.map((lo) => (
-                  <li key={lo.id} className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <code className="truncate font-mono text-xs text-text-primary">{lo.number}</code>
-                      <StatusBadge domain="logisticOrder" status={lo.status} />
-                    </span>
-                    <span className="shrink-0 text-xs text-text-secondary">{loConsequence(lo)}</span>
-                  </li>
-                ))}
-              </ul>
-              <p className="text-xs text-text-secondary">
-                Processed orders return their stock automatically.
-              </p>
-            </div>
-          )}
-
-          {syncedLineCount > 0 && (
-            <div className="flex gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{syncedLineCount} synced inventory item(s) will be returned to stock.</span>
-            </div>
-          )}
-
-          {mutation.error && (
-            <p className="text-sm text-danger">
-              {extractApiError(mutation.error, 'Failed to delete invoice')}
+    <Modal
+      open={open}
+      onClose={() => onOpenChange(false)}
+      title="Delete Invoice"
+      subtitle="This action cannot be undone."
+      width="sm"
+      footer={
+        <>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={mutation.isPending}>
+            Cancel
+          </Button>
+          <Button variant="solid" tone="danger" onClick={() => mutation.mutate()} disabled={mutation.isPending}>
+            {mutation.isPending ? 'Deleting...' : 'Delete Invoice'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {loRows.length > 0 && (
+          <div className="space-y-2 rounded-lg border border-border bg-background-light p-3 text-sm">
+            <p className="font-medium text-text-primary">Logistic orders on this invoice</p>
+            <ul className="space-y-1.5">
+              {loRows.map((lo) => (
+                <li key={lo.id} className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <code className="truncate font-mono text-xs text-text-primary">{lo.number}</code>
+                    <StatusBadge domain="logisticOrder" status={lo.status} />
+                  </span>
+                  <span className="shrink-0 text-xs text-text-secondary">{loConsequence(lo)}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-text-secondary">
+              Processed orders return their stock automatically.
             </p>
-          )}
-
-          <div className="flex justify-end gap-3">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={mutation.isPending}>
-              Cancel
-            </Button>
-            <Button variant="solid" tone="danger" onClick={() => mutation.mutate()} disabled={mutation.isPending}>
-              {mutation.isPending ? 'Deleting...' : 'Delete Invoice'}
-            </Button>
           </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+        )}
+
+        {syncedLineCount > 0 && (
+          <div className="flex gap-2 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{syncedLineCount} synced inventory item(s) will be returned to stock.</span>
+          </div>
+        )}
+
+        {mutation.error && (
+          <p className="text-sm text-danger">
+            {extractApiError(mutation.error, 'Failed to delete invoice')}
+          </p>
+        )}
+      </div>
+    </Modal>
   );
 }

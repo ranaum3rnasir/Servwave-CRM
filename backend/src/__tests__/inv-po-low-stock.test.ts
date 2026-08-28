@@ -109,7 +109,7 @@ describe('GET /api/inventory/purchase-orders/low-stock-proposals (D16 entry 3, Q
     mockPrisma.inventoryLocation.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
-      .get('/api/inventory/purchase-orders/low-stock-proposals?locationId=99555555-0224-9999-9999-995555550224')
+      .get('/api/inventory/purchase-orders/low-stock-proposals?locationId=99999999-9999-9999-9999-999999999999')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);

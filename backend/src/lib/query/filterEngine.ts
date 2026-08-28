@@ -1,6 +1,8 @@
 import { parseArrayParam } from './parseArrayParam';
 import { tenantWhere } from '../tenant';
 import { prisma as defaultPrisma } from '../prisma';
+import { isBareOrgDay, orgDayRange } from '../orgDayRange';
+import { DEFAULT_TIMEZONE, getRequestOrgTimezone } from '../timezone';
 import type { TagEntityType } from '../tags';
 
 export type MultiApply = (where: Record<string, any>, values: string[]) => void;
@@ -191,6 +193,18 @@ export async function applyFilters(
   facets: FacetDef[],
   prisma: PrismaClientLike = defaultPrisma as unknown as PrismaClientLike,
 ): Promise<void> {
+  /**
+   * The org clock, resolved ONLY when a bound actually needs it. A pair of full ISO instants
+   * (the schedule board, the copilot job tool) is zone-independent, so those callers must not
+   * pay for a database lookup - and an unauthenticated/`user`-less caller resolves to the
+   * shared default without one either. `getRequestOrgTimezone` memoizes on the request, so
+   * several dateRange facets on one list (e.g. invoices' `created` + `due`) share one lookup.
+   */
+  const timezoneFor = async (after: unknown, before: unknown): Promise<string> => {
+    if (!isBareOrgDay(after) && !isBareOrgDay(before)) return DEFAULT_TIMEZONE;
+    return getRequestOrgTimezone(req);
+  };
+
   for (const facet of facets) {
     if (facet.kind === 'multi') {
       facet.apply(where, parseArrayParam(req.query[facet.param]));
@@ -198,9 +212,14 @@ export async function applyFilters(
       const after = req.query[facet.afterParam];
       const before = req.query[facet.beforeParam];
       if (!after && !before) continue;
-      const range: { gte?: Date; lte?: Date } = {};
-      if (after) range.gte = new Date(String(after));
-      if (before) range.lte = new Date(String(before));
+      // The wire contract (frontend/src/lib/filters/types.ts) sends BARE org-zone day
+      // strings, which `new Date('YYYY-MM-DD')` used to read as midnight UTC - dropping the
+      // inclusive "to" day and anchoring both edges to the wrong clock. `orgDayRange` reads a
+      // bare day on the ORG's clock and leaves a full ISO instant exactly as it was; see
+      // lib/orgDayRange.ts. The org lookup is memoized per request and skipped entirely when
+      // neither bound is a bare day.
+      const range = orgDayRange(after, before, await timezoneFor(after, before));
+      if (!range) continue;
       where[facet.column] = { ...(where[facet.column] ?? {}), ...range };
     } else if (facet.kind === 'countRange') {
       await applyCountRange(where, req, facet, prisma);

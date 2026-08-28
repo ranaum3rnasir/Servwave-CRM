@@ -78,6 +78,16 @@ beforeEach(() => {
         count: vi.fn().mockResolvedValue(0),
         create: vi.fn().mockResolvedValue({ id: 'pv1', visit_number: 1 }),
       },
+      // S8 (D6): scheduleVisit books a real job VISIT for the plan's trip.
+      visit: {
+        create: vi.fn().mockResolvedValue({ id: 'jv1', visit_seq: 1 }),
+        aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+      },
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue([]),
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
     });
   });

@@ -53,6 +53,19 @@ const SUB_B = '5a000000-0000-0000-0000-0000000000a2';
  * array form, so mirror the real dual signature.
  */
 function installTransactionPassthrough() {
+  // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so the job needs one -
+  // otherwise /assign answers 400 (unexpressible) and the sub-status behaviour under test is
+  // never reached. visit-crew.test.ts pins the visitless 400 case deliberately.
+  (prisma as unknown as { visit: { findMany: ReturnType<typeof vi.fn> } }).visit.findMany.mockResolvedValue([
+    {
+      id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+      visit_seq: 1, status: 'SCHEDULED',
+      scheduled_at: new Date('2026-08-10T15:00:00.000Z'),
+      scheduled_end: new Date('2026-08-10T17:00:00.000Z'),
+      is_all_day: false, created_at: new Date('2026-08-01T00:00:00.000Z'),
+      en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+    },
+  ]);
   mockPrisma.$transaction.mockImplementation(async (arg: unknown) =>
     typeof arg === 'function'
       ? (arg as (tx: unknown) => Promise<unknown>)(mockPrisma)
@@ -450,9 +463,10 @@ describe('POST /api/jobs/:id/sub-status', () => {
  * not write the key at all (the fence against over-clearing).
  */
 const VERBS: { path: string; body?: object; movingFrom: JobStatus; nonMovingFrom: JobStatus; nonMovingBody?: object }[] = [
-  { path: 'unassign', movingFrom: 'IN_PROGRESS', nonMovingFrom: 'UNASSIGNED' },
-  { path: 'en-route', movingFrom: 'IN_PROGRESS', nonMovingFrom: 'EN_ROUTE' },
-  { path: 'arrive', movingFrom: 'IN_PROGRESS', nonMovingFrom: 'ON_SITE' },
+  { path: 'unassign', movingFrom: 'IN_PROGRESS', nonMovingFrom: 'UNSCHEDULED' },
+  // en-route and arrive are NOT in this matrix from multi-visit S4: EN_ROUTE and ON_SITE retired
+  // from JobStatus (D17), so neither verb moves the job's status at all any more and there is no
+  // status change to invalidate a sub_status. Their milestone now lands on the VISIT.
   { path: 'start', movingFrom: 'SCHEDULED', nonMovingFrom: 'IN_PROGRESS' },
   { path: 'complete', movingFrom: 'IN_PROGRESS', nonMovingFrom: 'COMPLETED' },
   { path: 'cancel', body: { cancelled_reason: 'customer cancelled' }, movingFrom: 'IN_PROGRESS', nonMovingFrom: 'CANCELLED' },

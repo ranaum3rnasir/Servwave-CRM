@@ -19,13 +19,19 @@ import * as React from 'react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
-import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 
 export interface ModalEditAction { label: string; onClick: () => void; icon?: React.ReactNode; }
 
-/** Max width. The four names already match today's rendered geometry - no value remap needed. */
-export type ModalWidth = 'sm' | 'md' | 'lg' | 'xl';
+/**
+ * Max width. `sm`..`xl` already matched today's rendered geometry, so no value
+ * was remapped; `xs` is an ADDITION, and it is `DialogWidth`'s own `xs`
+ * (max-w-sm). Without it the narrow confirm dialogs - void payment, void
+ * invoice, record payment - could not move onto Modal without getting wider,
+ * so they each kept hand-rolling a header and a footer instead. Naming the
+ * width they already use is cheaper than letting them stay off the component.
+ */
+export type ModalWidth = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
 
 export interface ModalProps {
   open: boolean;
@@ -34,6 +40,8 @@ export interface ModalProps {
   subtitle?: React.ReactNode;
   /** Max width. Defaults to `md` (max-w-lg), today's geometry - unmoved. */
   width?: ModalWidth;
+  /** Forwarded to the dialog panel, for call sites a test reaches for by id. */
+  'data-testid'?: string;
   /**
    * @deprecated Use `width` - same values, same rendered widths. Kept live so
    * existing call sites are unaffected; retired in phase 12c.
@@ -45,14 +53,23 @@ export interface ModalProps {
   children: React.ReactNode;
 }
 const WIDTH: Record<ModalWidth, string> = {
-  sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl',
+  xs: 'max-w-sm', sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl',
 };
-export function Modal({ open, onClose, title, subtitle, width: widthProp, size, footer, lockEscape, editAction, children }: ModalProps) {
+export function Modal({
+  open, onClose, title, subtitle, width: widthProp, size, footer, lockEscape, editAction, children,
+  'data-testid': testId,
+}: ModalProps) {
   const width = widthProp ?? size ?? 'md';
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      {/* The height cap and the scroll are `DialogContent`'s own now, so this
+          passes only a width. The 90vh it used to add was both looser than the
+          primitive's cap and measured against the wrong viewport on a phone,
+          and it left every dialog that reaches for DialogContent directly with
+          no cap at all - which is the half that was getting cropped. */}
       <DialogContent
-        className={cn(WIDTH[width], 'max-h-[90vh] overflow-y-auto')}
+        className={WIDTH[width]}
+        data-testid={testId}
         onEscapeKeyDown={lockEscape ? (e) => e.preventDefault() : undefined}
       >
         <DialogHeader>

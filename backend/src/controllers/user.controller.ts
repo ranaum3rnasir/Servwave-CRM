@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { supabaseAdmin, supabaseAuth } from '../lib/supabase';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -21,6 +21,7 @@ import {
 } from '../lib/permissions/userCapabilities';
 import { clearUserOverrideCache } from '../lib/permissions/userOverrideCache';
 import { emit } from '../services/notifications/notificationService';
+import { sweepDeactivatedUserFromTasks, announceTaskHandovers, STRANDED_IDS_REPORTED } from '../lib/tasks/deactivation';
 import { signAvatarPaths, resolveAvatarUrl, removeAvatarObject } from '../lib/avatar';
 
 const userSelect = {
@@ -149,9 +150,27 @@ export async function list(req: Request, res: Response) {
         // Union so a referenced user (inactive, or a role outside the assignable pool) is
         // never dropped from the roster just because they're no longer eligible for NEW
         // assignments — fixes filters missing genuinely-assigned non-technician users.
-        const referencedClauses: Record<string, unknown>[] =
-          referenced === 'jobs' ? [{ job_crew_memberships: { some: {} } }]
-          : referenced === 'leads' ? [{ lead_crew_memberships: { some: {} } }, { commission_owned_leads: { some: {} } }]
+        // Typed as Prisma.UserWhereInput[] rather than Record<string, unknown>[] on purpose:
+        // the untyped shape is what let `job_crew_memberships` survive the S8 teardown as a
+        // 500 (the relation was dropped with job_assignees). tsc now rejects a dead relation.
+        const referencedClauses: Prisma.UserWhereInput[] =
+          // Since multi-visit S8 there is no job_assignees table — "the job's crew" is the
+          // derived union over its visits, so a user is referenced-in-jobs when they hold a
+          // visit assignment whose visit hangs off a Job. `job_id: { not: null }` is the same
+          // set as `purpose: 'WORK'` (the visits_exactly_one_parent CHECK guarantees it) and
+          // rides the @@index([job_id]).
+          referenced === 'jobs' ? [{ visit_assignments: { some: { visit: { job_id: { not: null } } } } }]
+          // Leads keep their direct joins (lead_assignees and the commission owner both still
+          // exist), but S1 moved the WALKTHROUGH performer onto visits, so those two alone miss
+          // anyone whose only tie to a lead is a walkthrough assignment. Unlike the jobs arm this
+          // was never a 500, just a silent gap: the assignable arm still returns such a user while
+          // they stay active, and drops them the moment they go inactive. `lead_id: { not: null }`
+          // mirrors the jobs clause and rides @@index([lead_id]).
+          : referenced === 'leads' ? [
+            { lead_crew_memberships: { some: {} } },
+            { commission_owned_leads: { some: {} } },
+            { visit_assignments: { some: { visit: { lead_id: { not: null } } } } },
+          ]
           : [];
         where.OR = [assignableWhere, ...referencedClauses];
       } else {
@@ -405,6 +424,46 @@ export async function getById(req: Request, res: Response) {
   }
 }
 
+/**
+ * Task people-arrays are uuid[] with no FK, so a deactivated user's id survives in every
+ * `assignee_ids` / `watcher_ids` that named them until something removes it. Both routes that can
+ * flip `is_active` to false call this; see lib/tasks/deactivation.ts for the fallback rule.
+ *
+ * FAILURE-ISOLATED, and deliberately so: the seat is already freed by the time this runs, and the
+ * backfill migration repairs anything a failure leaves behind. Turning a successful deactivation
+ * into a 500 because a task could not be reassigned would be the worse trade.
+ */
+async function sweepTasksAfterDeactivation(req: Request, userId: string): Promise<void> {
+  try {
+    const sweep = await sweepDeactivatedUserFromTasks({
+      orgId: req.user!.organization_id,
+      userId,
+      actorId: req.user!.id,
+    });
+    // Detached ON PURPOSE (see announceTaskHandovers): every handover ends in a Supabase
+    // Realtime channel round trip, and the rows are already committed by now.
+    void announceTaskHandovers(req.user!.organization_id, req.user!.id, sweep.reassigned);
+    // A sweep that stranded everything updated nothing, and is the case most worth an audit row.
+    if (!sweep.updated && !sweep.stranded.length) return;
+    void logAudit({
+      req, action: 'user.tasks_swept', resourceType: 'User', resourceId: userId,
+      metadata: {
+        tasks_updated: sweep.updated,
+        reassigned: sweep.reassigned.length,
+        // `failed` is the count a chunk failure left unwritten. Those rows still name the user,
+        // so the next sweep of them picks them up; the ones already counted above do not.
+        failed: sweep.failed,
+        stranded: sweep.stranded.length,
+        // The ids, not just the count: nothing else can find these rows again (see
+        // STRANDED_IDS_REPORTED).
+        stranded_task_ids: sweep.stranded.slice(0, STRANDED_IDS_REPORTED),
+      },
+    });
+  } catch (err) {
+    logger.error('Task people-array sweep after deactivation failed:', err);
+  }
+}
+
 export async function update(req: Request, res: Response) {
   try {
     // Guard against self-demotion lockout: an admin must not change their own
@@ -485,6 +544,7 @@ export async function update(req: Request, res: Response) {
     });
 
     clearTokenCache(param(req, 'id'));
+    if (data.is_active === false) await sweepTasksAfterDeactivation(req, param(req, 'id'));
     void logAudit({ req, action: 'user.updated', resourceType: 'User', resourceId: param(req, 'id'), metadata: { fields: Object.keys(data) } });
     if (data.role !== undefined) {
       void logAudit({ req, action: 'user.role_changed', resourceType: 'User', resourceId: param(req, 'id'), metadata: { role: data.role } });
@@ -525,6 +585,7 @@ export async function deactivate(req: Request, res: Response) {
     });
 
     clearTokenCache(param(req, 'id'));
+    await sweepTasksAfterDeactivation(req, param(req, 'id'));
     void logAudit({ req, action: 'user.deactivated', resourceType: 'User', resourceId: param(req, 'id') });
     res.json({ message: 'User deactivated' });
   } catch (err) {
@@ -552,8 +613,13 @@ export const DELETE_BLOCKING_RELATIONS = {
   commission_owned_leads: true,
   dispatched_jobs: true,
   service_plans_sold: true,
+  // Issue 04 widened what this one blocks: a task's timeline now OUTLIVES the task, so a user
+  // whose whole history was creating and deleting one task still holds events here. That is the
+  // point - `created_by` on those rows is the only surviving record of who did it, and the
+  // relation is SetNull, so a hard delete would blank the trail the issue exists to keep. Do not
+  // relax this entry to unblock a deletion.
   timeline_events: true,
-  cancelled_walkthroughs: true,
+  cancelled_visits: true,
 } as const;
 
 export const DELETE_RELATION_LABELS: Record<string, string> = {
@@ -571,7 +637,7 @@ export const DELETE_RELATION_LABELS: Record<string, string> = {
   dispatched_jobs: 'jobs dispatched',
   service_plans_sold: 'service plans sold',
   timeline_events: 'timeline events',
-  cancelled_walkthroughs: 'walkthrough cancellations',
+  cancelled_visits: 'walkthrough cancellations',
 };
 
 // Best-effort removal of the Supabase Auth account by email. Prisma id ≠ Supabase

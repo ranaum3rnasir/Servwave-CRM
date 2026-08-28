@@ -103,7 +103,7 @@ import { Text } from '@/components/ui/text';
                                              colour and no weight at all)
          x1  flex items-center gap-2 text-2xl font-semibold   ReportsPage
          x1  mb-2 text-xl font-bold text-primary              UpgradePage
-         x1  text-base font-semibold         phone/PhoneShell (separate app shell)
+         x1  text-base font-semibold         v2/communication/PhoneTabPage (separate app shell)
 
    WHY THERE IS NO `scale` / `weight` / `tone` PASSTHROUGH
    Forwarding Heading's three axes would "cover" 9 more sites by reproducing

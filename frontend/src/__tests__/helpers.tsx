@@ -3,6 +3,7 @@ import { render, RenderOptions } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { AbilityProvider } from '@/contexts/AbilityContext';
+import { TooltipProvider as KitTooltipProvider } from '@/ui-kit/components/ui/tooltip';
 import type { AppAbility } from '@/lib/ability';
 
 // ─── Test Query Client ────────────────────────────────────
@@ -35,11 +36,19 @@ export function renderWithProviders(
   const queryClient = createTestQueryClient();
 
   function Wrapper({ children }: { children: React.ReactNode }) {
+    // App.tsx:69 wraps the entire route table in one KitTooltipProvider, so any
+    // routed page may render a kit <Tooltip> without providing its own. Mirroring
+    // that here keeps the harness honest: without it a page that tooltips
+    // anything throws "`Tooltip` must be used within `TooltipProvider`" in the
+    // test and works perfectly in the app, which is a harness defect reported as
+    // a product one. Same delay as the app so nothing else diverges.
     const tree = (
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={initialEntries}>
-          {children}
-        </MemoryRouter>
+        <KitTooltipProvider delayDuration={320}>
+          <MemoryRouter initialEntries={initialEntries}>
+            {children}
+          </MemoryRouter>
+        </KitTooltipProvider>
       </QueryClientProvider>
     );
     return ability ? <AbilityProvider ability={ability}>{tree}</AbilityProvider> : tree;

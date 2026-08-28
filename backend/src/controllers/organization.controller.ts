@@ -13,8 +13,7 @@ import { PREVIEW_ESTIMATE_FIXTURE, PREVIEW_INVOICE_FIXTURE } from '../lib/pdf/pr
 import { writeSettingsAudit, logAudit } from '../lib/audit';
 import {
   acceptedPaymentMethodsSchema,
-  assertAcceptedPaymentMethodsValid,
-  PaymentMethodsError,
+  resolveAcceptedPaymentMethods,
 } from '../lib/payment-methods';
 import { canSeePricing } from '../lib/permissions/enforce';
 import { effectiveSenderLocalPart, senderDomainOf } from '../lib/email';
@@ -355,6 +354,13 @@ export async function maxNumberForTx(
   table: 'leads' | 'estimates' | 'jobs' | 'invoices' | 'customers' | 'service_plans',
   column: 'lead_number' | 'estimate_number' | 'job_number' | 'invoice_number' | 'customer_number' | 'service_plan_number',
   orgId: string,
+  // When true, excludes hand-typed rows (number_is_custom) from the scan, so a single
+  // custom number can never permanently raise the settings-page floor for that entity's
+  // automatic series — the collision check should only ever compare a new next-number
+  // against numbers the allocator itself issued. Defaults false, preserving today's
+  // behavior for every existing call site (service_plans has no number_is_custom column
+  // and must always pass false).
+  excludeCustom = false,
 ): Promise<number> {
   // Highest already-issued number for this entity, or 0 if none. Extract each row's TRAILING
   // digit-run and take the MAX — the SAME extraction the allocator self-heal uses (see
@@ -372,10 +378,13 @@ export async function maxNumberForTx(
   // hardcoded call sites below — never request data — and the regex is a constant, so the
   // Prisma.raw() over those closed identifiers holds no user-controlled SQL sink even if a
   // future refactor wired an identifier to user input. orgId stays a bound parameter. (F-50)
+  // Hardcoded literal, same Prisma.raw-of-a-literal safety posture as the rest of this
+  // function — never derived from caller input.
+  const excludeCustomFilter = excludeCustom ? Prisma.raw('AND NOT number_is_custom') : Prisma.empty;
   const rows = await tx.$queryRaw<Array<{ max_num: number | null }>>`
     SELECT MAX((SUBSTRING(${Prisma.raw(column)} FROM '[0-9]+$'))::int) AS max_num
     FROM ${Prisma.raw(table)}
-    WHERE organization_id = ${orgId}::uuid
+    WHERE organization_id = ${orgId}::uuid ${excludeCustomFilter}
   `;
   return rows[0]?.max_num ?? 0;
 }
@@ -409,7 +418,6 @@ export const updateOrganization = async (req: Request, res: Response) => {
         where: { id: orgId },
         select: {
           stripe_charges_enabled: true,
-          accepted_payment_methods: true,
         },
       });
       if (!current) throw new HttpError(404, 'Organization not configured');
@@ -422,18 +430,16 @@ export const updateOrganization = async (req: Request, res: Response) => {
       // next-number is greater than every number already issued, so identifiers can
       // never duplicate.
 
-      // §4.5 — payment-method business rules (CARD requires Stripe; once CARD is
-      // enabled with Stripe set, it can't be removed). Zod already validated the
-      // array shape + enum values above.
+      // §4.5 — CARD is server-owned, not a client-settable member of this array: it is
+      // derived from stripe_charges_enabled (see resolveAcceptedPaymentMethods for why this
+      // resolves rather than validates). The row is already locked FOR UPDATE above, so the
+      // charges flag read here cannot race the account.updated webhook. Zod already validated
+      // the array shape + enum values.
       if (body.accepted_payment_methods !== undefined) {
-        const submitted = body.accepted_payment_methods as PaymentMethod[];
-        const previous = ((current.accepted_payment_methods as PaymentMethod[] | null) ?? []);
-        try {
-          assertAcceptedPaymentMethodsValid(submitted, current.stripe_charges_enabled, previous);
-        } catch (err) {
-          if (err instanceof PaymentMethodsError) throw new HttpError(err.status, err.message);
-          throw err;
-        }
+        body.accepted_payment_methods = resolveAcceptedPaymentMethods(
+          body.accepted_payment_methods as PaymentMethod[],
+          current.stripe_charges_enabled,
+        );
       }
 
       // Collision guard — a changed "next number" must be strictly greater than the highest
@@ -442,17 +448,17 @@ export const updateOrganization = async (req: Request, res: Response) => {
       // ahead, never go back). Backstops: the allocator self-heals to max+1 (lib/numbering.ts)
       // and the DB composite unique on (organization_id, *_number) is the ultimate guarantee.
       const NEXT_NUMBER_CHECKS = [
-        { key: 'lead_next_number',         table: 'leads',         column: 'lead_number',         label: 'Leads' },
-        { key: 'estimate_next_number',     table: 'estimates',     column: 'estimate_number',     label: 'Estimates' },
-        { key: 'job_next_number',          table: 'jobs',          column: 'job_number',          label: 'Jobs' },
-        { key: 'invoice_next_number',      table: 'invoices',      column: 'invoice_number',      label: 'Invoices' },
-        { key: 'customer_next_number',     table: 'customers',     column: 'customer_number',     label: 'Customers' },
-        { key: 'service_plan_next_number', table: 'service_plans', column: 'service_plan_number', label: 'Service Plans' },
+        { key: 'lead_next_number',         table: 'leads',         column: 'lead_number',         label: 'Leads',         excludeCustom: true },
+        { key: 'estimate_next_number',     table: 'estimates',     column: 'estimate_number',     label: 'Estimates',     excludeCustom: true },
+        { key: 'job_next_number',          table: 'jobs',          column: 'job_number',          label: 'Jobs',          excludeCustom: true },
+        { key: 'invoice_next_number',      table: 'invoices',      column: 'invoice_number',      label: 'Invoices',      excludeCustom: true },
+        { key: 'customer_next_number',     table: 'customers',     column: 'customer_number',     label: 'Customers',     excludeCustom: true },
+        { key: 'service_plan_next_number', table: 'service_plans', column: 'service_plan_number', label: 'Service Plans', excludeCustom: false },
       ] as const;
       for (const c of NEXT_NUMBER_CHECKS) {
         const proposed = body[c.key];
         if (proposed === undefined) continue;
-        const max = await maxNumberForTx(tx, c.table, c.column, orgId);
+        const max = await maxNumberForTx(tx, c.table, c.column, orgId, c.excludeCustom);
         if ((proposed as number) <= max) {
           throw new HttpError(
             400,

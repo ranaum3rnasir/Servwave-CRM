@@ -26,6 +26,13 @@ import type { ScopeResource } from '../../lib/permissions/scopeWhereFor';
 // reader (e.g. a technician) is ever added as an LO recipient: add
 // `LOGISTIC_ORDER: 'LogisticOrder'` here (the delegateMap entry already exists)
 // so those recipients get access-checked.
+//
+// TASK is deliberately ABSENT for a different reason, and a permanent one (multi-assignee
+// design §5). A task has no CASL row scope to check against: `taskVisibilityWhere` grants
+// access precisely BY naming someone in `assignee_ids` / `watcher_ids`, so every recipient
+// resolveRecipients can produce for a task verb is, by construction, already someone who
+// can see the row. Adding `TASK: 'Task'` here would not tighten anything — there is no
+// `Task` ScopeResource — it would only re-derive a fact the recipient list already encodes.
 const SCOPE_TYPE_MAP: Record<string, ScopeResource> = {
   JOB: 'Job',
   ESTIMATE: 'Estimate',

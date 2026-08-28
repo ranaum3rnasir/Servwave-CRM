@@ -7,14 +7,14 @@ import { calculateTotals } from '../../../../controllers/estimate.controller';
 
 const FIXTURE_ORG = {
   id: '00000000-0000-0000-0000-000000000001',
-  name: 'Alpha Doors & Security INC.',
+  name: 'Northwind Services LLC',
   legal_name: null,
   address_line1: '1001 Willow Avenue',
   address_line2: null,
   city: 'Hoboken', state: 'NJ', postal_code: '07030', country: 'US',
-  email: 'info@example.com',
+  email: 'info@northwind.example.com',
   phone: null,
-  website: 'https://alphadoorsnewjersey.com/',
+  website: 'https://northwind.example.com/',
   logo_url: null,
   brand_color: '#E11D2E',
   estimate_template: 'crm-default',
@@ -33,7 +33,7 @@ describe('buildCrmDefaultPdf', () => {
 
   it('falls back to org.name as header when logo_url is null', () => {
     const doc = buildCrmDefaultPdf(PREVIEW_ESTIMATE_FIXTURE as any, FIXTURE_ORG);
-    expect(JSON.stringify(doc)).toContain('Alpha Doors & Security INC.');
+    expect(JSON.stringify(doc)).toContain('Northwind Services LLC');
   });
 
   it('renders a MATERIAL tag for material items and SERVICE tag for service items', () => {

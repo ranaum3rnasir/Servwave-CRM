@@ -4,10 +4,15 @@
  * Encodes the title/body/category/priority/action_type/object_type for every
  * v1 verb listed in the in-app-notifications implementation plan (lines 53–62).
  *
- * Deferred verbs (task.*, estimate.viewed, *.delivery_failed,
- * billing.payment_failed, service_plan.*) are intentionally NOT in this
- * registry. renderTemplate() throws for any unrecognised verb so the caller
- * can log and skip.
+ * Deferred verbs (estimate.viewed, *.delivery_failed, billing.payment_failed,
+ * service_plan.*) are intentionally NOT in this registry. renderTemplate() throws
+ * for any unrecognised verb so the caller can log and skip.
+ *
+ * `task.*` is NO LONGER deferred: the five verbs of the multi-assignee design §5
+ * (assigned / watching / completed / removed / deleted), plus `task.cancelled`
+ * (issue 03), are registered below.
+ * Still deferred within that family are task.due_soon / task.overdue — they need a
+ * cron that does not exist yet.
  *
  * Note on priority: the value here is the BASE (event-level) priority.
  * resolveRecipients() may assign a different priority per recipient row
@@ -261,6 +266,78 @@ const registry: Record<string, TemplateFactory> = {
       + (s(data, 'customer_name') ? ' — ' + s(data, 'customer_name') : ''),
   }),
 
+  // ── TASK ───────────────────────────────────────────────────────────────────
+  // Design §5. `object_label` is the task's TITLE, not its number: a task's number
+  // means nothing to the person being told about it, and `task.deleted` outlives its
+  // row, so the title is the only thing that can still say WHICH task. `task_number`
+  // rides along in the data bag for anyone who wants it.
+  //
+  // All six are FEED with no `needs_action` / `action_type` — nothing here is an
+  // approval, and a shared to-do list that interrupts is a to-do list people mute.
+
+  'task.assigned': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'Assigned to you: ' + s(data, 'object_label', 'a task'),
+  }),
+
+  'task.watching': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'You are now watching: ' + s(data, 'object_label', 'a task'),
+  }),
+
+  'task.completed': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'Task completed: ' + s(data, 'object_label', 'a task'),
+  }),
+
+  // Issue 03. A cancellation is NOT a completion, and must never be told as one: `task.completed`
+  // is gated on the flip into DONE and does not fire here. But being silently dropped from work
+  // you were assigned is the surprise `task.removed` exists to prevent, so the other assignees
+  // and the watchers are told, in words that say the work was abandoned rather than finished.
+  'task.cancelled': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'Task cancelled: ' + s(data, 'object_label', 'a task'),
+  }),
+
+  'task.removed': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'You were removed from: ' + s(data, 'object_label', 'a task'),
+  }),
+
+  // The one verb whose object is already gone by the time anyone reads this. The
+  // title is SNAPSHOT into object_label (and repeated in the body) because there is
+  // no row left to resolve it from; the deep link dead-ends, which design §5 accepts.
+  'task.deleted': (data) => ({
+    category: 'TASK',
+    object_type: 'TASK',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: 'Task deleted: ' + s(data, 'object_label', 'a task'),
+    body: 'This task no longer exists'
+      + (s(data, 'task_number') ? ' (' + s(data, 'task_number') + ')' : '') + '.',
+  }),
+
   // ── BILLING ────────────────────────────────────────────────────────────────
 
   'billing.payment_received': (data) => ({
@@ -430,6 +507,48 @@ const registry: Record<string, TemplateFactory> = {
     action_type: null,
     needs_action: false,
     title: (s(data, 'actor_name') || 'A new user') + ' accepted their invite',
+  }),
+
+  // ── CALENDAR ENTRY (slice 07, spec §5) ──────────────────────────────────────
+  //
+  // In-app half of the three-outcome family for USER participants (customer participants get
+  // the email trio in lib/email.ts instead — see lib/calendar-entries/notify.ts). No CALENDAR
+  // NotificationCategory exists in the schema, and adding one is a migration this slice does
+  // not need — TEAM already covers org-visible, non-work coordination notices (see
+  // team.ot_override_requested / team.invite_accepted above), which is exactly what a calendar
+  // entry is. FEED, not INTERRUPT: a Calendar Entry is never a request for action (no
+  // assignment, no approval to make), so needs_action stays false for all three.
+  //
+  // WHICH of the three verbs fires is decided entirely by the caller (lib/calendar-entries/
+  // notify.ts) from the start/end diff and each participant's own prior-known state — never a
+  // status read, because CalendarEntry has no status column (spec §9 risk 3, issue #1550).
+
+  'calendar_entry.scheduled': (data) => ({
+    category: 'TEAM',
+    object_type: 'CALENDAR_ENTRY',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: (s(data, 'object_label') || 'Event') + ' was added to your calendar',
+  }),
+
+  'calendar_entry.moved': (data) => ({
+    category: 'TEAM',
+    object_type: 'CALENDAR_ENTRY',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: (s(data, 'object_label') || 'Event') + ' moved'
+      + (s(data, 'new_start_label') ? ' to ' + s(data, 'new_start_label') : ''),
+  }),
+
+  'calendar_entry.cancelled': (data) => ({
+    category: 'TEAM',
+    object_type: 'CALENDAR_ENTRY',
+    priority: 'FEED',
+    action_type: null,
+    needs_action: false,
+    title: (s(data, 'object_label') || 'Event') + ' was cancelled',
   }),
 
   // ── INVENTORY ──────────────────────────────────────────────────────────────

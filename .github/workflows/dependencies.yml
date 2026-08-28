@@ -43,16 +43,14 @@ concurrency:
 jobs:
   audit:
     name: Audit production dependencies
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-          # Cache is ON here: hosted runners are ephemeral. See the note at the
-          # top of ci.yml for why upstream disables it and this repo does not.
-          cache: 'npm'
+          # No `cache: 'npm'` on purpose - see the note at the top of ci.yml.
       - name: Install deps
         run: npm ci
       # Fails on HIGH/CRITICAL advisories in PRODUCTION dependencies.

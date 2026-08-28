@@ -24,9 +24,9 @@ const CUSTOMER_ROW = {
   first_name: 'ZZ-TEST',
   last_name: 'CTM',
   company_name: null,
-  phone: '5555550212',
+  phone: '5555550199',
   secondary_phone: null,
-  phones: [{ phone: '5555550219' }],
+  phones: [{ phone: '9294039424' }],
   service_locations: [{ address_line1: '1 Main St', city: 'Newark', state: 'NJ' }],
   jobs: [
     {
@@ -42,7 +42,7 @@ const JOB_ROW = {
   id: 'ab000000-0000-0000-0000-000000000002',
   job_number: 'J00088',
   status: 'IN_PROGRESS',
-  customer: { id: CUSTOMER_ROW.id, first_name: 'ZZ-TEST', last_name: 'CTM', company_name: null, phone: '5555550212' },
+  customer: { id: CUSTOMER_ROW.id, first_name: 'ZZ-TEST', last_name: 'CTM', company_name: null, phone: '5555550199' },
   service_location: { address_line1: '2 Oak Ave', city: 'Jersey City' },
 };
 
@@ -108,7 +108,7 @@ describe('GET /api/communication/dialer-search', () => {
       {
         id: CUSTOMER_ROW.id,
         name: 'ZZ-TEST CTM',
-        phone: '5555550212',
+        phone: '5555550199',
         site: '1 Main St, Newark',
         openJobs: [
           { id: CUSTOMER_ROW.jobs[0].id, number: 'J00077', status: 'SCHEDULED', location: '1 Main St, Newark' },
@@ -139,7 +139,7 @@ describe('GET /api/communication/dialer-search', () => {
         number: 'J00088',
         status: 'IN_PROGRESS',
         location: '2 Oak Ave, Jersey City',
-        customer: { id: CUSTOMER_ROW.id, name: 'ZZ-TEST CTM', phone: '5555550212' },
+        customer: { id: CUSTOMER_ROW.id, name: 'ZZ-TEST CTM', phone: '5555550199' },
       },
     ]);
   });
@@ -155,11 +155,11 @@ describe('GET /api/communication/dialer-search', () => {
     p.customer.findMany.mockResolvedValue([CUSTOMER_ROW]);
 
     const res = await request(app)
-      .get('/api/communication/dialer-search?q=(555)%20555-0212')
+      .get('/api/communication/dialer-search?q=(555)%20555-0199')
       .set(authHeader('dispatcher'));
 
     expect(res.status).toBe(200);
-    expect(res.body.query).toEqual({ isPhone: true, e164: '+15555550212' });
+    expect(res.body.query).toEqual({ isPhone: true, e164: '+15555550199' });
     expect(res.body.identity).toEqual({
       kind: 'customer',
       id: CUSTOMER_ROW.id,
@@ -222,7 +222,8 @@ describe('GET /api/communication/dialer-search - the job group keeps its row sco
     const scopeClause = clauses.find((c) => JSON.stringify(c.OR ?? '').includes('created_by_id'));
     expect(scopeClause, `row scope missing from ${JSON.stringify(where)}`).toBeDefined();
     expect(scopeClause!.OR).toEqual([
-      { assignees: { some: { user_id: TEST_USERS.technician.id } } },
+      // S8 (D6): the own-arm is the visits path now.
+      { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } },
       { created_by_id: TEST_USERS.technician.id },
     ]);
 

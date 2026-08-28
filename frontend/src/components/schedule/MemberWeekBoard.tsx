@@ -1,18 +1,20 @@
 import React, { useMemo, useState } from 'react';
 import { format, isSameDay, addDays, startOfWeek } from 'date-fns';
-import { AlertTriangle, MapPin, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { cn, getInitials } from '@/lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
-  isOnBoardFor, eventDangerState, isCompletedEvent, boardCardScheme, IN_FLIGHT_STATUSES,
+  isOnBoardFor, eventDangerState,
   type BoardEvent, type ScheduledBoardEvent, type EventDangerState,
 } from './scheduleModel';
+import {
+  ScheduleCardBody, scheduleCardVisual, scheduleCardPaintClass, scheduleCardOpacityStyle,
+} from './ScheduleCardBody';
 import {
   GRID_EVENT_ID, GRID_EVENT_TYPE, FROM_MEMBER,
   hasBoardDragPayload, resolveBoardDropId,
 } from './dragChannels';
-import { TagChips } from '@/components/data/TagChips';
 import { nowWallClock, asWallClock, type WallClock } from '@/lib/schedule-tz';
 
 // ─── Types ───────────────────────────────────────────────
@@ -65,64 +67,26 @@ interface BoardCardProps {
 }
 
 function BoardCard({ event, fromMemberId, dangerState, onClick, onContextMenu }: BoardCardProps) {
-  const location   = event.raw.service_location as { address?: string; city?: string; state?: string } | null;
-  const status     = event.raw.status as string | undefined;
-  const isWalk     = event.type === 'walkthrough';
-  const isInProg   = IN_FLIGHT_STATUSES.has(status ?? '');
-  const isCompleted = isCompletedEvent(event);
-  // The two reds (precedence pre-resolved in eventDangerState; ghosts come back null).
-  const needsCrew    = dangerState === 'needs-crew';
-  const doubleBooked = dangerState === 'double-booked';
-
-  let addressText = '';
-  if (isWalk) {
-    addressText = [event.raw.service_address_line1, event.raw.service_city, event.raw.service_state]
-      .filter(Boolean).join(', ');
-  } else if (location) {
-    addressText = location.address
-      ? `${location.address}, ${location.city ?? ''}`
-      : [location.city, location.state].filter(Boolean).join(', ');
-  }
-
-  // Board-card scheme: a THREE-axis treatment, not a status badge. Precedence is exception
-  // state first (needs-crew fill / double-booked outline, applied on the wrapper below),
-  // then completed / in-progress status, then the event-type accent from EVENT_TYPE_META
-  // (job=info, walkthrough=warning, service-plan=ai). Red is reserved for the two
-  // exception states.
-  //
-  // This deliberately does NOT resolve through STATUS_REGISTRY. The registry models a
-  // single status axis, and this board inverts it on two of its values: completed reads
-  // neutral grey here where the registry says success, and the three in-flight statuses
-  // read green here where the registry says warning. Resolving per-status through the
-  // registry would repaint every scheduled block and delete the event-type language the
-  // board legend advertises, so this map stays local on purpose.
-  //
-  // Spelled once, in scheduleModel.ts. TechnicianGridView's JobCard resolves through the
-  // same helper, so the two boards cannot drift apart.
-  const scheme = boardCardScheme(event.type, isCompleted, isInProg);
-
-  const isGhost = event.isGhost ?? false;
+  // Danger/status/scheme resolution and the whole inner column live in ScheduleCardBody, shared
+  // with TechnicianGridView's JobCard (multi-visit S0b). Only the wrapper is local: this card is
+  // content-sized, where the grid view's is absolutely positioned at a caller-supplied height.
+  const visual = scheduleCardVisual(event, dangerState);
 
   return (
     <div
       className={cn(
         'rounded-lg overflow-hidden cursor-pointer transition-all duration-100',
         'hover:shadow-md hover:brightness-[0.97] active:scale-[0.99]',
-        needsCrew
-          ? 'bg-danger text-on-fill'                // red FILL — needs crew (state 4)
-          : doubleBooked
-          ? 'border-2 border-danger bg-surface-light'     // red OUTLINE — double-booked (D7)
-          : cn(scheme.bg, scheme.accent, isGhost ? 'border-l-4 border-dashed' : 'border-l-4'),
+        scheduleCardPaintClass(visual),
       )}
-      style={{
-        ...(isCompleted && { opacity: 0.5 }),
-        ...(isGhost && { opacity: 0.55 }),
-      }}
+      style={scheduleCardOpacityStyle(visual)}
+      // The card's identity on the board (multi-visit S6): one per VISIT, never per job.
+      data-board-id={event.boardId}
       draggable
       onDragStart={(e) => {
         // Same payload keys as the grid view's JobCard, plus the from-member lane marker.
         // Day granularity — moving a card never exposes a resize affordance here (B-8).
-        e.dataTransfer.setData(GRID_EVENT_ID, event.id);
+        e.dataTransfer.setData(GRID_EVENT_ID, event.boardId);
         e.dataTransfer.setData(GRID_EVENT_TYPE, event.type);
         e.dataTransfer.setData(FROM_MEMBER, fromMemberId);
         e.dataTransfer.effectAllowed = 'move';
@@ -131,72 +95,9 @@ function BoardCard({ event, fromMemberId, dangerState, onClick, onContextMenu }:
       onContextMenu={onContextMenu}
     >
       <div className="px-2.5 py-2 flex flex-col gap-1 relative">
-        {/* Ghost draft label */}
-        {isGhost && (
-          <span className="absolute top-1 right-1.5 text-[8px] font-bold uppercase tracking-wider
-                           text-info-text/70 bg-info-surface px-1 py-0.5 rounded leading-none">
-            draft
-          </span>
-        )}
-        {/* Time range */}
-        <p className={cn(
-          'text-[10px] leading-none whitespace-nowrap font-medium',
-          needsCrew ? 'text-on-fill/85' : 'text-text-soft',
-        )}>
-          {format(event.start, 'h:mm a')} – {format(event.end, 'h:mm a')}
-        </p>
-
-        {/* Job number / label + badges */}
-        <div className="flex items-center gap-1 flex-wrap min-w-0">
-          <span className={cn('text-[11px] font-bold truncate leading-none', needsCrew ? 'text-on-fill' : scheme.text)}>
-            {isWalk ? 'Walkthrough' : (event.number || event.id)}
-          </span>
-          {isWalk && event.number && (
-            <span className="text-[9px] text-text-soft font-medium shrink-0 leading-none">{event.number}</span>
-          )}
-          {needsCrew && (
-            <span className="text-[9px] font-bold uppercase tracking-wider text-on-fill/90 shrink-0 leading-none">
-              needs crew
-            </span>
-          )}
-          {doubleBooked && (
-            <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5
-                             rounded-full bg-danger/10 text-danger shrink-0 leading-none">
-              <AlertTriangle className="h-2 w-2" /> double-booked
-            </span>
-          )}
-          {isInProg && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full
-                             bg-success-surface text-success-text shrink-0 leading-none">
-              In Progress
-            </span>
-          )}
-        </div>
-
-        {/* Title (scope-first for jobs; customer for walkthroughs — their title repeats the header) */}
-        <p className={cn(
-          'text-xs font-semibold truncate leading-tight',
-          needsCrew ? 'text-on-fill' : 'text-text-primary',
-        )}>
-          {isWalk ? event.customer : (event.title || event.customer)}
-        </p>
-        {!isWalk && event.customer && event.customer !== event.title && (
-          <p className="text-[11px] text-text-secondary truncate leading-tight">
-            {event.customer}
-          </p>
-        )}
-
-        {/* Address */}
-        {addressText && (
-          <p className="text-[10px] text-text-secondary flex items-center gap-0.5 min-w-0 leading-none">
-            <MapPin className="h-2.5 w-2.5 shrink-0 text-text-soft" />
-            <span className="truncate">{addressText}</span>
-          </p>
-        )}
-
-        {/* SRVW-58 tag chips. No height gate: this card is content-sized (its style
-            carries only opacity - no height, no absolute positioning). */}
-        <TagChips tags={event.tags} max={2} />
+        {/* showTags unconditional: this card is content-sized (its style carries only opacity -
+            no height, no absolute positioning), so chips can never clip the address above them. */}
+        <ScheduleCardBody event={event} visual={visual} />
       </div>
     </div>
   );
@@ -291,7 +192,7 @@ function DaySection({ date, laneMemberId, isLastColumn, events, conflictIds, tz,
         )}
         {sorted.map((ev) => (
           <BoardCard
-            key={ev.id}
+            key={ev.boardId}
             event={ev}
             fromMemberId={laneMemberId}
             dangerState={eventDangerState(ev, conflictIds)}

@@ -22,13 +22,21 @@ export type ScopeValue = 'All' | 'Owned' | 'Team' | 'Location';
 export type CrudCell = { read: boolean; create: boolean; update: boolean; delete: boolean };
 // SRVW-139 - toggle bundles for actions the CRUD matrix can't host (no create action, or a
 // single lifecycle verb rather than a CRUD cell). Keep in lockstep with backend TOGGLES
-// (roleViewModel.ts) - same shape as MODULES parity, but a fixed 5-key record needs no regex test.
+// (roleViewModel.ts) - same shape as MODULES parity, but a fixed-key record needs no regex test.
 export type RoleToggles = {
   dashboard: boolean;
   accountSettings: boolean;
   notifications: boolean;
   modifyDoneJobs: boolean;
   cancelJobs: boolean;
+  // Multi-visit close-out (Q9, 2026-08-23) - the milestone-verb toggles. Previously each of these
+  // lived ONLY on the per-user Permissions page (a different capability surface entirely); the
+  // Roles & Permissions page had no cell for any of them.
+  enRouteJobs: boolean;
+  arriveJobs: boolean;
+  startJobs: boolean;
+  completeJobs: boolean;
+  rescheduleJobs: boolean;
 };
 
 export interface RoleViewModel {
@@ -37,7 +45,9 @@ export interface RoleViewModel {
   matrix: Record<string, CrudCell>;
   // SRVW-140 - `viewReports` is the honest control for `read Report`, split out of
   // "See financial data" (which now writes the `read Pricing` grant canSeePricing keys on).
-  sensitive: { seeFinancials: boolean; managePayments: boolean; viewReports: boolean };
+  // Editable record IDs (2026-08-19 plan, decision #7) - `editRecordIds` is permission plumbing
+  // for a NOT-YET-BUILT capability (the PATCH .../:id/number endpoints ship in a later PR).
+  sensitive: { seeFinancials: boolean; managePayments: boolean; viewReports: boolean; editRecordIds: boolean };
   toggles: RoleToggles;
   scope: Record<string, ScopeValue>;
   general: { description: string };

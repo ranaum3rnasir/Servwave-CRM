@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/authenticate';
 import { attachAbility } from '../middleware/attachAbility';
 import { canDo } from '../middleware/canGuard';
 import { validate } from '../middleware/validate';
+import { requireUuidParam } from '../middleware/requireUuidParam';
 import { featureDisabled } from '../middleware/featureDisabled';
 import { expensiveLimiter } from '../middleware/rate-limit';
 import * as jobController from '../controllers/job.controller';
@@ -35,6 +36,12 @@ router.get('/:id', canDo('read', 'Job'), jobController.getById);
 router.patch('/:id', canDo('update', 'Job'), validate(jobController.updateJobSchema), jobController.update);
 router.delete('/:id', canDo('delete', 'Job'), jobController.remove);
 
+// Editable record IDs (plan decision #7) - preview is read-only (no lock); rename is the real
+// write, gated identically. Both route-gated `renumber Job` (DISPATCHER by default, ADMIN via
+// manage-all); the controller adds the per-instance canActOnRow check on top.
+router.post('/:id/number/preview', canDo('renumber', 'Job'), validate(jobController.jobNumberSchema), jobController.previewNumber);
+router.patch('/:id/number', canDo('renumber', 'Job'), validate(jobController.jobNumberSchema), jobController.renumber);
+
 // Status actions
 router.post('/:id/assign', canDo('assign', 'Job'), validate(jobController.assignJobSchema), jobController.assign);
 // Crew-only REPLACE (no schedule/status side effects)
@@ -44,7 +51,10 @@ router.post('/:id/dispatcher', canDo('assign', 'Job'), validate(jobController.se
 // SRVW-112 - set/clear the org-defined sub-status. Gated `update Job`, matching the
 // POST /:id/notes precedent below; the controller adds the per-instance canAccessRow check.
 router.post('/:id/sub-status', canDo('update', 'Job'), validate(jobController.setSubStatusSchema), jobController.setSubStatus);
-router.post('/:id/unassign', canDo('unassign', 'Job'), jobController.unassign);
+// S7: validated now that the body carries the D23 notify object. The schema is all-optional, so
+// the bodyless callers this route has always had are unaffected - but a malformed recipient or
+// an over-long message is rejected here rather than at the provider.
+router.post('/:id/unassign', canDo('unassign', 'Job'), validate(jobController.unassignJobSchema), jobController.unassign);
 router.post('/:id/en-route', canDo('en_route', 'Job'), jobController.enRoute);
 router.post('/:id/arrive', canDo('arrive', 'Job'), jobController.arrive);
 router.post('/:id/start', canDo('start', 'Job'), jobController.start);
@@ -58,6 +68,28 @@ router.post('/:id/reopen', canDo('reopen', 'Job'), jobController.reopen);
 // can() inside setStatus, so this is not a way around the sibling routes' guards.
 router.post('/:id/status', canDo('read', 'Job'), validate(jobController.setStatusSchema), jobController.setStatus);
 router.post('/:id/duplicate', canDo('create', 'Job'), jobController.duplicate);
+
+// Visits (multi-visit S2) - the nested collection, alongside the status actions above.
+// Gated `reschedule Job` (DISPATCHER-only by default), matching what PATCH /:id already enforces
+// through changesSchedule: a visits route gated any looser would be a route around that gate for
+// every technician. Note the deliberate asymmetry with POST /:id/assign, which first-books under
+// `assign Job` - stricter is the safe direction and /assign is untouched by S2.
+router.get('/:id/visits', canDo('read', 'Job'), jobController.listVisits);
+router.post('/:id/visits', canDo('reschedule', 'Job'), validate(jobController.createJobVisitSchema), jobController.createVisit);
+router.patch('/:id/visits/:visitId', canDo('reschedule', 'Job'), validate(jobController.rescheduleJobVisitSchema), jobController.rescheduleVisit);
+
+// Visit lifecycle (multi-visit S4, D7/D7a). Gated the same subject-level `start Job` the job-level
+// /:id/start route uses - technicians hold it by default and keep it under D15 - with the finer
+// "is this principal crew on THIS visit" check inside the handler, because canDo is subject-level
+// and the stored OWN_JOB row scope, though it now points at the visits path (S8), is a JOB-level
+// question - "are you on any of this job's trips" - not the per-visit one these four routes ask.
+router.post('/:id/visits/:visitId/start', canDo('start', 'Job'), jobController.startVisit);
+router.post('/:id/visits/:visitId/en-route', canDo('en_route', 'Job'), jobController.enRouteVisit);
+router.post('/:id/visits/:visitId/arrive', canDo('arrive', 'Job'), jobController.arriveVisit);
+router.post('/:id/visits/:visitId/complete', canDo('start', 'Job'), jobController.completeVisit);
+// Cancelling a booking is dispatch work, so this one rides `reschedule Job` like its sibling
+// visits routes rather than the crew gate the three milestone verbs use.
+router.post('/:id/visits/:visitId/cancel', canDo('reschedule', 'Job'), validate(jobController.cancelVisitSchema), jobController.cancelVisit);
 
 // Charges — REMOVED (entity-redesign §5 / Phase D). The invoice owns its lines (InvoiceLineItem);
 // the JobCharge model is dropped. No /:id/charges routes remain.
@@ -137,7 +169,13 @@ router.get('/:id/financials', canDo('read', 'Job'), jobController.getFinancials)
 router.get('/:id/communications', canDo('read', 'Communication'), jobCommunicationsController.getJobCommunications);
 
 // Tags on jobs (polymorphic tag_assignments)
-router.post('/:id/tags', canDo('update', 'Job'), validate(tagController.addTagToEntitySchema), tagController.addTagToJob);
-router.delete('/:id/tags/:tagId', canDo('update', 'Job'), tagController.removeTagFromJob);
+// Tag routes take BOTH ids straight from the path into `where` clauses over Postgres
+// `uuid` columns, so without these guards a stray segment makes the driver throw P2023
+// and the controller's catch reports a 500 for what is only a bad URL. They sit AFTER
+// canDo so a caller without the grant still gets 403 rather than learning whether the
+// id was well-formed, and they return the SAME 404 text the handler gives for a row
+// that genuinely is not there.
+router.post('/:id/tags', canDo('update', 'Job'), requireUuidParam('id', 'job not found'), validate(tagController.addTagToEntitySchema), tagController.addTagToJob);
+router.delete('/:id/tags/:tagId', canDo('update', 'Job'), requireUuidParam('id', 'job not found'), requireUuidParam('tagId', 'Tag not attached to this job'), tagController.removeTagFromJob);
 
 export default router;

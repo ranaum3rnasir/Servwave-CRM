@@ -8,6 +8,7 @@ import {
   Clock,
   Shield,
   UserPlus,
+  ListChecks,
   CheckCircle2,
   Loader2,
 } from 'lucide-react';
@@ -49,6 +50,9 @@ const CATEGORY_COLORS: Record<string, string> = {
   INVENTORY: 'rgb(var(--warning-strong))',
   TEAM: 'rgb(var(--warning-strong))',
   COMMUNICATION: 'rgb(var(--primary))',
+  // Informational like the other primaries; the checklist icon is what tells
+  // a task apart from a dispatch at a glance.
+  TASK: 'rgb(var(--primary))',
 };
 
 function categoryColor(category: string): string {
@@ -79,6 +83,8 @@ function CategoryIcon({ category }: { category: string }) {
     Icon = Shield;
   } else if (cat === 'LEAD') {
     Icon = UserPlus;
+  } else if (cat === 'TASK') {
+    Icon = ListChecks;
   } else {
     Icon = Briefcase;
   }
@@ -133,6 +139,14 @@ export function notificationDeepLink(item: NotificationView): string {
     case 'PURCHASE_ORDER':
       // The PO page is its own route — don't lump it into /inventory (P5 §4).
       return '/inventory/purchase-orders';
+    case 'TASK':
+      // The six task.* verbs carry a Task id, but Tasks is ONE route with no
+      // `:id` child — the six views are component-local tabs and the detail is a
+      // store-driven drawer, never a URL (tasks.paths.ts). `/tasks/:id` would
+      // fall into the catch-all redirect, so the id rides as a query param the
+      // hub consumes once and strips. `task.deleted` points at a row that is
+      // gone by design; the hub degrades to the plain hub and says so.
+      return object_id ? `/tasks?task=${object_id}` : '/tasks';
     case 'INVENTORY_ITEM':
     case 'STOCK_APPROVAL':
       return '/inventory';
@@ -311,7 +325,7 @@ export function NotificationItem({ item }: NotificationItemProps) {
     <div
       role="button"
       tabIndex={0}
-      className="flex cursor-pointer gap-3 px-4 py-3 hover:bg-background-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+      className="flex cursor-pointer gap-3 px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
       onClick={handleRowClick}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') handleRowClick();

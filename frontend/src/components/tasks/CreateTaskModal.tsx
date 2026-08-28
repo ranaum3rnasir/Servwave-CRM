@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -16,8 +16,9 @@ import { LinkedEntitySelect } from './LinkedEntitySelect';
 import { useTasksStore } from '@/stores/tasksStore';
 import { useToast } from '@/components/ui/use-toast';
 import { extractApiError } from '@/lib/utils';
-import { AssigneeSelect } from '@/components/crm/AssigneeSelect';
 import { MultiAssigneeSelect } from '@/components/crm/MultiAssigneeSelect';
+import { useTaskAssignPermission } from '@/lib/tasks/useTaskAssignPermission';
+import { useLinkedEntityAccess, useTaskRosterEditable } from '@/lib/tasks/useLinkedEntityAccess';
 import { DateTimePicker } from '@/components/form/DateTimePicker';
 import { useScheduleTimezone, pickerValueToIso, isoToPickerValue } from '@/lib/schedule-tz';
 import { SelectField } from '@/components/form/SelectField';
@@ -35,10 +36,27 @@ export function CreateTaskModal({ open, onOpenChange, initialParse, presetEntity
 
   const addTask = useTasksStore((s) => s.addTask);
   const { toast } = useToast();
+  // CASL `assign` on Task, never `role === 'ADMIN'` - see the hook's note.
+  const { canAssignOthers, actorId } = useTaskAssignPermission();
+
+  /**
+   * A user WITHOUT `assign` can only ever create a task on themselves - the
+   * server forces `[actorId]` and 403s anything else - so their disabled field
+   * shows that outcome instead of an empty control that lies about what will
+   * happen. A holder starts blank and picks.
+   *
+   * useCallback so the open-effect can depend on it honestly: the grant and the
+   * actor arrive with the session, and a dialog opened before they land must
+   * re-seed once they do rather than keeping a stale empty array.
+   */
+  const seedAssignees = useCallback((parsed?: string): string[] => {
+    if (!canAssignOthers) return actorId ? [actorId] : [];
+    return parsed ? [parsed] : [];
+  }, [canAssignOthers, actorId]);
 
   // Structured form state
   const [title, setTitle] = useState('');
-  const [ownerId, setOwnerId] = useState('');
+  const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
   const [watcherIds, setWatcherIds] = useState<string[]>([]);
   const [dueDatetimeLocal, setDueDatetimeLocal] = useState('');
   const [priority, setPriority] = useState<string>('MEDIUM');
@@ -46,31 +64,38 @@ export function CreateTaskModal({ open, onOpenChange, initialParse, presetEntity
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  const effectiveEntity = presetEntity ?? linkedEntity;
+  // Null while the modal is shut, so the roster check costs one request per OPENING rather than
+  // one per mount of the tasks tab, which always presets its entity, and null for a reader who
+  // can change neither roster, who has nothing to do with the answer.
+  const rosterEditable = useTaskRosterEditable('create');
+  const entityAccess = useLinkedEntityAccess(open && rosterEditable ? effectiveEntity : null);
+
   // Pre-fill when modal opens with initialParse or presetEntity
   useEffect(() => {
     if (!open) return;
 
     if (initialParse) {
       setTitle(initialParse.title ?? '');
-      setOwnerId(initialParse.owner_id ?? '');
+      setAssigneeIds(seedAssignees(initialParse.assignee_id));
       setDueDatetimeLocal(isoToPickerValue(initialParse.due_at, timezone));
       setPriority(initialParse.priority ?? 'MEDIUM');
       setLinkedEntity(presetEntity ?? initialParse.linked_entity ?? null);
     } else {
       // Reset to blank
       setTitle('');
-      setOwnerId('');
+      setAssigneeIds(seedAssignees());
       setWatcherIds([]);
       setDueDatetimeLocal('');
       setPriority('MEDIUM');
       setLinkedEntity(presetEntity ?? null);
       setDescription('');
     }
-  }, [open, initialParse, presetEntity]);
+  }, [open, initialParse, presetEntity, seedAssignees]);
 
   function resetForm() {
     setTitle('');
-    setOwnerId('');
+    setAssigneeIds(seedAssignees());
     setWatcherIds([]);
     setDueDatetimeLocal('');
     setPriority('MEDIUM');
@@ -82,7 +107,6 @@ export function CreateTaskModal({ open, onOpenChange, initialParse, presetEntity
     if (!title.trim()) return;
 
     const dueAt = pickerValueToIso(dueDatetimeLocal, timezone) ?? null;
-    const effectiveEntity = presetEntity ?? linkedEntity;
 
     setSubmitting(true);
     try {
@@ -91,10 +115,13 @@ export function CreateTaskModal({ open, onOpenChange, initialParse, presetEntity
         description,
         status: 'TODO',
         priority: priority as import('@/lib/tasks/types').TaskPriority,
-        owner_id: ownerId || null,
         due_at: dueAt,
         linked_entity: effectiveEntity ? { type: effectiveEntity.type, id: effectiveEntity.id } : null,
         tags: [],
+        // Omitted when empty: the server reads a missing key as "default to me",
+        // which is the right outcome for a blank field and the only one a
+        // non-holder is allowed.
+        ...(assigneeIds.length > 0 ? { assignee_ids: assigneeIds } : {}),
         ...(watcherIds.length > 0 ? { watcher_ids: watcherIds } : {}),
       });
       resetForm();
@@ -133,26 +160,41 @@ export function CreateTaskModal({ open, onOpenChange, initialParse, presetEntity
             />
           </FormField>
 
-          {/* Owner - not converted to FormField: AssigneeSelect is a compound Popover picker
-              with no id prop of its own to receive fieldProps. */}
+          {/* Assignees - still not a FormField (that pattern owns the id it hands down, and
+              this control is shared with the drawer, which has no FormField), but the label IS
+              wired: MultiAssigneeSelect forwards `id` to its trigger. Disabled for a caller
+              without `assign` on Task, showing the one value the server would accept. */}
           <div className="space-y-1">
-            <label className="text-sm font-medium text-text-primary">Owner</label>
-            <AssigneeSelect
-              value={ownerId || null}
-              onChange={setOwnerId}
-              placeholder="— Unassigned —"
+            <label htmlFor="new-task-assignees" className="text-sm font-medium text-text-primary">Assignees</label>
+            <MultiAssigneeSelect
+              id="new-task-assignees"
+              value={assigneeIds}
+              onChange={setAssigneeIds}
+              disabled={!canAssignOthers}
               eligibleFor="task"
+              flaggedIds={entityAccess.flaggedIds}
+              flagNote={entityAccess.note}
+              flagBadge={entityAccess.badge}
             />
+            {!canAssignOthers && (
+              <p className="text-xs text-text-secondary">
+                You can only assign tasks to yourself.
+              </p>
+            )}
           </div>
 
-          {/* Watchers - not converted to FormField: MultiAssigneeSelect has no id prop of its
-              own to receive fieldProps. */}
+          {/* Watchers - not a FormField for the same reason as Assignees above, but likewise
+              label-wired through MultiAssigneeSelect's `id` prop. */}
           <div className="space-y-1">
-            <label className="text-sm font-medium text-text-primary">Watchers</label>
+            <label htmlFor="new-task-watchers" className="text-sm font-medium text-text-primary">Watchers</label>
             <MultiAssigneeSelect
+              id="new-task-watchers"
               value={watcherIds}
               onChange={setWatcherIds}
               eligibleFor="task"
+              flaggedIds={entityAccess.flaggedIds}
+              flagNote={entityAccess.note}
+              flagBadge={entityAccess.badge}
             />
           </div>
 

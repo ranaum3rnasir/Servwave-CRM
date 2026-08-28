@@ -25,6 +25,10 @@ describe('Estimate approval auto-creates an EstimateReservation (V2/D4)', () => 
       lead_id: LEAD_FIXTURE.id, organization_id: ALPHA_ORG_ID,
       total_amount: 1062.5, valid_until: null, signature_data: null,
       deposit: null,
+      // Spec #1751 D6: approvePublic reads the lead's CURRENT status off this row and hands it to
+      // the one status writer as the ledger entry's `from`. It is in the door's select; the
+      // fixture predates the column.
+      lead: { commission_owner_id: null, status: 'ESTIMATED' },
       send_config: { deposit_required: false, payment_methods: [] },
       organization: { id: ALPHA_ORG_ID, stripe_account_id: null, accepted_payment_methods: [] },
     };
@@ -89,7 +93,7 @@ describe('POST /api/inventory/estimate-reservations (V2/B2)', () => {
     mockAuthAs('admin');
     mockPrisma.estimate.findFirst.mockResolvedValue(null);
     const res = await request(app).post('/api/inventory/estimate-reservations').set(authHeader('admin')).send({
-      estimateId: '99555555-0224-9999-9999-995555550224', estimateNumber: 'E9', customer: 'X',
+      estimateId: '99999999-9999-9999-9999-999999999999', estimateNumber: 'E9', customer: 'X',
       approvedAt: new Date().toISOString(), reservedTotal: 0, linesSummary: { items: 0, units: 0 }, lines: [],
     });
     expect(res.status).toBe(400);

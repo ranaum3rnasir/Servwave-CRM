@@ -16,7 +16,8 @@ import { clearUserOverrideCache } from '../lib/permissions/userOverrideCache';
 // satisfies the bare-subject `canDo('read','Invoice')` route guard → the request reaches the
 // controller, where the now-folded SQL scope narrows to job.assignees ∋ me.
 
-const OWN_INVOICE_SCOPE = { job: { assignees: { some: { user_id: TEST_USERS.technician.id } } } };
+// S8 (D6): OWN_JOB reaches crew through the job's trips.
+const OWN_INVOICE_SCOPE = { job: { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } } };
 
 const mockPrisma = prisma as unknown as {
   invoice: {

@@ -48,7 +48,7 @@ function jobOwnedByTech() {
     source_plan_id: null,
     customer: { id: CUSTOMER_FIXTURE.id, payment_type: 'NET_30', tax_exempt: false },
     service_location: { state: 'TX' },
-    assignees: [{ user_id: TEST_USERS.technician.id }],
+    visits: [{ assignees: [{ user_id: TEST_USERS.technician.id }] }],
     estimate: ESTIMATE_WITH_LINES,
     // SRVW-85: the job door bills the Items tab now. These MIRROR ESTIMATE_WITH_LINES so the
     // money is unchanged; linked_estimates is dereferenced unconditionally.
@@ -63,7 +63,7 @@ function jobOwnedByTech() {
 function jobNotOwnedByTech() {
   return {
     ...jobOwnedByTech(),
-    assignees: [{ user_id: TEST_USERS.dispatcher.id }],
+    visits: [{ assignees: [{ user_id: TEST_USERS.dispatcher.id }] }],
   };
 }
 

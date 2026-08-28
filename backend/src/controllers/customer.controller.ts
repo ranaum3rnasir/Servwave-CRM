@@ -11,17 +11,21 @@ import { parseArrayParam } from '../lib/query/parseArrayParam';
 import { applyFilters } from '../lib/query/filterEngine';
 import { customerFacets } from '../lib/query/registries/customer.filters';
 import { tenantWhere } from '../lib/tenant';
+import { projectJobCrewUnion } from '../lib/job-crew';
+import { projectJobScheduleFields } from '../lib/job-schedule-projection';
 import { withRequiredCustomerFields } from '../lib/customer-create';
 import { hasPaymentInSubtree, paymentSummaryForSubtree, purgeCustomerSubtree } from '../lib/purge';
 import { findDuplicateCustomer } from '../lib/customer-duplicate';
 import { phoneSearchClauses, phoneRelationSearchClauses } from '../lib/phone-search';
 import { logAudit } from '../lib/audit';
+import { computeRenumber, applyRenumber, type RenumberComputation } from '../lib/record-renumber';
 import { optionalCustomerEmail, hasPhoneOrEmail, CONTACT_REQUIRED_MSG } from '../lib/email-schema';
 import { requiredCustomerPhone, optionalCustomerPhone } from '../lib/phone-schema';
 import { hasNameOrCompany, deriveCustomerKind } from '../lib/customer-kind';
 import { ESTIMATE_STATUS } from '../constants/estimateStatus';
 import { loadTagsByEntity, loadTagsForEntity } from '../lib/tags';
 import { mergeCustomFields, validateCustomFieldValues, CustomFieldValidationError } from '../lib/custom-fields';
+import { openTaskStatusFilter } from '../lib/tasks/status';
 
 // ─── Shared status sets ────────────────────────────────
 
@@ -30,9 +34,10 @@ const OPEN_LEAD_STATUSES: LeadStatus[] = ['NEW', 'CONTACTED', 'ESTIMATED'];
 // Derived from OPEN so active ⊆ open holds by construction; PRODUCT DECISION PENDING —
 // if product rules active ≡ open, delete the .filter and alias ACTIVE_LEAD_STATUSES = OPEN_LEAD_STATUSES.
 const ACTIVE_LEAD_STATUSES: LeadStatus[] = OPEN_LEAD_STATUSES.filter((s) => s !== 'NEW');
-// Spec B1 (Task 5): EN_ROUTE/ON_SITE are genuinely active/reachable now -- previously dropped,
-// so a customer whose tech was en route or on site read as having no active job.
-const ACTIVE_JOB_STATUSES: JobStatus[] = ['UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'];
+// Multi-visit S4 (D17): EN_ROUTE and ON_SITE retired from JobStatus - they are properties of a
+// TRIP and live on VisitStatus. A customer whose tech is en route or on site still reads as having
+// an active job, because that job now derives SCHEDULED or IN_PROGRESS.
+const ACTIVE_JOB_STATUSES: JobStatus[] = ['UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS'];
 
 // ─── Select Objects ────────────────────────────────────
 
@@ -271,6 +276,15 @@ function normalizePhones(phones: z.infer<typeof phoneSchema>[]): Array<{
 }
 
 class GuardError extends Error {}
+
+// Editable record IDs (Workiz dual-run) - carries the tx-fresh conflict computation out of
+// the rename transaction so the 409 handler doesn't have to re-derive it a second time,
+// outside the lock, from a possibly-stale read. See renameCustomer below.
+class RenumberConflictError extends Error {
+  constructor(public readonly computation: RenumberComputation) {
+    super('Conflicting number(s) already exist in this organization');
+  }
+}
 
 // §10 — parent_id must be a top-level billing group (its own parent_id IS NULL), in the
 // same tenant, and not self. bill_to target must be self OR the resolved parent. Returns
@@ -627,10 +641,18 @@ export async function getById(req: Request, res: Response) {
               job_number: true,
               status: true,
               scope_notes: true,
-              scheduled_start: true,
               completed_at: true,
               created_at: true,
-              assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+              // S8 (D6): crew through the trips. projectJobCrewUnion rebuilds the `assignees`
+              // wire key from these rows before the response goes out - see below.
+              // S8 (A5, RATIFIED): also the source of `scheduled_start` - the stored mirror is
+              // dropped, and projectJobScheduleFields rebuilds it the same way, same place.
+              visits: {
+                select: {
+                  status: true, scheduled_at: true, scheduled_end: true, is_all_day: true, created_at: true,
+                  assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } },
+                },
+              },
               service_location: { select: { address_line1: true, city: true, state: true } },
               estimate: { select: { estimate_number: true, total_amount: true } },
               invoices: {
@@ -746,7 +768,7 @@ export async function getById(req: Request, res: Response) {
       }),
       prisma.lead.count({ where: { customer_id: id, ...tenantWhere(req), status: { in: OPEN_LEAD_STATUSES } } }),
       prisma.lead.count({ where: { customer_id: id, ...tenantWhere(req), status: { in: ACTIVE_LEAD_STATUSES } } }),
-      prisma.task.count({ where: { linked_entity_type: 'CUSTOMER', linked_entity_id: id, ...tenantWhere(req), status: { not: 'DONE' } } }),
+      prisma.task.count({ where: { linked_entity_type: 'CUSTOMER', linked_entity_id: id, ...tenantWhere(req), status: openTaskStatusFilter() } }),
     ]);
 
     if (!customer) {
@@ -768,11 +790,18 @@ export async function getById(req: Request, res: Response) {
       job: undefined,
     }));
 
+    // S8 (D6): `job_assignees` is gone, so the Jobs tab's technician column is served from the
+    // derived union over each job's trips - the SAME projector the jobs list and the job detail
+    // use, so the three cannot disagree about who is on a job. Without it the wire key simply
+    // vanishes and both customer-detail pages render every row "Unassigned": no error, no
+    // typecheck failure, because the frontend declares `assignees` optional.
+    const jobsWithCrew = (customer.jobs ?? []).map((j) => projectJobScheduleFields(projectJobCrewUnion(j as unknown as Record<string, unknown>)));
+
     res.json({
       // `notes` is the scalar free-text column (the edit form binds it); the polymorphic
       // Note rows go under `activity_notes` so the two never collide (was: spreading the
       // array onto `notes`, which made the edit form render/save "[object Object]").
-      customer: { ...customer, activity_notes: notes, orphan_invoices: orphanInvoices, invoices: mappedInvoices, tags },
+      customer: { ...customer, jobs: jobsWithCrew, activity_notes: notes, orphan_invoices: orphanInvoices, invoices: mappedInvoices, tags },
       summary: {
         financials,
         estimates: {
@@ -1078,6 +1107,11 @@ export const purgeCustomerSchema = z.object({
   confirm: z.string().min(1),
 });
 
+// Editable record IDs (Workiz dual-run) - charset/length/numeric-cap validation lives in
+// validateNumberFormat inside lib/record-renumber.ts (called by computeRenumber). This
+// schema only guards the wire shape: `number` must be present and a string.
+export const renumberCustomerSchema = z.object({ number: z.string() }).strict();
+
 export async function purgeCustomer(req: Request, res: Response) {
   try {
     const id = param(req, 'id');
@@ -1163,6 +1197,132 @@ export async function anonymizeCustomer(req: Request, res: Response) {
   } catch (err) {
     logger.error('Anonymize customer error:', err);
     res.status(500).json({ error: 'Failed to anonymize customer' });
+  }
+}
+
+// ─── Customer Number Rename (Editable Record IDs) ───────
+//
+// Preview is read-only/advisory (no lock, no writes) - safe to call from a plain prisma
+// client. Rename is the real write: it looks up + validates OUTSIDE a transaction first
+// (permission → 404; customer has no extra per-instance ownership check or business
+// precondition beyond that - see customer.controller's other handlers, none of them do
+// one either), then opens a transaction that locks the parent row before calling
+// computeRenumber/applyRenumber, exactly as record-renumber.ts's own contract requires.
+
+export async function previewCustomerNumber(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.customer.findFirst({ where: { id, ...tenantWhere(req) } });
+    if (!existing) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
+    const computation = await computeRenumber(prisma, 'customer', id, orgId, req.body.number);
+    res.json(computation);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Invalid record number')) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error('Preview customer number error:', err);
+    res.status(500).json({ error: 'Failed to preview customer number change' });
+  }
+}
+
+export async function renameCustomer(req: Request, res: Response) {
+  try {
+    const id = param(req, 'id');
+    const orgId = req.user!.organization_id;
+
+    // Cheap existence + tenant-ownership check BEFORE opening a transaction, so a request
+    // that's going to 404 anyway never takes the row lock.
+    const existing = await prisma.customer.findFirst({ where: { id, ...tenantWhere(req) } });
+    if (!existing) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
+    let computation: RenumberComputation;
+    try {
+      computation = await prisma.$transaction(async (tx) => {
+        // Same FOR NO KEY UPDATE strength allocateAnchoredNumber already takes on this
+        // exact table (numbering.ts's ANCHORS.customer) - a mismatched lock strength on
+        // the same row from two different code paths can deadlock or fail to serialize.
+        await tx.$executeRaw`SELECT id FROM customers WHERE id = ${id}::uuid FOR NO KEY UPDATE`;
+
+        // Re-derive fresh under the lock (never trust a client-supplied/pre-lock read) and
+        // fail BEFORE calling applyRenumber when there's a conflict, so the 409 body can
+        // carry this exact tx-fresh computation instead of a second, racy re-derivation.
+        const preview = await computeRenumber(tx, 'customer', id, orgId, req.body.number);
+        if (preview.hasConflicts) {
+          throw new RenumberConflictError(preview);
+        }
+        return applyRenumber(tx, 'customer', id, orgId, req.body.number);
+      });
+    } catch (err) {
+      if (err instanceof RenumberConflictError) {
+        res.status(409).json({
+          error: 'Cannot rename customer: conflicting number(s) already exist in this organization',
+          ...err.computation,
+        });
+        return;
+      }
+      if (err instanceof Error && err.message.startsWith('Invalid record number')) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    const derivedCount = computation.derived.length + computation.labelRefreshes.length;
+
+    await prisma.timelineEvent.create({
+      data: {
+        organization_id: orgId,
+        entity_type: 'CUSTOMER',
+        entity_id: id,
+        event_type: 'CUSTOMER_RENUMBERED',
+        description:
+          `Customer number changed from ${computation.oldNumber} to ${computation.newNumber} ` +
+          `(${derivedCount} derived record${derivedCount === 1 ? '' : 's'} updated)`,
+        metadata: {
+          old_number: computation.oldNumber,
+          new_number: computation.newNumber,
+          derived_count: derivedCount,
+        },
+        created_by: req.user!.id,
+      },
+    });
+
+    void logAudit({
+      req,
+      action: 'customer.renumbered',
+      resourceType: 'Customer',
+      resourceId: id,
+      metadata: { old_number: computation.oldNumber, new_number: computation.newNumber },
+    });
+
+    // Built from the pre-transaction row + the computation rather than re-selected, so the
+    // response doesn't cost a second round trip - the values written are exactly these
+    // (applyRenumber's own COALESCE-on-original_number rule, mirrored here).
+    res.json({
+      customer: {
+        ...existing,
+        customer_number: computation.newNumber,
+        number_is_custom: true,
+        original_number: (existing as { original_number: string | null }).original_number ?? computation.oldNumber,
+      },
+      old_number: computation.oldNumber,
+      new_number: computation.newNumber,
+      derived: computation.derived,
+      label_refreshes: computation.labelRefreshes,
+    });
+  } catch (err) {
+    logger.error('Rename customer number error:', err);
+    res.status(500).json({ error: 'Failed to rename customer number' });
   }
 }
 

@@ -19,7 +19,7 @@ export function downloadBlob(blob: Blob, filename: string): void {
 }
 
 export function formatPhone(phone: string | null | undefined): string {
-  // Null-tolerant: customers.phone is nullable (Talon import + the #352 backfill
+  // Null-tolerant: customers.phone is nullable (Riverbend import + the #352 backfill
   // NULLs junk values), and search dropdowns render it straight off the API.
   if (!phone) return '';
   const digits = phone.replace(/\D/g, '');

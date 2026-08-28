@@ -32,6 +32,47 @@ vi.mock('../services/automations/dispatch', () => ({
   dispatchAutomationEvent: vi.fn(),
 }));
 import { dispatchAutomationEvent } from '../services/automations/dispatch';
+
+/** S8: the one trip a job-level crew statement lands on in these fixtures. */
+const FIXTURE_CURRENT_VISIT = {
+  id: 'v0000000-0000-0000-0000-0000000000f1',
+  job_id: JOB_FIXTURE.id,
+  lead_id: null,
+  visit_seq: 1,
+  status: 'SCHEDULED',
+  scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+  scheduled_end: new Date('2026-10-01T11:00:00.000Z'),
+  is_all_day: false,
+  created_at: new Date('2026-09-01T00:00:00.000Z'),
+  en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+};
+
+/**
+ * Multi-visit S8 (D6): crew lives on the VISIT, so a job fixture has to state it there.
+ *
+ * The `assignees` key is kept alongside because it survives as the payload's DERIVED wire key -
+ * a fixture that only stated the relation would stop exercising the readers of the key, and one
+ * that only stated the key would stop exercising the row scope. Both are true of the real row.
+ */
+function withCrew(userIds: string[]) {
+  return {
+    assignees: userIds.map((id) => ({ user_id: id, user: { id, first_name: 'F', last_name: 'L' } })),
+    visits: [
+      {
+        id: 'v0000000-0000-0000-0000-0000000000f1',
+        visit_seq: 1,
+        status: 'SCHEDULED',
+        scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+        scheduled_end: new Date('2026-10-01T11:00:00.000Z'),
+        is_all_day: false,
+        customer_email_sent_at: null,
+        created_at: new Date('2026-09-01T00:00:00.000Z'),
+        assignees: userIds.map((id) => ({ user_id: id, user: { id, first_name: 'F', last_name: 'L' } })),
+      },
+    ],
+  };
+}
+
 const mockDispatch = dispatchAutomationEvent as ReturnType<typeof vi.fn>;
 function dispatchedType(type: string) {
   return mockDispatch.mock.calls.filter((c: any[]) => c[0].type === type).map((c: any[]) => c[0]);
@@ -109,6 +150,24 @@ beforeEach(() => {
   (prisma.customer.findMany as any).mockResolvedValue([]);
 });
 
+/**
+ * Every `visits.some` inside an emitted `where`, however it is nested under AND/OR.
+ *
+ * The date-window predicate is composed, not assigned, and its arrangement is the query
+ * builder's business: multi-visit S6 first pushed one clause under AND and then wrapped it in an
+ * OR so a CALLED-OFF job stays findable by date. A literal `toContainEqual` on `where.AND`
+ * reddens on that rearrangement while the behaviour is unchanged, so ask what the predicate
+ * MEANS instead.
+ */
+function visitWindowsIn(node: any, out: any[] = []): any[] {
+  if (!node || typeof node !== 'object') return out;
+  if (node.visits?.some) out.push(node.visits.some);
+  for (const list of [node.AND, node.OR, node.NOT]) {
+    for (const child of (Array.isArray(list) ? list : list ? [list] : [])) visitWindowsIn(child, out);
+  }
+  return out;
+}
+
 // ─── GET /api/jobs ─────────────────────────────────────
 
 describe('GET /api/jobs', () => {
@@ -124,7 +183,7 @@ describe('GET /api/jobs', () => {
     mockPrisma.job.count.mockResolvedValue(0);
     mockPrisma.job.count.mockResolvedValueOnce(1);
     mockPrisma.job.groupBy.mockResolvedValue([
-      { status: 'UNASSIGNED', _count: 1 },
+      { status: 'UNSCHEDULED', _count: 1 },
     ]);
 
     const res = await request(app).get('/api/jobs').set(authHeader('admin'));
@@ -205,10 +264,10 @@ describe('GET /api/jobs', () => {
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.job.count.mockResolvedValue(0);
 
-    await request(app).get('/api/jobs?status=UNASSIGNED&status=SCHEDULED').set(authHeader('admin'));
+    await request(app).get('/api/jobs?status=UNSCHEDULED&status=SCHEDULED').set(authHeader('admin'));
 
     const call = mockPrisma.job.findMany.mock.calls[0][0];
-    expect(call.where.status).toEqual({ in: ['UNASSIGNED', 'SCHEDULED'] });
+    expect(call.where.status).toEqual({ in: ['UNSCHEDULED', 'SCHEDULED'] });
   });
 
   it('TECHNICIAN auto-filters to own jobs', async () => {
@@ -222,7 +281,7 @@ describe('GET /api/jobs', () => {
     // Assigned OR created by them (technician-ownership spec, Part C). The OR half is what keeps
     // a job the technician made but was taken off visible to them.
     expect(call.where.OR).toEqual([
-      { assignees: { some: { user_id: TEST_USERS.technician.id } } },
+      { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } },
       { created_by_id: TEST_USERS.technician.id },
     ]);
   });
@@ -272,8 +331,22 @@ describe('GET /api/jobs', () => {
       .get('/api/jobs?scheduled_after=2026-01-01T00:00:00.000Z&scheduled_before=2026-12-31T00:00:00.000Z')
       .set(authHeader('admin'));
 
+    // Multi-visit S6: the window is a question about the job's VISIT set, not about the
+    // Job.scheduled_start mirror (which only ever held the NEXT upcoming trip, so a job whose
+    // second trip fell in the window was invisible). Composed under AND, never assigned onto
+    // `where.visits`, because S8 repoints the stored OWN_JOB row scope at that same path.
     const call = mockPrisma.job.findMany.mock.calls[0][0];
-    expect(call.where.scheduled_start).toBeDefined();
+    expect(call.where.scheduled_start).toBeUndefined();
+    // Asserted as a PROPERTY of the emitted predicate rather than as its literal arrangement:
+    // the clause is an OR (the second arm keeps a CALLED-OFF job findable by date, which the
+    // board's arm cannot express), and rearranging AND/OR must not redden a test that is really
+    // about "the window is measured on the visit".
+    const windows = visitWindowsIn(call.where);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const some of windows) {
+      expect(some.scheduled_at).toEqual({ gte: expect.any(Date), lte: expect.any(Date) });
+    }
+    expect(windows).toContainEqual(expect.objectContaining({ status: { not: 'CANCELLED' } }));
   });
 
   it('should scope stats to own leads for SALES role', async () => {
@@ -301,7 +374,7 @@ describe('GET /api/jobs', () => {
 
     const techFilter = {
       OR: [
-        { assignees: { some: { user_id: TEST_USERS.technician.id } } },
+        { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } },
         { created_by_id: TEST_USERS.technician.id },
       ],
     };
@@ -364,18 +437,52 @@ describe('GET /api/jobs', () => {
     expect(where.NOT).toEqual({ invoices: { some: { status: { not: 'VOIDED' } } } });
   });
 
-  it('completed/cancelled job stats are bounded to the current month', async () => {
+  // S8 (RATIFIED): the two monthly tiles no longer filter the DROPPED `Job.scheduled_start`
+  // column - they compose a visits-set OR under `AND`, the identical pattern buildJobListWhere's
+  // own date-range filter proves (never a bare `where.scheduled_start`, which is gone, and never
+  // a bare `where.OR`/`where.visits` assignment, which would silently overwrite scopeWhere's own
+  // row-scope OR - the RBAC-bypass this shape exists to avoid).
+  it('completed/cancelled job stats are bounded to the current month via the visit set', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.job.count.mockResolvedValue(0);
     mockPrisma.job.groupBy.mockResolvedValue([]);
     await request(app).get('/api/jobs').set(authHeader('admin'));
     const completed = mockPrisma.job.count.mock.calls.find(
-      (c: any) => c[0].where?.status === 'COMPLETED' && c[0].where?.scheduled_start
+      (c: any) => c[0].where?.status === 'COMPLETED' && Array.isArray(c[0].where?.AND),
     );
     expect(completed).toBeDefined();
-    expect(completed![0].where.scheduled_start.gte).toBeInstanceOf(Date);
-    expect(completed![0].where.scheduled_start.lte).toBeInstanceOf(Date);
+    const orClause = completed![0].where.AND[0].OR;
+    expect(orClause).toBeInstanceOf(Array);
+    const window = orClause[0].visits.some.scheduled_at;
+    // Half-open on the ORG's calendar month: `[1st 00:00 org, next 1st 00:00 org)`. It was
+    // `new Date(now.getFullYear(), now.getMonth(), 1)` - the SERVER's month, which is UTC in
+    // production - so the tile counted on a different clock from both the Scheduled column
+    // and the org-zone month range the tile's own click-through sends. `lt` rather than an
+    // `lte` end-of-month instant because a DST month has an odd number of hours in it.
+    expect(window.gte).toBeInstanceOf(Date);
+    expect(window.lt).toBeInstanceOf(Date);
+    expect(window.lte).toBeUndefined();
+    // The default org zone is America/New_York, so a month begins at 04:00Z or 05:00Z, never
+    // at 00:00Z - the assertion that actually distinguishes the org clock from UTC's.
+    expect(window.gte.getUTCHours()).not.toBe(0);
+    expect(window.gte.getUTCDate()).toBe(new Date(window.gte).getUTCDate());
+    // The headline case this must not regress: a COMPLETED job with no LIVE visit still counts -
+    // arm 1 excludes only a CANCELLED visit, never a COMPLETED one, from the "was scheduled this
+    // month" question.
+    expect(orClause[0].visits.some.status).toEqual({ not: 'CANCELLED' });
+
+    const cancelled = mockPrisma.job.count.mock.calls.find(
+      (c: any) => c[0].where?.status === 'CANCELLED' && Array.isArray(c[0].where?.AND),
+    );
+    expect(cancelled).toBeDefined();
+    // A cancelled job's second OR arm counts ANY visit in the window regardless of that visit's
+    // own status - a CANCELLED job can still hold a COMPLETED visit (cancel() never revives
+    // finished trips), and this tile must still see it.
+    expect(cancelled![0].where.AND[0].OR[1]).toEqual({
+      status: 'CANCELLED',
+      visits: { some: { scheduled_at: expect.objectContaining({ gte: expect.any(Date), lt: expect.any(Date) }) } },
+    });
   });
 
   // ── #106 grant-driven LIST scope ENFORCEMENT ──
@@ -439,7 +546,7 @@ describe('GET /api/jobs', () => {
 
   // CORRECTION 2 — the brief's sketch had `column: 'scheduled_date'`, which is a DIFFERENT
   // model's column; the live Job model's column (and index) is `scheduled_start`.
-  it('scheduled_after/scheduled_before filter scheduled_start, NOT scheduled_date', async () => {
+  it('scheduled_after/scheduled_before ask the visit set, and never the retired scheduled_date', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.job.count.mockResolvedValue(0);
@@ -449,8 +556,9 @@ describe('GET /api/jobs', () => {
       .set(authHeader('admin'));
 
     const call = mockPrisma.job.findMany.mock.calls[0][0];
-    expect(call.where.scheduled_start.gte).toBeInstanceOf(Date);
-    expect(call.where.scheduled_start.lte).toBeInstanceOf(Date);
+    const window = visitWindowsIn(call.where)[0]!;
+    expect(window.scheduled_at.gte).toBeInstanceOf(Date);
+    expect(window.scheduled_at.lte).toBeInstanceOf(Date);
     expect(call.where.scheduled_date).toBeUndefined();
   });
 
@@ -470,6 +578,11 @@ describe('GET /api/jobs', () => {
     expect(call.where.created_at.lte).toBeInstanceOf(Date);
   });
 
+  // Multi-visit S8 (D6): crew is reached THROUGH THE TRIPS. These three used to assert a
+  // top-level `where.assignees`, which is a DEAD relation now that `job_assignees` is dropped -
+  // the mocked seam happily accepted it while the real client would have 500'd the whole list.
+  // The observable behaviour those shapes stand in for is covered end to end, against an
+  // honouring fake that throws on the dead key, in job-list-crew-filter-visits.test.ts.
   it('department_id multi-select (no assigned_to, no role-scope) matches either department', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findMany.mockResolvedValue([]);
@@ -480,14 +593,15 @@ describe('GET /api/jobs', () => {
       .set(authHeader('admin'));
 
     const call = mockPrisma.job.findMany.mock.calls[0][0];
-    expect(call.where.assignees).toEqual({
-      some: { user: { department_id: { in: ['dept-1', 'dept-2'] } } },
+    expect(call.where.AND).toContainEqual({
+      visits: { some: { assignees: { some: { user: { department_id: { in: ['dept-1', 'dept-2'] } } } } } },
     });
+    expect(call.where).not.toHaveProperty('assignees');
   });
 
-  // No pre-existing role-scoped `where.assignees` (ADMIN) — both crew params merge into ONE
-  // `where.assignees.some`, exactly as the pre-Task-10 hand-rolled code did.
-  it('assigned_to + department_id (no role-scope) merge into ONE where.assignees.some', async () => {
+  // Both crew params merge into ONE `assignees.some` under a single `visits.some`, so the pair
+  // asks "a trip crewed by this person, who is in one of these departments" - the pre-S8 meaning.
+  it('assigned_to + department_id merge into ONE assignees.some under one visits.some', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.job.count.mockResolvedValue(0);
@@ -497,13 +611,21 @@ describe('GET /api/jobs', () => {
       .set(authHeader('admin'));
 
     const call = mockPrisma.job.findMany.mock.calls[0][0];
-    expect(call.where.assignees).toEqual({
-      some: {
-        user_id: TEST_USERS.sales.id,
-        user: { department_id: { in: ['dept-1', 'dept-2'] } },
+    expect(call.where.AND).toEqual([
+      {
+        visits: {
+          some: {
+            assignees: {
+              some: {
+                user_id: TEST_USERS.sales.id,
+                user: { department_id: { in: ['dept-1', 'dept-2'] } },
+              },
+            },
+          },
+        },
       },
-    });
-    expect(call.where.AND).toBeUndefined();
+    ]);
+    expect(call.where).not.toHaveProperty('assignees');
   });
 
   // SECURITY (most important test in Task 10): scopeWhereForReq already narrows
@@ -531,14 +653,17 @@ describe('GET /api/jobs', () => {
     // query-param value. It is an OR union since the technician-ownership spec widened `read Job`
     // to assigned-or-created; the property under test is that it is untouched, not its shape.
     expect(call.where.OR).toEqual([
-      { assignees: { some: { user_id: TEST_USERS.technician.id } } },
+      { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } },
       { created_by_id: TEST_USERS.technician.id },
     ]);
     // The attacker-supplied assigned_to is composed as a SEPARATE AND clause, additively
-    // narrowing (never widening) visibility — the tech still can't see Sales's jobs.
+    // narrowing (never widening) visibility - the tech still can't see Sales's jobs. S8: it
+    // reaches crew through the trips, like the row scope above; a top-level `assignees` key
+    // would be a dead relation and a 500, not a narrower filter.
     expect(call.where.AND).toEqual([
-      { assignees: { some: { user_id: TEST_USERS.sales.id } } },
+      { visits: { some: { assignees: { some: { user_id: TEST_USERS.sales.id } } } } },
     ]);
+    expect(call.where).not.toHaveProperty('assignees');
   });
 
   // WP2 (job sub-statuses filter axis) — sub_status_id is a plain scalar column on Job, so
@@ -597,6 +722,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       };
       return fn(txMock);
     });
@@ -650,6 +789,20 @@ describe('POST /api/jobs — standard', () => {
         jobLineItem: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       };
       return fn(txMock);
     });
@@ -875,6 +1028,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1094,6 +1261,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1137,6 +1318,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1181,6 +1376,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1224,6 +1433,20 @@ describe('POST /api/jobs — standard', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1251,6 +1474,20 @@ describe('POST /api/jobs — resolveScheduleJobNotifications', () => {
         // these estimate mocks, so the lookup is a no-op returning [].
         priceBookItem: { findMany: vi.fn().mockResolvedValue([]) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       };
       return fn(txMock);
     });
@@ -1295,6 +1532,20 @@ describe('POST /api/jobs — resolveScheduleJobNotifications', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       };
       return fn(txMock);
     });
@@ -1339,6 +1590,20 @@ describe('POST /api/jobs — create schema (one-of estimate | customer+location)
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
     const res = await request(app).post('/api/jobs').set(authHeader('admin'))
@@ -1360,6 +1625,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       };
       return fn(txMock);
     });
@@ -1374,6 +1653,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
   }
@@ -1444,7 +1737,7 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
   // it was a per-user toggle between Phase B and then. The guard that keeps this safe is no longer
   // the route: it is that the creator is AUTO-ASSIGNED (the row-scoped-creator branch below), so a
   // technician's own new job is theirs, and `created_by_id` keeps it theirs afterwards.
-  it('TECHNICIAN CAN create a standalone job (role default) and is auto-assigned to it', async () => {
+  it('TECHNICIAN CAN create a standalone job (role default), with no crew row of their own', async () => {
     mockAuthAs('technician');
     mockPrisma.customer.findUnique.mockResolvedValue(CUSTOMER_FIXTURE);
     mockPrisma.serviceLocation.findFirst.mockResolvedValue(LOCATION_FIXTURE);
@@ -1455,15 +1748,31 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
         jobAssignee: { createMany: vi.fn().mockImplementation((args: any) => { capturedAssignee = args.data; return {}; }) },
       }),
     );
     const res = await request(app).post('/api/jobs').set(authHeader('technician'))
       .send({ customer_id: CUSTOMER_FIXTURE.id, service_location_id: LOCATION_FIXTURE.id });
     expect(res.status).toBe(201);
-    expect(capturedAssignee).toEqual(
-      expect.arrayContaining([expect.objectContaining({ user_id: TEST_USERS.technician.id })]),
-    );
+    // S8 (D6): there is no self-assign row any more - the table is gone, and a create path that
+    // booked no visit has no trip for the creator to be on. Nothing is lost: TECHNICIAN's
+    // `read Job` is OWN_OR_CREATED_JOB, so the creator reaches their own job through the
+    // created_by_id arm. Asserting the ABSENCE keeps the change visible rather than silent.
+    expect(capturedAssignee).toBeUndefined();
   });
 
   it('does NOT write is_urgent or urgency_reason', async () => {
@@ -1477,6 +1786,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
     await request(app).post('/api/jobs').set(authHeader('admin'))
@@ -1523,6 +1846,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1545,6 +1882,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1568,6 +1919,20 @@ describe('POST /api/jobs — standalone (no estimate)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1671,6 +2036,20 @@ describe('POST /api/jobs — standalone new_customer (inline create)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1699,6 +2078,20 @@ describe('POST /api/jobs — standalone new_customer (inline create)', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -1938,7 +2331,7 @@ describe('GET /api/jobs/:id', () => {
     mockAuthAs('technician');
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     // GAP-1 — getById now gates via canAccessRow (scoped findFirst), not the role-literal
     // canAccessJob. The tech owns this job, so the scoped probe matches → 200.
@@ -1955,7 +2348,7 @@ describe('GET /api/jobs/:id', () => {
     mockAuthAs('technician');
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
     });
     // GAP-1 — getById gates via canAccessRow (scoped findFirst). The tech does NOT own this job,
     // so the scoped probe finds nothing → 403. (Explicit null guards against vi.clearAllMocks
@@ -2009,9 +2402,13 @@ describe('GET /api/jobs/:id', () => {
     // getById calls findUnique twice: [0] = access-check (minimal), [1] = full jobDetailSelect.
     const sel = mockPrisma.job.findUnique.mock.calls[1][0].select;
     expect(sel.dispatcher).toBeTruthy();
-    expect(sel.assignees.select.user.select.department).toBeTruthy();
-    expect(sel.assignees.select.user.select.phone).toBe(true);
-    expect(sel.assignees.select.user.select.role).toBe(true);
+    // S8 (D6): the crew person shape rides on the VISITS relation now; the `assignees` WIRE key
+    // is derived from it by the controller, so the payload the page reads is unchanged.
+    expect(sel.assignees).toBeUndefined();
+    const crewUser = sel.visits.select.assignees.select.user.select;
+    expect(crewUser.department).toBeTruthy();
+    expect(crewUser.phone).toBe(true);
+    expect(crewUser.role).toBe(true);
     expect(sel.invoices.select.sent_at).toBe(true);
     expect(sel.invoices.select.paid_at).toBe(true);
     expect(sel.invoices.select.kind).toBe(true);
@@ -2116,7 +2513,7 @@ describe('PATCH /api/jobs/:id', () => {
       mockAuthAs('technician');
       mockPrisma.job.findUnique.mockResolvedValue({
         ...JOB_FIXTURE,
-        assignees: [{ user_id: TEST_USERS.technician.id }],
+        ...withCrew([TEST_USERS.technician.id]),
         created_by_id: 'someone-else',
       });
       mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
@@ -2136,7 +2533,7 @@ describe('PATCH /api/jobs/:id', () => {
 
   it('admin can update job_type on an editable job', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status UNASSIGNED
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status UNSCHEDULED
     let captured: any;
     mockPrisma.job.update.mockImplementation((args: any) => {
       captured = args;
@@ -2175,7 +2572,7 @@ describe('PATCH /api/jobs/:id', () => {
     // Row is owned by a DIFFERENT crew member, so the OWN_JOB condition cannot match.
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
-      assignees: [{ user_id: 'another-tech-id' }],
+      ...withCrew(['another-tech-id']),
     });
     // canAccessRow's scoped visibility probe: the job is not visible under the tech's OWN_JOB
     // scope → findFirst returns null → access denied (the SQL probe, not the loaded row).
@@ -2200,7 +2597,7 @@ describe('PATCH /api/jobs/:id', () => {
     mockAuthAs('technician');
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, scope_notes: 'my edit' });
@@ -2457,7 +2854,7 @@ describe('PATCH /api/jobs/:id', () => {
   describe('cost model fields (R3b)', () => {
     it('writes labor_hours/overhead_mode/overhead_value for admin', async () => {
       mockAuthAs('admin');
-      mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status UNASSIGNED
+      mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status UNSCHEDULED
       let captured: any;
       mockPrisma.job.update.mockImplementation((args: any) => {
         captured = args;
@@ -2475,7 +2872,7 @@ describe('PATCH /api/jobs/:id', () => {
       expect(captured.data.overhead_value).toBe(50);
     });
 
-    // Spec B1 (free-status-transitions) removes the UNASSIGNED/SCHEDULED-only status gate
+    // Spec B1 (free-status-transitions) removes the UNSCHEDULED/SCHEDULED-only status gate
     // entirely — ordering constraints go, per the freedom principle. labor_hours are typically
     // logged AFTER the work is done, so they must stay editable on an IN_PROGRESS/COMPLETED job.
     it('allows editing labor_hours/overhead on an IN_PROGRESS job', async () => {
@@ -2745,12 +3142,12 @@ describe('PATCH /api/jobs/:id', () => {
   });
 
   // SRVW-87 - PATCH is the EDIT door, not the scheduler. It derives status from the schedule it
-  // writes, but ONLY between UNASSIGNED and SCHEDULED: it must never demote a job that has moved
+  // writes, but ONLY between UNSCHEDULED and SCHEDULED: it must never demote a job that has moved
   // past SCHEDULED, and it must never spread milestoneClears(). See deriveStatusOnReschedule.
   describe('status derivation on reschedule (SRVW-87)', () => {
-    it('promotes an UNASSIGNED job to SCHEDULED when a scheduled_start is written', async () => {
+    it('promotes an UNSCHEDULED job to SCHEDULED when a scheduled_start is written', async () => {
       mockAuthAs('admin');
-      mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, no schedule yet
+      mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, no schedule yet
       let captured: any;
       mockPrisma.job.update.mockImplementation((args: any) => {
         captured = args;
@@ -2766,7 +3163,7 @@ describe('PATCH /api/jobs/:id', () => {
       expect(captured.data.status).toBe('SCHEDULED');
     });
 
-    it('demotes a SCHEDULED job to UNASSIGNED when the schedule is cleared', async () => {
+    it('demotes a SCHEDULED job to UNSCHEDULED when the schedule is cleared', async () => {
       mockAuthAs('admin');
       mockPrisma.job.findUnique.mockResolvedValue({
         ...JOB_FIXTURE,
@@ -2777,7 +3174,7 @@ describe('PATCH /api/jobs/:id', () => {
       let captured: any;
       mockPrisma.job.update.mockImplementation((args: any) => {
         captured = args;
-        return Promise.resolve({ ...JOB_FIXTURE, status: 'UNASSIGNED' });
+        return Promise.resolve({ ...JOB_FIXTURE, status: 'UNSCHEDULED' });
       });
 
       const res = await request(app)
@@ -2786,7 +3183,7 @@ describe('PATCH /api/jobs/:id', () => {
         .send({ scheduled_start: null, scheduled_end: null });
 
       expect(res.status).toBe(200);
-      expect(captured.data.status).toBe('UNASSIGNED');
+      expect(captured.data.status).toBe('UNSCHEDULED');
     });
 
     // Risk 1 (MONEY/REPORTING): copying assign()'s derivation wholesale would pair the status
@@ -2825,7 +3222,7 @@ describe('PATCH /api/jobs/:id', () => {
       mockAuthAs('admin');
       mockPrisma.job.findUnique.mockResolvedValue({
         ...JOB_FIXTURE,
-        status: 'UNASSIGNED',
+        status: 'UNSCHEDULED',
         scheduled_start: new Date('2026-09-01T09:00:00Z'),
         scheduled_end: new Date('2026-09-01T11:00:00Z'),
       });
@@ -2851,15 +3248,21 @@ describe('PATCH /api/jobs/:id', () => {
     const crewedScheduled = {
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
       scheduled_start: new Date('2026-09-01T09:00:00Z'),
       scheduled_end: new Date('2026-09-01T11:00:00Z'),
     };
+    // Multi-visit S6 (B7): the conflict query now reads the other job's VISIT set, so the row it
+    // gets back carries the overlapping trips rather than the Job.scheduled_start mirror. The 409
+    // ENTRY is unchanged - the parent's id/number with the visit's times.
     const overlapping = [{
       id: 'conflict-job',
       job_number: 'J00002',
-      scheduled_start: new Date('2026-09-02T09:30:00Z'),
-      scheduled_end: new Date('2026-09-02T10:30:00Z'),
+      visits: [{
+        id: 'conflict-visit',
+        scheduled_at: new Date('2026-09-02T09:30:00Z'),
+        scheduled_end: new Date('2026-09-02T10:30:00Z'),
+      }],
     }];
 
     // The force case queues a conflicting findMany that is deliberately never consumed, and
@@ -3042,12 +3445,12 @@ describe('DELETE /api/jobs/:id', () => {
   // invoice-bearing-job rule that still outranks it) lives in job-creator-control.test.ts.
   it('TECHNICIAN cannot delete a job they did not create (403)', async () => {
     mockAuthAs('technician');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, invoices: [], assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, invoices: [], ...withCrew([]) });
     mockScopedFindFirst(mockPrisma.job.findFirst, {
       id: JOB_FIXTURE.id,
       organization_id: ALPHA_ORG_ID,
       created_by_id: TEST_USERS.admin.id,
-      assignees: [],
+      ...withCrew([]),
     });
 
     const res = await request(app)
@@ -3076,7 +3479,7 @@ describe('DELETE /api/jobs/:id', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       invoices: [],
-      assignees: [{ user_id: 'another-tech-id' }],
+      ...withCrew(['another-tech-id']),
     });
     // canAccessRow's scoped probe: not visible under OWN_JOB → null → access denied.
     mockPrisma.job.findFirst.mockResolvedValue(null);
@@ -3099,7 +3502,7 @@ describe('DELETE /api/jobs/:id', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       invoices: [],
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     // canAccessRow's scoped probe finds the row visible under OWN_JOB → access granted.
     mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
@@ -3198,6 +3601,9 @@ describe('POST /api/jobs/:id/assign', () => {
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.lead.findMany.mockResolvedValue([]);
     const txJobAssigneeFindMany = vi.fn().mockResolvedValue(currentCrew);
+    // S8 (D6): crew lands on the VISIT now, so these are the write spies that matter.
+    const txVisitAssigneeFindMany = vi.fn().mockResolvedValue(currentCrew);
+    const txVisitAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobAssigneeDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobUpdate = vi.fn().mockResolvedValue(updated);
@@ -3205,13 +3611,35 @@ describe('POST /api/jobs/:id/assign', () => {
     const txPlanVisitUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so these fakes
+        // hold one - a job with no trip at all cannot hold crew and 400s by design (see
+        // visit-crew.test.ts, which pins that case deliberately).
+        visit: {
+          findMany: vi.fn().mockResolvedValue([FIXTURE_CURRENT_VISIT]),
+          create: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          update: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+        // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+        // transaction, so the union it writes can never evict someone off another visit. Without
+        // this delegate the read throws inside the tx and the route 500s opaquely.
+        visitAssignee: {
+          findMany: txVisitAssigneeFindMany,
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: txVisitAssigneeCreateMany,
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: { findMany: txJobAssigneeFindMany, createMany: txJobAssigneeCreateMany, deleteMany: txJobAssigneeDeleteMany },
         job: { update: txJobUpdate },
         timelineEvent: { create: txTimeline },
         planVisit: { updateMany: txPlanVisitUpdateMany },
       }),
     );
-    return { txJobAssigneeFindMany, txJobAssigneeCreateMany, txJobAssigneeDeleteMany, txJobUpdate, txTimeline, txPlanVisitUpdateMany };
+    return { txJobAssigneeFindMany, txJobAssigneeCreateMany, txJobAssigneeDeleteMany, txVisitAssigneeFindMany, txVisitAssigneeCreateMany, txJobUpdate, txTimeline, txPlanVisitUpdateMany };
   }
 
   beforeEach(() => {
@@ -3271,15 +3699,16 @@ describe('POST /api/jobs/:id/assign', () => {
       .send({ assignee_ids: [techUser.id, TEST_USERS.sales.id], scheduled_start: '2025-06-01T09:00:00Z', scheduled_end: '2025-06-01T11:00:00Z' });
 
     expect(res.status).toBe(200);
-    // Both added → createMany called with the two members
-    expect(tx.txJobAssigneeCreateMany).toHaveBeenCalled();
-    const createArg = tx.txJobAssigneeCreateMany.mock.calls[0][0];
+    // S8 (D6): both added, and the write lands on the trip - visit_assignees, not the dead table.
+    expect(tx.txVisitAssigneeCreateMany).toHaveBeenCalled();
+    const createArg = tx.txVisitAssigneeCreateMany.mock.calls[0][0];
     expect(createArg.data.map((d: { user_id: string }) => d.user_id).sort()).toEqual([techUser.id, TEST_USERS.sales.id].sort());
+    expect(tx.txJobAssigneeCreateMany).not.toHaveBeenCalled();
   });
 
   it('state 4: assignee_ids:[] + a time → SCHEDULED, 0 crew, NO JOB_SCHEDULED dispatch, flag stays null', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, customer_scheduled_email_sent_at: null
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, customer_scheduled_email_sent_at: null
     const tx = wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
 
     const res = await request(app)
@@ -3300,7 +3729,7 @@ describe('POST /api/jobs/:id/assign', () => {
 
   it('state 2: first-schedule with crew≥1 → SCHEDULED + JOB_SCHEDULED dispatch + flag stamped', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, flag null
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, flag null
     const tx = wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
 
     const res = await request(app)
@@ -3409,7 +3838,7 @@ describe('POST /api/jobs/:id/assign', () => {
     mockAuthAs('admin');
     // The CURRENT crew is read from the pre-tx job.findUnique (existing.assignees), which is
     // also what the dispatch diff is computed against.
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, assignees: [{ user_id: techUser.id }, { user_id: TEST_USERS.sales.id }] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, ...withCrew([techUser.id, TEST_USERS.sales.id]) });
     wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' }, [{ user_id: techUser.id }, { user_id: TEST_USERS.sales.id }]);
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: TEST_USERS.sales.id, email: TEST_USERS.sales.email, first_name: TEST_USERS.sales.first_name, last_name: TEST_USERS.sales.last_name },
@@ -3432,12 +3861,12 @@ describe('POST /api/jobs/:id/assign', () => {
   // refusal moved from the route guard to the handler's per-instance check.
   it('TECHNICIAN cannot assign a job they did not create (403)', async () => {
     mockAuthAs('technician');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, ...withCrew([]) });
     mockScopedFindFirst(mockPrisma.job.findFirst, {
       id: JOB_FIXTURE.id,
       organization_id: ALPHA_ORG_ID,
       created_by_id: TEST_USERS.admin.id,
-      assignees: [],
+      ...withCrew([]),
     });
 
     const res = await request(app)
@@ -3451,7 +3880,7 @@ describe('POST /api/jobs/:id/assign', () => {
   // ─── SCHEDULED / RESCHEDULED timeline events (A3) ────
 
   it('writes a SCHEDULED timeline event on first schedule', async () => {
-    // JOB_FIXTURE has status: UNASSIGNED and scheduled_start: null — first schedule
+    // JOB_FIXTURE has status: UNSCHEDULED and scheduled_start: null — first schedule
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE);
     const tx = wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
@@ -3471,12 +3900,19 @@ describe('POST /api/jobs/:id/assign', () => {
 
   it('writes a RESCHEDULED timeline event when scheduled_start changes', async () => {
     // Job already has a scheduled_start set → changing it writes RESCHEDULED
+    // S8 (RATIFIED, A5): scheduled_start is a computed projection off `visits[]` now, not a flat
+    // column - the `visits` override below (replacing withCrew's own fixed 2026-10-01 stub) is
+    // what makes `currentWindow.scheduled_start` actually resolve to the date this test intends.
     const JOB_SCHEDULED_FIXTURE = {
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      scheduled_start: new Date('2026-07-01T15:00:00.000Z'),
-      scheduled_end: new Date('2026-07-01T17:00:00.000Z'),
-      assignees: [{ user_id: techUser.id }],
+      ...withCrew([techUser.id]),
+      visits: [{
+        id: 'v0000000-0000-0000-0000-0000000000f1', visit_seq: 1, status: 'SCHEDULED',
+        scheduled_at: new Date('2026-07-01T15:00:00.000Z'), scheduled_end: new Date('2026-07-01T17:00:00.000Z'),
+        is_all_day: false, customer_email_sent_at: null, created_at: new Date('2026-06-01T00:00:00.000Z'),
+        assignees: [{ user_id: techUser.id, user: { id: techUser.id, first_name: 'F', last_name: 'L' } }],
+      }],
     };
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(JOB_SCHEDULED_FIXTURE);
@@ -3499,16 +3935,24 @@ describe('POST /api/jobs/:id/assign', () => {
   it('does NOT write SCHEDULED or RESCHEDULED when crew changes but time does not change', async () => {
     // Crew change only (same scheduled_start, no time change) → no scheduling timeline event
     // Job is already SCHEDULED with techUser on crew; we add a sales user, same time → timeChanged=false
+    // S8 (RATIFIED, A5): scheduled_start is a computed projection off `visits[]` now - the
+    // `visits` override below is what makes `currentWindow.scheduled_start` resolve to the SAME
+    // instant the PATCH body sends, so `timeChanged` is genuinely false rather than an accident of
+    // withCrew's own fixed stub date.
     const JOB_SCHEDULED_FIXTURE = {
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      scheduled_start: new Date('2026-07-01T15:00:00.000Z'),
-      scheduled_end: new Date('2026-07-01T17:00:00.000Z'),
-      assignees: [{ user_id: techUser.id }],
+      ...withCrew([techUser.id]),
+      visits: [{
+        id: 'v0000000-0000-0000-0000-0000000000f1', visit_seq: 1, status: 'SCHEDULED',
+        scheduled_at: new Date('2026-07-01T15:00:00.000Z'), scheduled_end: new Date('2026-07-01T17:00:00.000Z'),
+        is_all_day: false, customer_email_sent_at: null, created_at: new Date('2026-06-01T00:00:00.000Z'),
+        assignees: [{ user_id: techUser.id, user: { id: techUser.id, first_name: 'F', last_name: 'L' } }],
+      }],
     };
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(JOB_SCHEDULED_FIXTURE);
-    const tx = wireAssignTx({ ...JOB_SCHEDULED_FIXTURE, assignees: [{ user_id: techUser.id }, { user_id: TEST_USERS.sales.id }] },
+    const tx = wireAssignTx({ ...JOB_SCHEDULED_FIXTURE, ...withCrew([techUser.id, TEST_USERS.sales.id]) },
       [{ user_id: techUser.id }]);
 
     const res = await request(app)
@@ -3538,8 +3982,22 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.lead.findMany.mockResolvedValue([]);
     const txJobUpdate = vi.fn().mockResolvedValue(updated);
+    // S8 (RATIFIED, A5): is_all_day/scheduled_end land HERE now (syncJobWindowOntoVisits'
+    // tx.visit.update, moving the existing FIXTURE_CURRENT_VISIT) - the job-level mirror write is
+    // dropped, so tests asserting the window/all-day flag assert this spy, not txJobUpdate.
+    const txVisitUpdate = vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+        // transaction, so the union it writes can never evict someone off another visit. Without
+        // this delegate the read throws inside the tx and the route 500s opaquely.
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: {
           findMany: vi.fn().mockResolvedValue([]),
           createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -3547,9 +4005,20 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
         },
         job: { update: txJobUpdate },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
+        // Multi-visit S2: /assign keeps the job's one window in step with its visit set.
+        // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so these fakes
+        // hold one - a job with no trip at all cannot hold crew and 400s by design (see
+        // visit-crew.test.ts, which pins that case deliberately).
+        visit: {
+          findMany: vi.fn().mockResolvedValue([FIXTURE_CURRENT_VISIT]),
+          create: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          update: txVisitUpdate,
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
       }),
     );
-    return { txJobUpdate };
+    return { txJobUpdate, txVisitUpdate };
   }
 
   beforeEach(() => {
@@ -3564,7 +4033,7 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE);
     // Cross-entity conflict: findMany for jobs returns a conflict, findMany for leads returns empty
-    mockPrisma.job.findMany.mockResolvedValueOnce([{ id: 'conflict-job', job_number: 'J00002', scheduled_start: new Date('2025-06-01T09:00:00Z'), scheduled_end: new Date('2025-06-01T11:00:00Z') }]);
+    mockPrisma.job.findMany.mockResolvedValueOnce([{ id: 'conflict-job', job_number: 'J00002', visits: [{ id: 'conflict-visit', scheduled_at: new Date('2025-06-01T09:00:00Z'), scheduled_end: new Date('2025-06-01T11:00:00Z') }] }]);
     mockPrisma.lead.findMany.mockResolvedValueOnce([]);
 
     const res = await request(app)
@@ -3676,11 +4145,14 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(tx.txJobUpdate).toHaveBeenCalledWith(
+    // S8 (RATIFIED, A5): is_all_day is no longer a job column - syncJobWindowOntoVisits writes it
+    // onto the VISIT it moves/books, not job.update's data.
+    expect(tx.txVisitUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ is_all_day: true }),
       }),
     );
+    expect(tx.txJobUpdate.mock.calls[0][0].data).not.toHaveProperty('is_all_day');
   });
 
   it('should auto-compute scheduled_end for all-day job when only start provided', async () => {
@@ -3701,7 +4173,9 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(tx.txJobUpdate).toHaveBeenCalledWith(
+    // S8 (RATIFIED, A5): is_all_day/scheduled_end are no longer job columns - the auto-computed
+    // 24h end lands on the VISIT syncJobWindowOntoVisits moves, via computedEnd.
+    expect(tx.txVisitUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           is_all_day: true,
@@ -3709,6 +4183,8 @@ describe('POST /api/jobs/:id/assign — conflict detection', () => {
         }),
       }),
     );
+    expect(tx.txJobUpdate.mock.calls[0][0].data).not.toHaveProperty('is_all_day');
+    expect(tx.txJobUpdate.mock.calls[0][0].data).not.toHaveProperty('scheduled_end');
   });
 });
 
@@ -3724,18 +4200,43 @@ describe('POST /api/jobs/:id/assignees', () => {
 
   function wireAssigneesTx(updated: any, currentCrew: { user_id: string }[] = []) {
     const txJobAssigneeFindMany = vi.fn().mockResolvedValue(currentCrew);
+    // S8 (D6): crew lands on the VISIT now, so these are the write spies that matter.
+    const txVisitAssigneeFindMany = vi.fn().mockResolvedValue(currentCrew);
+    const txVisitAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobAssigneeDeleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const txJobUpdate = vi.fn().mockResolvedValue(updated);
     const txTimeline = vi.fn().mockResolvedValue({});
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so these fakes
+        // hold one - a job with no trip at all cannot hold crew and 400s by design (see
+        // visit-crew.test.ts, which pins that case deliberately).
+        visit: {
+          findMany: vi.fn().mockResolvedValue([FIXTURE_CURRENT_VISIT]),
+          create: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          update: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+        // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+        // transaction, so the union it writes can never evict someone off another visit. Without
+        // this delegate the read throws inside the tx and the route 500s opaquely.
+        visitAssignee: {
+          findMany: txVisitAssigneeFindMany,
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: txVisitAssigneeCreateMany,
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: { findMany: txJobAssigneeFindMany, createMany: txJobAssigneeCreateMany, deleteMany: txJobAssigneeDeleteMany },
         job: { update: txJobUpdate, findUnique: vi.fn().mockResolvedValue(updated) },
         timelineEvent: { create: txTimeline },
       }),
     );
-    return { txJobAssigneeFindMany, txJobAssigneeCreateMany, txJobAssigneeDeleteMany, txJobUpdate, txTimeline };
+    return { txJobAssigneeFindMany, txJobAssigneeCreateMany, txJobAssigneeDeleteMany, txVisitAssigneeFindMany, txVisitAssigneeCreateMany, txJobUpdate, txTimeline };
   }
 
   beforeEach(() => {
@@ -3758,8 +4259,9 @@ describe('POST /api/jobs/:id/assignees', () => {
       .send({ assignee_ids: [techUser.id] });
 
     expect(res.status).toBe(200);
-    // crew written
-    expect(tx.txJobAssigneeCreateMany).toHaveBeenCalled();
+    // S8 (D6): crew written - onto the trip.
+    expect(tx.txVisitAssigneeCreateMany).toHaveBeenCalled();
+    expect(tx.txJobAssigneeCreateMany).not.toHaveBeenCalled();
     // NEVER writes status or scheduling fields
     const updateArg = tx.txJobUpdate.mock.calls.length ? tx.txJobUpdate.mock.calls[0][0].data : {};
     expect(updateArg.status).toBeUndefined();
@@ -3795,17 +4297,17 @@ describe('POST /api/jobs/:id/assignees', () => {
       .send({ assignee_ids: [TEST_USERS.dispatcher.id] });
 
     expect(res.status).toBe(200);
-    expect(tx.txJobAssigneeCreateMany).toHaveBeenCalled();
+    expect(tx.txVisitAssigneeCreateMany).toHaveBeenCalled();
   });
 
   it('TECHNICIAN cannot set assignees on a job they did not create (403)', async () => {
     mockAuthAs('technician');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, created_by_id: TEST_USERS.admin.id, ...withCrew([]) });
     mockScopedFindFirst(mockPrisma.job.findFirst, {
       id: JOB_FIXTURE.id,
       organization_id: ALPHA_ORG_ID,
       created_by_id: TEST_USERS.admin.id,
-      assignees: [],
+      ...withCrew([]),
     });
 
     const res = await request(app)
@@ -3820,10 +4322,10 @@ describe('POST /api/jobs/:id/assignees', () => {
 // ─── POST /api/jobs/:id/unassign ───────────────────────
 
 describe('POST /api/jobs/:id/unassign', () => {
-  it('admin can unschedule a scheduled job (status UNASSIGNED, crew KEPT)', async () => {
+  it('admin can unschedule a scheduled job (status UNSCHEDULED, crew KEPT)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', assignees: [{ user_id: TEST_USERS.technician.id }] });
-    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNASSIGNED' });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', ...withCrew([TEST_USERS.technician.id]) });
+    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNSCHEDULED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
     const res = await request(app)
@@ -3832,7 +4334,7 @@ describe('POST /api/jobs/:id/unassign', () => {
 
     expect(res.status).toBe(200);
     const updateCall = mockPrisma.job.update.mock.calls[0][0];
-    expect(updateCall.data.status).toBe('UNASSIGNED');
+    expect(updateCall.data.status).toBe('UNSCHEDULED');
     // UNSCHEDULE semantics: crew is NOT cleared (no assigned_to:null, no jobAssignee deletion).
     expect(updateCall.data.assigned_to).toBeUndefined();
   });
@@ -3846,16 +4348,20 @@ describe('POST /api/jobs/:id/unassign', () => {
     await request(app).post(`/api/jobs/${JOB_FIXTURE.id}/unassign`).set(authHeader('admin'));
 
     const updateCall = mockPrisma.job.update.mock.calls[0][0];
-    expect(updateCall.data.scheduled_start).toBeNull();
-    expect(updateCall.data.scheduled_end).toBeNull();
+    // S8 (RATIFIED, A5): scheduled_start/scheduled_end are DROPPED as job columns - there is
+    // nothing left to null here. The live visits are cancelled separately (via visit.updateMany,
+    // asserted by the cancellation test elsewhere in this file), and the response's computed
+    // projection reads null off that once there is no live visit left.
+    expect(updateCall.data).not.toHaveProperty('scheduled_start');
+    expect(updateCall.data).not.toHaveProperty('scheduled_end');
     // crew untouched
     expect(updateCall.data.assignees).toBeUndefined();
     expect(mockPrisma.jobAssignee.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('allows unassigning an already-UNASSIGNED job (free status transitions, Spec B1)', async () => {
+  it('allows unassigning an already-UNSCHEDULED job (free status transitions, Spec B1)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status: UNASSIGNED
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // status: UNSCHEDULED
     mockPrisma.job.update.mockResolvedValue(JOB_FIXTURE);
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -3869,7 +4375,7 @@ describe('POST /api/jobs/:id/unassign', () => {
   it('flips the linked PlanVisit to CANCELLED when a service-plan visit-job is unscheduled', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', source_plan_id: '00000000-0000-0000-0000-0000000000a1' });
-    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNASSIGNED' });
+    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNSCHEDULED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
     mockPrisma.planVisit.updateMany.mockResolvedValue({ count: 1 });
 
@@ -3889,7 +4395,7 @@ describe('POST /api/jobs/:id/unassign', () => {
   it('does NOT touch PlanVisit when a normal (non-plan) job is unscheduled', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', source_plan_id: null });
-    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNASSIGNED' });
+    mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'UNSCHEDULED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
     const res = await request(app)
@@ -3936,7 +4442,7 @@ describe('POST /api/jobs/:id/start', () => {
 
   it('allows starting a job that is not SCHEDULED (free status transitions, Spec B1)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'IN_PROGRESS' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -3955,7 +4461,7 @@ describe('POST /api/jobs/:id/start', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'IN_PROGRESS' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -3973,7 +4479,7 @@ describe('POST /api/jobs/:id/start', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: 'someone-else' }],
+      ...withCrew(['someone-else']),
     });
 
     const res = await request(app)
@@ -3989,7 +4495,7 @@ describe('POST /api/jobs/:id/start', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
     });
 
     const res = await request(app)
@@ -4004,7 +4510,7 @@ describe('POST /api/jobs/:id/start', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'IN_PROGRESS', started_at: new Date() });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4065,7 +4571,7 @@ describe('POST /api/jobs/:id/complete', () => {
 
   it('backfills started_at when closing out a job that was never started', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', started_at: null, assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', started_at: null, ...withCrew([]) });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -4085,7 +4591,7 @@ describe('POST /api/jobs/:id/complete', () => {
       ...JOB_FIXTURE,
       status: 'IN_PROGRESS',
       started_at: originalStartedAt,
-      assignees: [],
+      ...withCrew([]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4101,7 +4607,7 @@ describe('POST /api/jobs/:id/complete', () => {
 
   it('admin can complete a SCHEDULED job directly (close-out from any active status)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', ...withCrew([]) });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -4118,7 +4624,7 @@ describe('POST /api/jobs/:id/complete', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4131,9 +4637,9 @@ describe('POST /api/jobs/:id/complete', () => {
     expect(res.status).toBe(200);
   });
 
-  it('allows completing a job that is UNASSIGNED (free status transitions, Spec B1)', async () => {
+  it('allows completing a job that is UNSCHEDULED (free status transitions, Spec B1)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -4145,14 +4651,33 @@ describe('POST /api/jobs/:id/complete', () => {
     expect(res.status).toBe(200);
   });
 
-  // `complete Job` (scoped to own jobs) is a TECHNICIAN role default: a technician can close out
-  // their own assigned job directly from any active status.
-  it('TECHNICIAN can complete their own assigned job', async () => {
+  // Multi-visit S4 / D15: `complete Job` is no longer a TECHNICIAN role DEFAULT - it is seeded
+  // into role_permissions at org creation only, so orgs provisioned before the change keep it and
+  // new ones never get it. Whether the grant is present at all is covered end to end in
+  // technician-complete-grant.test.ts. These two tests are about something else and still are:
+  // given an org that HOLDS the grant, the OWN_JOB row-scope decides. The grant is therefore
+  // seeded explicitly rather than left to mockAuthAs's DEFAULT_GRANTS - without it the 403 below
+  // would pass because the technician has no `complete Job` at all, proving nothing about scope.
+  const legacyTechnicianGrants = () => [
+    ...DEFAULT_GRANTS.filter((g) => g.role === 'TECHNICIAN'),
+    {
+      role: 'TECHNICIAN',
+      action: 'complete',
+      subject: 'Job',
+      conditions: { assignees: { some: { user_id: '{{userId}}' } } },
+    },
+  ];
+
+  it('TECHNICIAN can complete their own assigned job when the org carries the grant', async () => {
     mockAuthAs('technician');
+    (prisma.rolePermission.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
+      legacyTechnicianGrants(),
+    );
+    clearPermissionCache();
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'IN_PROGRESS',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4167,10 +4692,14 @@ describe('POST /api/jobs/:id/complete', () => {
 
   it('TECHNICIAN cannot complete a job they are not assigned to (403)', async () => {
     mockAuthAs('technician');
+    (prisma.rolePermission.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
+      legacyTechnicianGrants(),
+    );
+    clearPermissionCache();
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'IN_PROGRESS',
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'COMPLETED' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4229,7 +4758,7 @@ describe('POST /api/jobs/:id/complete', () => {
 describe('POST /api/jobs/:id/en-route', () => {
   it('admin can mark a scheduled job en route', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'SCHEDULED', ...withCrew([]) });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'EN_ROUTE' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -4265,7 +4794,7 @@ describe('POST /api/jobs/:id/en-route', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
     });
 
     const res = await request(app)
@@ -4281,7 +4810,7 @@ describe('POST /api/jobs/:id/en-route', () => {
 describe('POST /api/jobs/:id/arrive', () => {
   it('admin can mark an en-route job on-site (arrive)', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'EN_ROUTE', assignees: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, status: 'EN_ROUTE', ...withCrew([]) });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'ON_SITE' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
 
@@ -4297,7 +4826,7 @@ describe('POST /api/jobs/:id/arrive', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'EN_ROUTE',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      ...withCrew([TEST_USERS.technician.id]),
     });
     mockPrisma.job.update.mockResolvedValue({ ...JOB_FIXTURE, status: 'ON_SITE' });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4314,7 +4843,7 @@ describe('POST /api/jobs/:id/arrive', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'EN_ROUTE',
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
     });
 
     const res = await request(app)
@@ -4348,6 +4877,8 @@ describe('POST /api/jobs/:id/cancel', () => {
         timelineEvent: { create: txTimeline },
         jobLineItem: { findMany: txJobLineFindMany, updateMany: txJobLineUpdateMany },
         invoiceLineItem: { findMany: txInvLineFindMany, updateMany: txInvLineUpdateMany },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         priceBookItem: { findMany: vi.fn().mockResolvedValue(opts.items ?? []) },
         stockMovement: { create: mockPrisma.stockMovement.create },
         stockBalance: { upsert: mockPrisma.stockBalance.upsert },
@@ -4366,10 +4897,13 @@ describe('POST /api/jobs/:id/cancel', () => {
         invoice: { update: vi.fn().mockResolvedValue({}) },
         job: { update: vi.fn().mockResolvedValue({ ...JOB_FIXTURE, status: 'CANCELLED' }) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
         planVisit: { updateMany: txPlanVisitUpdateMany },
         // Inventory P1 (§4.2): cancel's auto-return pass — nothing SYNCED on a plan-visit job.
         jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       }),
     );
 
@@ -4781,7 +5315,7 @@ describe('POST /api/jobs/:id/status', () => {
   const COMPLETED_ROW = {
     ...JOB_FIXTURE,
     status: 'COMPLETED',
-    assignees: [],
+    ...withCrew([]),
     source_plan_id: null,
     scheduled_start: new Date('2026-09-01T09:00:00Z'),
     on_site_at: new Date('2026-09-01T09:05:00Z'),
@@ -4797,6 +5331,28 @@ describe('POST /api/jobs/:id/status', () => {
     const txJobAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        // S8 (D6): a job-level crew statement lands on the job's CURRENT visit, so these fakes
+        // hold one - a job with no trip at all cannot hold crew and 400s by design (see
+        // visit-crew.test.ts, which pins that case deliberately).
+        visit: {
+          findMany: vi.fn().mockResolvedValue([FIXTURE_CURRENT_VISIT]),
+          create: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          update: vi.fn().mockResolvedValue(FIXTURE_CURRENT_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+        // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+        // transaction, so the union it writes can never evict someone off another visit. Without
+        // this delegate the read throws inside the tx and the route 500s opaquely.
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: {
           findMany: vi.fn().mockResolvedValue([{ user_id: TEST_USERS.technician.id }]),
           createMany: txJobAssigneeCreateMany,
@@ -4804,6 +5360,7 @@ describe('POST /api/jobs/:id/status', () => {
         },
         job: { update: txJobUpdate },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
     return { txJobUpdate, txJobAssigneeCreateMany, txJobAssigneeDeleteMany };
@@ -4816,7 +5373,7 @@ describe('POST /api/jobs/:id/status', () => {
   it('routes status=COMPLETED into complete()', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
-      ...JOB_FIXTURE, status: 'IN_PROGRESS', assignees: [], source_plan_id: null,
+      ...JOB_FIXTURE, status: 'IN_PROGRESS', ...withCrew([]), source_plan_id: null,
       started_at: new Date('2026-09-01T09:10:00Z'),
     });
     mockPrisma.timelineEvent.create.mockResolvedValue({});
@@ -4849,7 +5406,7 @@ describe('POST /api/jobs/:id/status', () => {
     (prisma.rolePermission.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
       DEFAULT_GRANTS.filter((g) => g.role === 'DISPATCHER' && !(g.action === 'cancel' && g.subject === 'Job')),
     );
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, assignees: [], invoices: [] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, ...withCrew([]), invoices: [] });
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/status`)
@@ -4864,7 +5421,7 @@ describe('POST /api/jobs/:id/status', () => {
   it('400s when SCHEDULED is requested with no window on the body, even though the job has one', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
-      ...JOB_FIXTURE, status: 'UNASSIGNED', assignees: [],
+      ...JOB_FIXTURE, status: 'UNSCHEDULED', ...withCrew([]),
       scheduled_start: new Date('2026-09-01T09:00:00Z'),
       scheduled_end: new Date('2026-09-01T11:00:00Z'),
     });
@@ -4921,8 +5478,8 @@ describe('POST /api/jobs/:id/status', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
-      status: 'UNASSIGNED',
-      assignees: [{ user_id: TEST_USERS.technician.id }],
+      status: 'UNSCHEDULED',
+      ...withCrew([TEST_USERS.technician.id]),
       source_plan_id: null,
     });
     const { txJobAssigneeDeleteMany } = wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
@@ -4972,7 +5529,7 @@ describe('GET /api/jobs/:id/notes', () => {
 
   it('TECHNICIAN can get notes for own job (crew membership)', async () => {
     mockAuthAs('technician');
-    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, assignees: [{ user_id: TEST_USERS.technician.id }] });
+    mockPrisma.job.findUnique.mockResolvedValue({ ...JOB_FIXTURE, ...withCrew([TEST_USERS.technician.id]) });
     // GAP-1 — getNotes now gates via canAccessRow (scoped findFirst); tech owns the job → matches.
     mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
     mockPrisma.note.findMany.mockResolvedValue([]);
@@ -5192,8 +5749,6 @@ describe('GET /api/jobs/stats', () => {
       .mockResolvedValueOnce(2)   // unassigned
       .mockResolvedValueOnce(3)   // scheduled
       .mockResolvedValueOnce(1)   // in_progress
-      .mockResolvedValueOnce(4)   // en_route (Spec B1: folded into in_progress in the response)
-      .mockResolvedValueOnce(6)   // on_site (Spec B1: folded into in_progress in the response)
       .mockResolvedValueOnce(10)  // completed
       .mockResolvedValueOnce(0);  // cancelled
 
@@ -5203,7 +5758,7 @@ describe('GET /api/jobs/stats', () => {
     expect(res.body).toMatchObject({
       unassigned: 2,
       scheduled: 3,
-      in_progress: 11, // 1 (IN_PROGRESS) + 4 (EN_ROUTE) + 6 (ON_SITE)
+      in_progress: 1, // S4 (D17): nothing left to fold in - EN_ROUTE/ON_SITE are VisitStatus now
       completed: 10,
       cancelled: 0,
     });
@@ -5228,19 +5783,25 @@ describe('GET /api/jobs/stats', () => {
 });
 
 // ─── POST /api/jobs/:id/tags (polymorphic tag_assignments) ─────
+// A well-formed uuid, NOT JOB_FIXTURE.id: that shared fixture is `j0000000-…` and `j` is not a
+// hex digit, so it is not a valid uuid at all. The tag routes now reject a malformed `:id`
+// before the controller runs (a real Postgres uuid column would throw P2023 on it), so these
+// cases need an id that could actually exist. The job row is mocked; the value only has to parse.
+const TAGGABLE_JOB_ID = 'ab000000-0000-0000-0000-000000000001';
+
 describe('POST /api/jobs/:id/tags', () => {
   const TAG_ID = 'a0000000-0000-0000-0000-000000000001';
 
   it('attaches existing tag to a job by tag_id', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
+    mockPrisma.job.findFirst.mockResolvedValue({ id: TAGGABLE_JOB_ID });
     mockPrisma.tag.findFirst.mockResolvedValue({ id: TAG_ID, name: 'Urgent', color: '#EF4444' });
     mockPrisma.tagAssignment.findUnique.mockResolvedValue(null);
-    mockPrisma.tagAssignment.create.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: JOB_FIXTURE.id });
+    mockPrisma.tagAssignment.create.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: TAGGABLE_JOB_ID });
     mockPrisma.tag.findUnique.mockResolvedValue({ id: TAG_ID, name: 'Urgent', color: '#EF4444' });
 
     const res = await request(app)
-      .post(`/api/jobs/${JOB_FIXTURE.id}/tags`)
+      .post(`/api/jobs/${TAGGABLE_JOB_ID}/tags`)
       .set(authHeader('admin'))
       .send({ tag_id: TAG_ID });
 
@@ -5250,19 +5811,19 @@ describe('POST /api/jobs/:id/tags', () => {
       data: expect.objectContaining({
         tag_id: TAG_ID,
         entity_type: 'JOB',
-        entity_id: JOB_FIXTURE.id,
+        entity_id: TAGGABLE_JOB_ID,
       }),
     });
   });
 
   it('returns 409 if tag is already attached to the job', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
+    mockPrisma.job.findFirst.mockResolvedValue({ id: TAGGABLE_JOB_ID });
     mockPrisma.tag.findFirst.mockResolvedValue({ id: TAG_ID, name: 'Urgent', color: '#EF4444' });
-    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: JOB_FIXTURE.id });
+    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: TAGGABLE_JOB_ID });
 
     const res = await request(app)
-      .post(`/api/jobs/${JOB_FIXTURE.id}/tags`)
+      .post(`/api/jobs/${TAGGABLE_JOB_ID}/tags`)
       .set(authHeader('admin'))
       .send({ tag_id: TAG_ID });
 
@@ -5274,7 +5835,7 @@ describe('POST /api/jobs/:id/tags', () => {
     mockPrisma.job.findFirst.mockResolvedValue(null);
 
     const res = await request(app)
-      .post(`/api/jobs/${JOB_FIXTURE.id}/tags`)
+      .post(`/api/jobs/${TAGGABLE_JOB_ID}/tags`)
       .set(authHeader('admin'))
       .send({ tag_id: TAG_ID });
 
@@ -5287,12 +5848,12 @@ describe('DELETE /api/jobs/:id/tags/:tagId', () => {
 
   it('detaches a tag from a job', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
-    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: JOB_FIXTURE.id });
+    mockPrisma.job.findFirst.mockResolvedValue({ id: TAGGABLE_JOB_ID });
+    mockPrisma.tagAssignment.findUnique.mockResolvedValue({ tag_id: TAG_ID, entity_type: 'JOB', entity_id: TAGGABLE_JOB_ID });
     mockPrisma.tagAssignment.delete.mockResolvedValue({});
 
     const res = await request(app)
-      .delete(`/api/jobs/${JOB_FIXTURE.id}/tags/${TAG_ID}`)
+      .delete(`/api/jobs/${TAGGABLE_JOB_ID}/tags/${TAG_ID}`)
       .set(authHeader('admin'));
 
     expect(res.status).toBe(204);
@@ -5300,11 +5861,11 @@ describe('DELETE /api/jobs/:id/tags/:tagId', () => {
 
   it('returns 404 when the assignment is not present', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_FIXTURE.id });
+    mockPrisma.job.findFirst.mockResolvedValue({ id: TAGGABLE_JOB_ID });
     mockPrisma.tagAssignment.findUnique.mockResolvedValue(null);
 
     const res = await request(app)
-      .delete(`/api/jobs/${JOB_FIXTURE.id}/tags/${TAG_ID}`)
+      .delete(`/api/jobs/${TAGGABLE_JOB_ID}/tags/${TAG_ID}`)
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -5351,7 +5912,7 @@ describe('GET /api/jobs/export', () => {
     await request(app).get('/api/jobs/export').set(authHeader('technician'));
 
     expect(mockPrisma.job.findMany.mock.calls[0][0].where.OR).toEqual([
-      { assignees: { some: { user_id: TEST_USERS.technician.id } } },
+      { visits: { some: { assignees: { some: { user_id: TEST_USERS.technician.id } } } } },
       { created_by_id: TEST_USERS.technician.id },
     ]);
   });
@@ -5461,7 +6022,7 @@ describe('GET /api/jobs/:id/financials', () => {
     // Access-check: admin always passes canAccessJob; estimate_id must be non-null for the OR clause
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: JOB_FIXTURE.estimate_id,
-      assignees: [],
+      ...withCrew([]),
       estimate: { lead: { lead_assignees: [] } },
     });
     let capturedInvoiceFindManyArgs: any;
@@ -5511,7 +6072,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: JOB_FIXTURE.estimate_id,
-      assignees: [],
+      ...withCrew([]),
       estimate: { lead: { lead_assignees: [] } },
     });
     const reconciledDeposit = {
@@ -5557,7 +6118,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: JOB_FIXTURE.estimate_id,
-      assignees: [],
+      ...withCrew([]),
       estimate: { lead: { lead_assignees: [] } },
     });
     // Live staging row (payment 8b17c520-…, 2026-08-04): 533.13 face + 18.66 fee + 80.00 tip
@@ -5599,7 +6160,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: null,
-      assignees: [],
+      ...withCrew([]),
       estimate: null,
     });
     let capturedArgs: any;
@@ -5622,7 +6183,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: null,
-      assignees: [],
+      ...withCrew([]),
       estimate: null,
     });
     mockPrisma.invoice.findMany.mockResolvedValue([
@@ -5652,7 +6213,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('technician');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: null,
-      assignees: [{ user_id: 'other-tech-id' }],
+      ...withCrew(['other-tech-id']),
       estimate: null,
     });
     // Ownership is now gated by canAccessRow (grant-driven scoped findFirst), not the loaded
@@ -5675,7 +6236,7 @@ describe('GET /api/jobs/:id/financials', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
       estimate_id: null,
-      assignees: [],
+      ...withCrew([]),
       estimate: null,
     });
 
@@ -5785,11 +6346,11 @@ describe('POST /api/jobs/:id/duplicate', () => {
     scope_notes: 'X',
     job_type: 'HVAC Install',
     estimated_duration: 120,
-    assignees: [],
+    ...withCrew([]),
     estimate: null,
   };
 
-  it('duplicates a job into a fresh UNASSIGNED job copying customer/location/scope/job_type', async () => {
+  it('duplicates a job into a fresh UNSCHEDULED job copying customer/location/scope/job_type', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findFirst.mockResolvedValue(SOURCE_JOB);
 
@@ -5803,6 +6364,20 @@ describe('POST /api/jobs/:id/duplicate', () => {
           }),
         },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 
@@ -5812,7 +6387,7 @@ describe('POST /api/jobs/:id/duplicate', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.job).toBeDefined();
-    expect(capturedData.status).toBe('UNASSIGNED');
+    expect(capturedData.status).toBe('UNSCHEDULED');
     expect(capturedData.customer_id).toBe(CUSTOMER_FIXTURE.id);
     expect(capturedData.job_type).toBe('HVAC Install');
     expect(capturedData.scope_notes).toBe('X');
@@ -5844,6 +6419,20 @@ describe('POST /api/jobs/:id/duplicate', () => {
         orgTaxRate: { findFirst: vi.fn().mockResolvedValue(null) },
         stateTaxRate: { findFirst: txStateTaxRateFindFirst },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        // MV-BOARD-15: a create carrying a scheduled_start now books visit 1 in this same
+        // transaction, so the tx fake has to answer the visit + org delegates.
+        visit: {
+          create: vi.fn().mockResolvedValue({ id: 'v-new', visit_seq: 1 }),
+          update: vi.fn().mockResolvedValue({}),
+          findMany: vi.fn().mockResolvedValue([]),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([]),
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
+        organization: { findUnique: vi.fn().mockResolvedValue({ default_job_duration_min: 120 }) },
       }),
     );
 

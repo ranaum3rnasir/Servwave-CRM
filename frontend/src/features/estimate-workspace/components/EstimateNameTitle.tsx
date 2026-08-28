@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Pencil } from 'lucide-react';
+import { Check, Copy } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { updateEstimate } from '@/lib/api/estimates';
 import { toast } from '@/components/ui/use-toast';
@@ -13,6 +13,10 @@ interface EstimateNameTitleProps {
   estimateNumber: string;
   /** Whether the user may rename (cosmetic — allowed even on a locked estimate). */
   canEdit: boolean;
+  /** Rendered in place of the bare number - the page passes its RecordNumberEditor here so
+   *  the id carries the pencil, exactly as it does on every other record. Left out (tests,
+   *  and any caller with no renumber capability) the number renders as plain text. */
+  numberSlot?: ReactNode;
 }
 
 /**
@@ -27,6 +31,7 @@ export function EstimateNameTitle({
   name,
   estimateNumber,
   canEdit,
+  numberSlot,
 }: EstimateNameTitleProps) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -117,13 +122,12 @@ export function EstimateNameTitle({
           >
             {display}
           </span>
-          {canEdit && (
-            <Pencil className="h-4 w-4 text-text-secondary transition-colors group-hover:text-primary" />
-          )}
         </button>
       )}
       <div className="flex items-center gap-1">
-        <span className="text-sm font-medium text-text-secondary">{estimateNumber}</span>
+        {numberSlot ?? (
+          <span className="text-sm font-medium text-text-secondary">{estimateNumber}</span>
+        )}
         {/* Tiny icon-only copy affordance - no ghost cell reproduces this hover
             (hover:bg-primary-subtle/hover:text-primary vs ghost/neutral's
             hover:bg-background-light) or this padding (p-0.5, smaller than the

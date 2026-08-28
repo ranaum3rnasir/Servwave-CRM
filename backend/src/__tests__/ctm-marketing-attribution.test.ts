@@ -1,7 +1,7 @@
 /**
- * ctm-marketing-attribution.test.ts — persist the FULL CTM attribution block.
+ * ctm-marketing-attribution.test.ts - persist the FULL CTM attribution block.
  *
- * Alpha Doors runs campaign numbers (Google Ads, Meta, website pools) that
+ * Northwind Services runs campaign numbers (Google Ads, Meta, website pools) that
  * forward to the office, so "which campaign did this caller come from" is a
  * reporting requirement. CTM's webhook already carries the whole answer -
  * source, medium, campaign, keyword, referrer, ad network / group / creative
@@ -10,8 +10,8 @@
  *
  * The payload shapes below are taken from REAL rows observed in staging's
  * ctm_events on 2026-08-07, not invented:
- *   +15555550217 -> source 'Google Ads',  medium 'cpc', referrer google.com
- *   +15555550209 -> source '(alphadoorsnewjersey website pool) Source'
+ *   +18626262706 -> source 'Google Ads',  medium 'cpc', referrer google.com
+ *   +15513219015 -> source '(northwindnewjersey website pool) Source'
  *   campaign/keyword are null on every observed row, because CTM fills those
  *   from a web session and a caller dialling off a truck has none. Null-vs-
  *   absent therefore matters, and is asserted.
@@ -34,7 +34,7 @@ const ORG_ID = 'a0000000-0000-0000-0000-0000000000aa';
 const GOOGLE_ADS_END = {
   sid: 'CAL-ads-1',
   direction: 'inbound',
-  tracking_number: '+15555550217',
+  tracking_number: '+18626262706',
   caller_number: '+19735550111',
   call_status: 'completed',
   dial_status: 'answered',
@@ -73,7 +73,7 @@ beforeEach(() => {
   p.pendingCallAttribution.updateMany.mockResolvedValue({ count: 0 });
 });
 
-describe('ingestCall — marketing attribution', () => {
+describe('ingestCall - marketing attribution', () => {
   it('persists the whole attribution block, not just source', async () => {
     await ingestCall(prisma, ORG_ID, GOOGLE_ADS_END, 'end');
 
@@ -105,7 +105,7 @@ describe('ingestCall — marketing attribution', () => {
     // The whole point of a campaign number: it forwards (Dimitris -> office),
     // but the number DIALLED is what ties the call to the campaign. CTM calls
     // it tracking_number; ingest must not overwrite it with a forward leg.
-    expect(upsertPayload().to_number).toBe('+15555550217');
+    expect(upsertPayload().to_number).toBe('+18626262706');
   });
 
   it('omits keys CTM did not send rather than storing a wall of nulls', async () => {

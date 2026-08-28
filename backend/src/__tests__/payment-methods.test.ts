@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import type { PaymentMethod } from '@prisma/client';
 import {
   acceptedPaymentMethodsSchema,
-  assertAcceptedPaymentMethodsValid,
-  PaymentMethodsError,
+  resolveAcceptedPaymentMethods,
   publicCardRoute,
 } from '../lib/payment-methods';
 
@@ -40,80 +40,46 @@ describe('acceptedPaymentMethodsSchema (Zod layer)', () => {
   });
 });
 
-describe('assertAcceptedPaymentMethodsValid (business rules)', () => {
-  it('allows EXTERNAL_CARD without Stripe charges enabled', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['EXTERNAL_CARD', 'CHECK'], false, ['EXTERNAL_CARD'])
-    ).not.toThrow();
+describe('resolveAcceptedPaymentMethods (CARD is server-owned)', () => {
+  // CARD is derived from the Stripe connection (the account.updated webhook writes it), and
+  // the Settings UI deliberately renders no toggle for it. It therefore must NEVER be taken
+  // from a client payload: the page PATCHes the whole array from a snapshot it fetched
+  // earlier, so a snapshot taken before charges went live would otherwise read as "disable
+  // card" and 400 a save the user never asked for. Resolve instead of validate.
+  it('keeps non-CARD methods in submitted order', () => {
+    expect(resolveAcceptedPaymentMethods(['EXTERNAL_CARD', 'CHECK', 'ZELLE'], false))
+      .toEqual(['EXTERNAL_CARD', 'CHECK', 'ZELLE']);
   });
 
-  it('allows an empty submission', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid([], false, ['EXTERNAL_CARD'])
-    ).not.toThrow();
+  it('appends CARD when charges are enabled and the client omitted it', () => {
+    expect(resolveAcceptedPaymentMethods(['EXTERNAL_CARD', 'CHECK'], true))
+      .toEqual(['EXTERNAL_CARD', 'CHECK', 'CARD']);
   });
 
-  // Task 1.7 re-key: the 2nd param is now the mirrored-from-Stripe `stripe_charges_enabled`
-  // boolean, not the `stripe_account_id` string. This covers BOTH "Stripe never connected"
-  // AND the mid-onboarding case (an account id exists but Stripe has not yet enabled
-  // charges) — from this function's point of view they are the same `false` input, which
-  // is exactly the point: an account id existing must NOT be enough to unlock CARD. The
-  // controller-level tests (organization/invoices/estimates) cover the mid-onboarding
-  // fixture with a real stripe_account_id alongside chargesEnabled=false.
-  it('rejects CARD when Stripe charges are not enabled', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['CARD', 'CHECK'], false, [])
-    ).toThrow(PaymentMethodsError);
-    try {
-      assertAcceptedPaymentMethodsValid(['CARD', 'CHECK'], false, []);
-    } catch (err) {
-      expect((err as PaymentMethodsError).status).toBe(400);
-      // The processor's name never reaches a user-facing string (Ran, 2026-08-04): internally
-      // this is Stripe, but the org only ever reads about "card payments".
-      expect((err as PaymentMethodsError).message).toMatch(/card payments are not connected/i);
-      expect((err as PaymentMethodsError).message).not.toMatch(/stripe/i);
+  it('keeps CARD exactly once when the client also sent it', () => {
+    expect(resolveAcceptedPaymentMethods(['CARD', 'CHECK'], true)).toEqual(['CHECK', 'CARD']);
+  });
+
+  it('strips CARD when charges are not enabled', () => {
+    expect(resolveAcceptedPaymentMethods(['CARD', 'CHECK'], false)).toEqual(['CHECK']);
+  });
+
+  it('adds CARD to an otherwise empty submission when charges are enabled', () => {
+    expect(resolveAcceptedPaymentMethods([], true)).toEqual(['CARD']);
+  });
+
+  it('leaves an empty submission empty when charges are not enabled', () => {
+    expect(resolveAcceptedPaymentMethods([], false)).toEqual([]);
+  });
+
+  it('never throws for any submitted/charges combination', () => {
+    const combos: Array<[PaymentMethod[], boolean]> = [
+      [['CARD'], true], [['CARD'], false], [[], true], [[], false],
+      [['CHECK'], true], [['EXTERNAL_CARD', 'CARD'], false],
+    ];
+    for (const [submitted, charges] of combos) {
+      expect(() => resolveAcceptedPaymentMethods(submitted, charges)).not.toThrow();
     }
-  });
-
-  it('accepts CARD when Stripe charges are enabled', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['CARD', 'CHECK'], true, ['CARD', 'CHECK'])
-    ).not.toThrow();
-  });
-
-  it('rejects removing CARD once Stripe charges are enabled', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['CHECK'], true, ['CARD', 'CHECK'])
-    ).toThrow(PaymentMethodsError);
-    try {
-      assertAcceptedPaymentMethodsValid(['CHECK'], true, ['CARD', 'CHECK']);
-    } catch (err) {
-      expect((err as PaymentMethodsError).status).toBe(400);
-      expect((err as PaymentMethodsError).message).toMatch(/cannot be disabled once card payments are connected/i);
-      expect((err as PaymentMethodsError).message).not.toMatch(/stripe/i);
-    }
-  });
-
-  it('allows adding CARD when charges are enabled and previous list did not include it', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['CARD', 'CHECK'], true, ['CHECK'])
-    ).not.toThrow();
-  });
-
-  it('allows shuffling non-CARD methods freely when charges are enabled', () => {
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['CARD', 'BANK_TRANSFER'], true, ['CARD', 'CHECK'])
-    ).not.toThrow();
-  });
-
-  it('allows removing CARD when charges are not enabled (previous CARD is impossible in practice, but defensive)', () => {
-    // This combination shouldn't exist in real data, but the rule order is:
-    //   1. submitted-CARD-without-charges-enabled → reject
-    //   2. previous-CARD-with-charges-enabled-removed → reject
-    // Neither fires here, so it must pass.
-    expect(() =>
-      assertAcceptedPaymentMethodsValid(['EXTERNAL_CARD'], false, ['CARD'])
-    ).not.toThrow();
   });
 });
 

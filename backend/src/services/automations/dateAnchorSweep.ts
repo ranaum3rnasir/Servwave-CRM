@@ -20,6 +20,7 @@
  * PURE query layer — selects rows, never enrolls. cron.ts owns enrollment.
  */
 import { prisma } from '../../lib/prisma';
+import { LIVE_VISIT_STATUSES } from '../../lib/visit-status';
 import type { AnchorKey, WaitDirection } from './anchors';
 
 /** Missed-tick grace for "after" sweeps — mirrors the INVOICE_OVERDUE precedent. */
@@ -54,20 +55,44 @@ export async function candidatesForAnchor(
 ): Promise<DateAnchorCandidate[]> {
   switch (anchor) {
     case 'job.scheduled_start': {
-      const rows = await prisma.job.findMany({
-        where: { organization_id: organizationId, status: 'SCHEDULED', scheduled_start: window },
-        select: { id: true, job_number: true, scheduled_start: true },
+      // S8 §2 (A4, RATIFIED): PER-VISIT, mirroring the LEAD arm immediately below rather than
+      // the job. D3 says a visit is a visit; the two anchors should have — and now have — the
+      // same shape: one candidate per matching visit, not one per job. A 3-visit job whose
+      // three mornings each fall in some future window's fire moment enrolls three times, which
+      // is the behaviour spec user story 43 asks for ("fires on all three mornings") and is a
+      // deliberate change from the old per-job read (1 fire becomes 3 on a multi-visit job).
+      //
+      // LIVE_VISIT_STATUSES replaces the old job-level `status: 'SCHEDULED'` filter — reading
+      // the VISIT's own status directly instead of a job-level proxy for it, now that the query
+      // is against `visits` in the first place. `job_id: { not: null }` is the belt-and-braces
+      // guard the LEAD arm below applies with `lead_id: { not: null }` (the `visits` table holds
+      // both jobs' and leads' trips).
+      //
+      // Occurrence stays a bare ISO date — the winning visit's own `scheduled_at`, never a visit
+      // id smuggled in (dedupe.ts:53-57: stopIf.ts/terminalStale.ts compare occurrence_key
+      // against someDate.toISOString() and silently go stale on anything wider). entityId is
+      // the parent JOB, so distinct visit occurrences on the same job naturally mint distinct
+      // dedupe keys (dedupe.ts's JOB_DATE_ANCHORED scoping is already occurrence-keyed) without
+      // any visitId parameter needed.
+      const rows = await prisma.visit.findMany({
+        where: {
+          organization_id: organizationId,
+          job_id: { not: null },
+          status: { in: [...LIVE_VISIT_STATUSES] },
+          scheduled_at: window,
+        },
+        select: { scheduled_at: true, job: { select: { id: true, job_number: true } } },
       });
       return rows.flatMap((r) =>
-        r.scheduled_start
-          ? [{ entityType: 'job' as const, entityId: r.id, entityLabel: r.job_number, occurrence: r.scheduled_start.toISOString() }]
+        r.scheduled_at && r.job
+          ? [{ entityType: 'job' as const, entityId: r.job.id, entityLabel: r.job.job_number, occurrence: r.scheduled_at.toISOString() }]
           : [],
       );
     }
     case 'lead.walkthrough_scheduled_at': {
       // No status filter here: terminalStale's LEAD_DATE_ANCHORED case (Task
       // A5b) re-checks the CURRENT VISIT's status at EXECUTION time instead (Walkthrough-as-
-      // entity redesign, PR-B2: leadWalkthroughStatus, not leadStatus) — LOST/CANCELLED leads
+      // entity redesign, PR-B2: leadVisitStatus, not leadStatus) — LOST/CANCELLED leads
       // are dropped regardless of direction; a `before` reminder is additionally dropped once
       // the visit leaves SCHEDULED (including COMPLETED — a before-reminder promises a still-
       // pending walkthrough). An `after` reminder deliberately survives COMPLETED/CANCELLED:
@@ -80,15 +105,56 @@ export async function candidatesForAnchor(
       // (any lead's visit, any status) instead of the legacy Lead.walkthrough_scheduled_at
       // column — a lead can now have more than one Walkthrough row, so the sweep must scan the
       // rows themselves rather than a single flat column per lead.
-      const rows = await prisma.walkthrough.findMany({
-        where: { organization_id: organizationId, scheduled_at: window },
+      //
+      // LEAD visits only. Multi-visit S2 parks a JOB's trips in the same table (D5: exactly one
+      // parent, so a job visit has no lead at all) and its migration backfills one per already-
+      // scheduled job, so an unfiltered sweep meets a lead-less row whenever a job sits inside
+      // the window. The `lead` guard below is the belt to that braces: this runs inside the
+      // automations cron, whose per-workflow catch would turn a TypeError into a skipped
+      // workflow - the org's reminders would stop enrolling with nothing to see but a warning.
+      const rows = await prisma.visit.findMany({
+        where: { organization_id: organizationId, lead_id: { not: null }, scheduled_at: window },
         select: { scheduled_at: true, lead: { select: { id: true, lead_number: true } } },
       });
       return rows.flatMap((r) =>
-        r.scheduled_at
+        r.scheduled_at && r.lead
           ? [{ entityType: 'lead' as const, entityId: r.lead.id, entityLabel: r.lead.lead_number, occurrence: r.scheduled_at.toISOString() }]
           : [],
       );
+    }
+    // ── Lead stage clocks (spec #1751 D8) ──────────────────────────────────────────────────
+    // Three near-identical arms, one per clock, all reading the LEAD row rather than the visit
+    // rows the two anchors above read. That is the point: these are stored, per-lead moments
+    // ("the lead arrived", "somebody first reached out", "the latest trip finished"), not
+    // per-trip ones, so exactly one candidate can ever be produced per lead per anchor — even
+    // for `lead.last_visit_completed_at`, whose value moves but is still a single column.
+    //
+    // NO "and it has not happened yet" filter here, deliberately, and the reasoning is the same
+    // one already recorded on the lead walkthrough arm above: the sweep selects purely on the
+    // anchor date, so a filter here would have to pick ONE allow-list for both directions and
+    // get the other wrong. terminalStale's LEAD_DATE_ANCHORED case applies it at EXECUTION time,
+    // per direction (see LEAD_ANCHOR_SATISFIED_BY in anchors.ts).
+    //
+    // No status filter either, for the same reason: terminalStale drops LOST and CANCELLED leads
+    // at execution time regardless of direction.
+    case 'lead.created_at':
+    case 'lead.contacted_at':
+    case 'lead.last_visit_completed_at': {
+      const column = anchor === 'lead.created_at'
+        ? 'created_at'
+        : anchor === 'lead.contacted_at'
+          ? 'contacted_at'
+          : 'last_visit_completed_at';
+      const rows = await prisma.lead.findMany({
+        where: { organization_id: organizationId, [column]: window },
+        select: { id: true, lead_number: true, created_at: true, contacted_at: true, last_visit_completed_at: true },
+      });
+      return rows.flatMap((r) => {
+        const at = r[column];
+        // Occurrence stays a bare ISO date — dedupe.ts's guards compare occurrence_key against
+        // someDate.toISOString() and silently go stale on anything wider.
+        return at ? [{ entityType: 'lead' as const, entityId: r.id, entityLabel: r.lead_number, occurrence: at.toISOString() }] : [];
+      });
     }
     case 'invoice.due_date': {
       const rows = await prisma.invoice.findMany({

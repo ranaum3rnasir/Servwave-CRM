@@ -50,7 +50,7 @@ test('first walk-in lead — Sarah Chen, AC not cooling', async () => {
     first_name: 'Sarah',
     last_name: 'Chen',
     email: `sarah.chen.${api.suffix}@e2e.local`,
-    phone: '5555550207',
+    phone: '5129876543',
   });
   customerId = customer.id;
   expect(customerId).toBeTruthy();

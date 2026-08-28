@@ -340,14 +340,14 @@ describe('PATCH /api/communication/emails/thread-read', () => {
     const res = await request(app)
       .patch('/api/communication/emails/thread-read')
       .set(authHeader('admin'))
-      .send({ thread_id: 'a9555555-0224-4999-8999-995555550224' });
+      .send({ thread_id: 'a9999999-9999-4999-8999-999999999999' });
 
     expect(res.status).toBe(200);
     expect(res.body.updated).toBe(3);
     const findArgs = p.email.findMany.mock.calls[0][0];
     expect(findArgs.where).toMatchObject({
       organization_id: ALPHA_ORG_ID,
-      thread_id: 'a9555555-0224-4999-8999-995555550224',
+      thread_id: 'a9999999-9999-4999-8999-999999999999',
     });
     const createArgs = p.emailReadState.createMany.mock.calls[0][0];
     expect(createArgs.data).toEqual([

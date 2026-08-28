@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { useParams } from 'react-router-dom';
 import { reportComponents } from './reports-registry';
-import { findReport, canShowReport } from './report-catalog';
+import { findReport, canShowReport } from '@/lib/reports/report-catalog';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
 import { useHasFeature } from '@/lib/entitlements';
 import GenericReport from './GenericReport';

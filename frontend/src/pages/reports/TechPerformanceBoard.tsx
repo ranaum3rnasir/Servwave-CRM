@@ -33,7 +33,7 @@ import { SelectField } from '@/components/form/SelectField';
 import { ChartCard } from '@/components/charts';
 import { chartLabelStyle } from '@/components/charts/chartTheme';
 import { chartPalette, token } from '@/design-system';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { MultiSelectFilter } from './_shared';
 

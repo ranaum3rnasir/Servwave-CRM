@@ -18,7 +18,13 @@ import {
   WorkflowStepType,
 } from '@prisma/client';
 import { audiencesForEntity, audienceLabel, type RecipientKey as AudienceKey } from './recipients';
-import { ANCHORS_FOR_ENTITY, ANCHOR_LABELS, type AnchorKey } from './anchors';
+import {
+  ANCHORS_FOR_ENTITY,
+  ANCHOR_LABELS,
+  LEAD_STAGE_CLOCK_ANCHORS,
+  type AnchorKey,
+  type WaitDirection,
+} from './anchors';
 
 export type AutomationEntity = 'job' | 'estimate' | 'invoice' | 'lead';
 
@@ -326,15 +332,44 @@ export const TRIGGERS: Record<AutomationTriggerType, TriggerDef> = {
 };
 
 /**
+ * Which directions an anchor can legally be used in.
+ *
+ * Derived from LEAD_STAGE_CLOCK_ANCHORS rather than re-listed, for the same reason that set is
+ * itself derived: a stage clock records a moment AS IT HAPPENS, so the row only carries a date
+ * once that moment is already past, and `direction: 'before'` can never fire. `workflowValidation`
+ * refuses to save one. Advertising the restriction here is what lets the builder stop OFFERING it,
+ * so the office never composes a rule the save is going to reject.
+ *
+ * Deliberately mirrors the validator and nothing more. The estimate subject is `before`-only as a
+ * product judgement — the expiry sweep cancels the estimate at `valid_until`, so nothing survives
+ * to count forward from — and that rule lives in the builder. Serving it here as though it were a
+ * validation rule would put this list and the validator out of step in the other direction.
+ */
+function anchorDirections(key: AnchorKey): WaitDirection[] {
+  return LEAD_STAGE_CLOCK_ANCHORS.has(key) ? ['after'] : ['before', 'after'];
+}
+
+/**
  * Anchors advertised to the builder. Previously the frontend kept a hand-synced
  * copy of the anchor registry; serving it here (sourced from anchors.ts, Task
  * A1's module) removes that drift risk.
  */
-export const ANCHOR_OPTIONS: Record<AutomationEntity, Array<{ key: AnchorKey; label: string }>> = {
-  job: ANCHORS_FOR_ENTITY.job.map((key) => ({ key, label: ANCHOR_LABELS[key] })),
-  lead: ANCHORS_FOR_ENTITY.lead.map((key) => ({ key, label: ANCHOR_LABELS[key] })),
-  invoice: ANCHORS_FOR_ENTITY.invoice.map((key) => ({ key, label: ANCHOR_LABELS[key] })),
-  estimate: ANCHORS_FOR_ENTITY.estimate.map((key) => ({ key, label: ANCHOR_LABELS[key] })),
+export const ANCHOR_OPTIONS: Record<
+  AutomationEntity,
+  Array<{ key: AnchorKey; label: string; directions: WaitDirection[] }>
+> = {
+  job: ANCHORS_FOR_ENTITY.job.map((key) => ({ key, label: ANCHOR_LABELS[key], directions: anchorDirections(key) })),
+  lead: ANCHORS_FOR_ENTITY.lead.map((key) => ({ key, label: ANCHOR_LABELS[key], directions: anchorDirections(key) })),
+  invoice: ANCHORS_FOR_ENTITY.invoice.map((key) => ({
+    key,
+    label: ANCHOR_LABELS[key],
+    directions: anchorDirections(key),
+  })),
+  estimate: ANCHORS_FOR_ENTITY.estimate.map((key) => ({
+    key,
+    label: ANCHOR_LABELS[key],
+    directions: anchorDirections(key),
+  })),
 };
 
 // ── actions ───────────────────────────────────────────────────────────────────

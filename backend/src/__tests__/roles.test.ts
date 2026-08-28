@@ -106,3 +106,85 @@ describe('roles isolation', () => {
     expect(res.status).toBe(403);
   });
 });
+
+// ─── Multi-visit S8 (behaviour 4) ─────────────────────────────────────────────────────────────
+// SCOPE_CONDITIONS is the EMITTER: every Roles-and-Permissions Save writes these values into
+// role_permissions. If it is not repointed in the same PR as the migration, the first admin Save
+// after deploy re-writes exactly what the migration just repaired.
+describe('S8 - the Roles screen writes the visits path', () => {
+  it('persists the visits path when the Job scope chip is set to Owned', async () => {
+    mockAuthAs('admin');
+    (prisma.rolePermission.findMany as any).mockResolvedValue([]);
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    const upsert = vi.fn().mockResolvedValue({});
+    (prisma.$transaction as any).mockImplementation((fn: any) => fn({ rolePermission: { deleteMany, upsert } }));
+
+    const res = await request(app)
+      .put('/api/roles/TECHNICIAN/permissions')
+      .set(authHeader('admin'))
+      .send({
+        matrix: { Job: { read: true, create: false, update: false, delete: false } },
+        sensitive: { seeFinancials: false, managePayments: false },
+        scope: { Job: 'Owned' },
+        general: { description: '' },
+      });
+
+    expect(res.status).toBe(200);
+    const jobRead = upsert.mock.calls
+      .map((c: any[]) => c[0])
+      .find((a: any) => a?.create?.subject === 'Job' && a?.create?.action === 'read');
+    expect(jobRead).toBeDefined();
+    expect(jobRead.create.conditions).toEqual({
+      visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } },
+    });
+    expect(jobRead.update.conditions).toEqual({
+      visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } },
+    });
+  });
+
+  it('renders the Owned chip for a stored OR-shape condition on the visits path', async () => {
+    mockAuthAs('admin');
+    (prisma.rolePermission.findMany as any).mockResolvedValue([
+      {
+        action: 'read',
+        subject: 'Job',
+        conditions: {
+          OR: [
+            { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } },
+            { created_by_id: '{{userId}}' },
+          ],
+        },
+      },
+    ]);
+    const res = await request(app).get('/api/roles/TECHNICIAN/permissions').set(authHeader('admin'));
+    expect(res.status).toBe(200);
+    // Without the alias entry the chip renders "All" - a scope the role does not have.
+    expect(res.body.scope.Job).toBe('Owned');
+  });
+
+  it('persists the visits path for the Invoice scope chip too', async () => {
+    mockAuthAs('admin');
+    (prisma.rolePermission.findMany as any).mockResolvedValue([]);
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    const upsert = vi.fn().mockResolvedValue({});
+    (prisma.$transaction as any).mockImplementation((fn: any) => fn({ rolePermission: { deleteMany, upsert } }));
+
+    const res = await request(app)
+      .put('/api/roles/TECHNICIAN/permissions')
+      .set(authHeader('admin'))
+      .send({
+        matrix: { Invoice: { read: true, create: false, update: false, delete: false } },
+        sensitive: { seeFinancials: false, managePayments: false },
+        scope: { Invoice: 'Owned' },
+        general: { description: '' },
+      });
+
+    expect(res.status).toBe(200);
+    const invRead = upsert.mock.calls
+      .map((c: any[]) => c[0])
+      .find((a: any) => a?.create?.subject === 'Invoice' && a?.create?.action === 'read');
+    expect(invRead.create.conditions).toEqual({
+      job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } },
+    });
+  });
+});

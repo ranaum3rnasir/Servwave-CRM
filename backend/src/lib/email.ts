@@ -4,9 +4,11 @@ import { logger } from './logger';
 import { prisma } from './prisma';
 import { generateEstimatePdf, generateInvoicePdf } from './pdf';
 import { invoicePdfSelect, toInvoiceForPdf } from './pdf/invoice-select';
-import { formatDateTimeInZone, DEFAULT_TIMEZONE } from './timezone';
+import { formatDateTimeInZone, formatEndOfWindowInZone, DEFAULT_TIMEZONE } from './timezone';
 import { persistTransactionalEmail, TransactionalEmailRecord } from './comm-persist';
+import { prepareReplyToken, persistReplyToken, replyAddressFor } from './reply-token';
 import { isTransactionalSendSuppressed } from './email-suppression';
+import { buildSalesRequestEmail, type SalesTopic } from './sales-request-email';
 
 export interface OrganizationBrandingSubset {
   id: string;
@@ -60,8 +62,14 @@ export type EmailDispatchResult =
        * 'suppressed' (email slice 4): the recipient hard-bounced or complained
        * on a prior send and is on the global TRANSACTIONAL suppression list
        * (EmailSuppression) — a deliberate policy block, not a provider error.
+       *
+       * 'no_recipient' (SRVW-243): the caller asked for a send but the party it
+       * would go to has no address on file. Never produced by dispatchEmail
+       * itself - a caller reports it INSTEAD of dispatching, so an explicit
+       * "notify the customer" can answer honestly rather than silently doing
+       * nothing. A policy block like the two above, not a failure.
        */
-      reason: 'org_disabled' | 'no_api_key' | 'suppressed';
+      reason: 'org_disabled' | 'no_api_key' | 'suppressed' | 'no_recipient';
     }
   | { status: 'failed'; error: string };
 
@@ -139,8 +147,8 @@ export function formatSenderIdentity(orgName: string | null | undefined, address
 const MAX_SENDER_LOCAL_PART = 40;
 
 /**
- * The org's half of a shared-domain sending address: `Alpha Doors` becomes
- * `alphadoors`, for `alphadoors@mail.servwave.com`.
+ * The org's half of a shared-domain sending address: `Northwind Services` becomes
+ * `northwind`, for `northwind@mail.servwave.com`.
  *
  * Every org on the shared domain used to send as a flat `no-reply@`, so a
  * recipient's inbox showed an address that named nobody and leaned entirely on
@@ -189,27 +197,20 @@ export function effectiveSenderLocalPart(
 }
 
 /**
- * Email slice 10 (guided domain verification) — the From-address choice for
- * `organizationId`'s business sends: the org's own verified custom domain
- * when one is set up and currently verified, otherwise the shared
- * env.EMAIL_FROM_BUSINESS.
+ * The From address for `organizationId`'s business sends.
  *
- * "Never silently downgrade the sender": before a domain is verified,
- * sending keeps using the shared address exactly as it did before this slice
- * existed — there is no in-between state where an unverified custom address
- * is used. Once verified, the org's own domain is preferred; if a
- * PREVIOUSLY-verified domain (verified_at set) is no longer status=verified —
- * Resend re-checks periodically and can revoke verification — the fallback
- * to the shared domain is logged (not silent) so the drop is observable. A
- * domain that has never been verified in the first place isn't "falling
- * back", so that case logs nothing.
+ * Sending is IN-HOUSE: every org sends from the one shared platform domain
+ * (env.EMAIL_FROM_BUSINESS), whose DNS is configured centrally and once. The
+ * only org-level choice is the LOCAL part - the string before the `@` - which
+ * is the org's own when it has set one and derived from its name otherwise.
  *
- * NEVER throws: any failure resolving the org's domain (a DB error, an
- * unexpected shape) falls back to the shared address, which must always stay
- * safe and always-available. dispatchEmail trusts the persisted `status`
- * column rather than calling Resend live on every send — Resend's own
- * periodic re-check plus the domain.updated webhook (resend-webhook.controller.ts)
- * and the explicit "Check now" action keep that column fresh.
+ * There is deliberately no per-org sending domain. The guided custom-domain
+ * feature that used to sit here (email slice 10) was removed once the in-house
+ * decision was made: it was not merely described wrongly in the UI, it worked,
+ * and so contradicted the decision every time an org used it.
+ *
+ * NEVER throws - the whole dispatch path rides on this, so a value that cannot
+ * be taken apart is returned untouched rather than raised.
  */
 export function sharedSenderAddress(
   orgName: string | null | undefined,
@@ -219,9 +220,6 @@ export function sharedSenderAddress(
   // platform to a different shared sending domain stays a config change. A
   // value without an `@` is a misconfiguration, not something to guess at -
   // use it verbatim and let the provider reject it loudly.
-  // Never throws, because resolveFromAddress promises not to and the whole
-  // send rides on it - a From we cannot take apart is returned untouched
-  // rather than turned into an exception on the dispatch path.
   const shared = env.EMAIL_FROM_BUSINESS;
   // Only a bare `local@domain` gets rewritten. The value can legitimately be
   // configured as a full identity (`Alpha <noreply@example.com>`), which is an
@@ -233,47 +231,16 @@ export function sharedSenderAddress(
   return `${effectiveSenderLocalPart(orgName, explicitLocalPart)}@${shared.slice(at + 1)}`;
 }
 
-async function resolveFromAddress(
-  organizationId: string,
-  orgName: string | null,
-  explicitLocalPart?: string | null,
-): Promise<string> {
-  try {
-    const domain = await prisma.organizationDomain.findUnique({
-      where: { organization_id: organizationId },
-      select: { domain_name: true, status: true, verified_at: true },
-    });
-    if (!domain) return sharedSenderAddress(orgName, explicitLocalPart);
-    if (domain.status !== 'verified') {
-      if (domain.verified_at) {
-        logger.warn(
-          `[email] organization ${organizationId}'s custom domain ${domain.domain_name} is no longer verified (status=${domain.status}) — falling back to the shared sending domain`,
-        );
-      }
-      return sharedSenderAddress(orgName, explicitLocalPart);
-    }
-    // An org sending from its OWN verified domain already has its identity in
-    // the domain, so the local part stays neutral - `no-reply@alphadoors.com`
-    // is what a company writing on its own letterhead looks like.
-    return `no-reply@${domain.domain_name}`;
-  } catch (err) {
-    logger.error(
-      `[email] failed to resolve organization ${organizationId}'s custom sending domain — falling back to the shared sending domain:`,
-      err,
-    );
-    return sharedSenderAddress(orgName, explicitLocalPart);
-  }
-}
-
 /**
  * The From identity a business send from `organizationId` would carry, resolved
  * WITHOUT sending anything.
  *
  * Exists so a compose surface can show the address the recipient will actually
- * see. It deliberately reuses resolveFromAddress rather than re-deriving:
- * an "About to send as X" that could disagree with the header is worse than
- * showing nothing, which is the same anti-drift rule dispatchEmail follows when
- * it reports fromAddress back on its result.
+ * see. It deliberately goes through the SAME sharedSenderAddress the dispatch
+ * path uses rather than re-deriving: an "About to send as X" that could
+ * disagree with the header is worse than showing nothing, which is the same
+ * anti-drift rule dispatchEmail follows when it reports fromAddress back on its
+ * result.
  *
  * `sendingEnabled` rides along because an org with email switched off still has
  * a perfectly well-formed address. Showing it unqualified would be a fresh lie
@@ -282,7 +249,6 @@ async function resolveFromAddress(
 export async function orgSendingIdentity(organizationId: string): Promise<{
   address: string;
   name: string | null;
-  customDomain: boolean;
   sendingEnabled: boolean;
   localPart: string;
   localPartIsCustom: boolean;
@@ -293,11 +259,9 @@ export async function orgSendingIdentity(organizationId: string): Promise<{
     select: { name: true, email_sending_enabled: true, email_sender_local_part: true },
   });
   const explicit = org?.email_sender_local_part ?? null;
-  const address = await resolveFromAddress(organizationId, org?.name ?? null, explicit);
   return {
-    address,
+    address: sharedSenderAddress(org?.name ?? null, explicit),
     name: sanitizeDisplayName(org?.name) || null,
-    customDomain: address !== sharedSenderAddress(org?.name ?? null, explicit),
     sendingEnabled: org?.email_sending_enabled !== false,
     // The settings field renders these three rather than splitting `address`
     // apart itself: the domain is fixed and not the org's to choose, so the UI
@@ -324,10 +288,13 @@ export function senderDomainOf(): string {
 /**
  * Single choke point every non-auth-critical sender routes through. Two jobs:
  *
- * 1. Org-level email_sending_enabled (default true) lets an admin kill all
- *    outgoing business email without touching login/account-security email (MFA
- *    OTP, user invite), which call resend.emails.send directly and never go
- *    through this gate.
+ * 1. Org-level email_sending_enabled (DEFAULT FALSE since migration
+ *    20260809031000 - off for every new org, so most orgs sit behind this gate
+ *    rather than only the ones that deliberately switched it off) lets an admin
+ *    kill all outgoing business email without touching login/account-security
+ *    email (MFA OTP, user invite), which call resend.emails.send directly and
+ *    never go through this gate. A sender that speaks to ServWave rather than
+ *    to the org's customers opts out with `bypassOrgSendingGate` below.
  * 2. It owns the From header — the org's own verified domain when set up
  *    (email slice 10), else the shared business domain, plus, for org-voice
  *    sends, the org's locked display name. Callers cannot override it (see
@@ -338,18 +305,39 @@ export function senderDomainOf(): string {
 async function dispatchEmail(
   organizationId: string,
   payload: DispatchPayload,
-  options?: { senderIdentity?: SenderIdentity },
+  options?: {
+    senderIdentity?: SenderIdentity;
+    /**
+     * Send even when the org has outgoing email switched off.
+     *
+     * ONLY for a message addressed to ServWave itself - the "Reach sales"
+     * composer. The kill switch's whole purpose is to stop an org speaking to
+     * ITS OWN CUSTOMERS under its own name; a contractor writing to us is not
+     * that, and gating it silenced exactly the orgs most likely to need sales
+     * (email is off by default, so that is most of them).
+     *
+     * Deliberately NOT keyed off `senderIdentity: 'platform'`, which the
+     * payments notices also use: those go to the ORG'S OWN PEOPLE and stay
+     * gated. An opt-out this sharp has to be asked for by name, one caller at
+     * a time, or it becomes a way for business email to leak past the brake.
+     *
+     * Everything else still applies - the suppression gate below and the From
+     * header this function owns. A bypass of the org's own preference is not a
+     * licence to mail an address that hard-bounced.
+     */
+    bypassOrgSendingGate?: boolean;
+  },
 ): Promise<EmailDispatchResult> {
   if (!resend) {
-    logger.warn('RESEND_API_KEY not set — skipping email send');
+    logger.warn('RESEND_API_KEY not set - skipping email send');
     return { status: 'skipped', reason: 'no_api_key' };
   }
   const org = await prisma.organization.findUnique({
     where: { id: organizationId },
     select: { email_sending_enabled: true, name: true, email_sender_local_part: true },
   });
-  if (org?.email_sending_enabled === false) {
-    logger.info(`Email sending disabled for organization ${organizationId} — skipping send`);
+  if (org?.email_sending_enabled === false && !options?.bypassOrgSendingGate) {
+    logger.info(`Email sending disabled for organization ${organizationId} - skipping send`);
     return { status: 'skipped', reason: 'org_disabled' };
   }
   // Email slice 4 — TRANSACTIONAL suppression gate. A prior hard bounce or
@@ -358,22 +346,21 @@ async function dispatchEmail(
   // globally across every org sharing mail.servwave.com — checked before the
   // From header is even built, so a suppressed address never reaches Resend.
   if (await isTransactionalSendSuppressed(payload.to)) {
-    logger.warn(`Email to ${recipientLabel(payload.to)} skipped — address is suppressed (hard bounce/complaint)`);
+    logger.warn(`Email to ${recipientLabel(payload.to)} skipped - address is suppressed (hard bounce/complaint)`);
     return { status: 'skipped', reason: 'suppressed' };
   }
   // ONE derivation of the sending address, reported back on the result. Anything
   // that mirrors this send reads it from here rather than re-deriving it, so the
-  // record and the header cannot drift apart. Email slice 10 — prefers the org's
-  // own verified domain over the shared one; see resolveFromAddress's doc comment.
+  // record and the header cannot drift apart.
   const isPlatformVoice = options?.senderIdentity === 'platform';
   // Platform voice passes no name here for the same reason it carries none in
   // the display half below - the address is part of who is speaking, so a
   // platform send must stay `no-reply@`, not go out as the org.
   // Platform voice also passes no local-part override: `no-reply@` is part of
   // speaking as the platform, so an org's chosen `service@` must not leak onto
-  // a message the org did not send.
-  const fromAddress = await resolveFromAddress(
-    organizationId,
+  // a message the org did not send. Both null then resolve to the shared
+  // address's own `no-reply` fallback.
+  const fromAddress = sharedSenderAddress(
     isPlatformVoice ? null : org?.name ?? null,
     isPlatformVoice ? null : org?.email_sender_local_part ?? null,
   );
@@ -457,6 +444,124 @@ function sentTrace(result: SentDispatch) {
     fromName: result.fromName,
     providerMessageId: result.providerMessageId,
   };
+}
+
+
+/**
+ * Two-way email for transactional senders - PHASE 1, before the dispatch.
+ *
+ * The compose dialog has had this since email slice 6; every sender a customer
+ * actually hears from went without it, so a reply to an estimate or an invoice
+ * went to the org's own From address on mail.servwave.com - a domain with
+ * RECEIVING DISABLED - and bounced silently.
+ *
+ * Same two-phase shape as the compose path, and for the same reason: the header
+ * has to carry the address BEFORE the send, but nothing may be persisted for a
+ * send that never leaves. So this is read-only, and finalizeTransactionalSend
+ * below owes the write once the dispatch comes back 'sent'.
+ *
+ * Returns null when the record carries no entity anchor. That is the deliberate
+ * opt-out for sends that must stay unreplyable - MFA codes, user invites and
+ * internal ops alerts - and it is also the safe default: an unanchored token
+ * would reuse on `org + recipient` alone and could silently route this
+ * conversation's replies into an unrelated older one.
+ */
+async function prepareTransactionalReply(
+  record: TransactionalEmailRecord | undefined,
+  to: string | string[],
+): Promise<{ token: string; persist: boolean; address: string; threadId: string | null } | null> {
+  if (!record?.entityType || !record.entityId) return null;
+  // One address per (entity, recipient) pair, so a multi-addressee send anchors
+  // on the party the conversation is actually with - the first To - rather than
+  // minting an address nobody can be matched against at reply time.
+  const recipient = Array.isArray(to) ? to[0] : to;
+  if (!recipient) return null;
+  try {
+    const prepared = await prepareReplyToken(prisma, {
+      organization_id: record.organizationId,
+      entity_type: record.entityType,
+      entity_id: record.entityId,
+      customer_id: record.customerId ?? null,
+      expected_from: recipient,
+    });
+    // The thread only exists once a previous send about this entity created it;
+    // a reused token carries it, a fresh one does not yet.
+    const existing = prepared.persist
+      ? null
+      : await prisma.replyToken.findFirst({
+          where: { token: prepared.token },
+          select: { thread_id: true },
+        });
+    return {
+      ...prepared,
+      address: replyAddressFor(prepared.token),
+      threadId: existing?.thread_id ?? null,
+    };
+  } catch (err) {
+    // Best-effort, exactly like the compose path's phase 2: a token failure must
+    // not cost the customer their estimate. The send still goes, just without a
+    // reply address - the pre-existing behaviour, not a new failure mode.
+    logger.error('Failed to prepare a transactional reply token:', err);
+    return null;
+  }
+}
+
+/**
+ * PHASE 2 - the send left, so the advertised address has to resolve.
+ *
+ * Creates the conversation on first contact about an entity, writes the token
+ * row VERBATIM (the address the customer received must be the address that
+ * resolves), then mirrors the message. Never throws: the email has already
+ * reached the customer, so a bookkeeping failure must not be reported as a
+ * failed send.
+ */
+async function finalizeTransactionalSend(args: {
+  record: TransactionalEmailRecord;
+  reply: { token: string; persist: boolean; address: string; threadId: string | null } | null;
+  to: string | string[];
+  cc?: string[];
+  subject: string;
+  text: string;
+  result: SentDispatch;
+}): Promise<void> {
+  const { record, reply } = args;
+  let threadId = reply?.threadId ?? null;
+  if (reply) {
+    try {
+      // Deferred to here for the same invariant the Email row keeps: a dispatch
+      // that never left leaves no orphan thread behind either.
+      if (!threadId) {
+        threadId = (await prisma.emailThread.create({
+          data: { organization_id: record.organizationId },
+        })).id;
+      }
+      if (reply.persist) {
+        await persistReplyToken(prisma, {
+          token: reply.token,
+          organization_id: record.organizationId,
+          thread_id: threadId,
+          entity_type: record.entityType ?? null,
+          entity_id: record.entityId ?? null,
+          customer_id: record.customerId ?? null,
+          expected_from: Array.isArray(args.to) ? args.to[0] : args.to,
+        });
+      }
+    } catch (err) {
+      // The cost is that a reply to THIS message routes to the unmatched queue
+      // instead of the thread - visible and recoverable, which beats lying
+      // about a send that plainly happened.
+      logger.error('Failed to persist a transactional reply token:', err);
+    }
+  }
+  await persistTransactionalEmail({
+    ...record,
+    cc: args.cc,
+    to: Array.isArray(args.to) ? args.to.join(', ') : args.to,
+    subject: args.subject,
+    text: args.text,
+    threadId,
+    ...sentTrace(args.result),
+  });
 }
 
 /**
@@ -785,9 +890,11 @@ export async function sendEstimateEmail(params: {
     const text = customMessage
       ? `Hi ${params.customerName},\n\n${customMessage}\n\nYour estimate ${params.estimateNumber} for ${params.total} is ready. View it here: ${params.publicUrl}`
       : `Hi ${params.customerName}, your estimate ${params.estimateNumber} for ${params.total} is ready. View it here: ${params.publicUrl}`;
+    const reply = await prepareTransactionalReply(params.record, params.to);
     const result = await dispatchEmail(params.org.id, {
       to: params.to,
       ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      ...(reply ? { replyTo: reply.address } : {}),
       subject,
       text,
       html: estimateEmailHtml({
@@ -803,7 +910,9 @@ export async function sendEstimateEmail(params: {
     if (result.status === 'sent') {
       logger.info(`Estimate email sent to ${params.to} for ${params.estimateNumber}`);
       if (params.record) {
-        await persistTransactionalEmail({ ...params.record, to: params.to, subject, text, ...sentTrace(result) });
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
       }
     }
     return result;
@@ -841,12 +950,12 @@ function purchaseOrderEmailHtml(params: {
   const money = (n: number) => formatCurrency(n, params.currency);
   const lineRows = params.lines.map((line) => h`
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#6b7280;">${line.sku || '—'}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#6b7280;">${line.sku || '-'}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;">${line.name}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:center;">${line.qtyOrdered}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:center;">${line.uom}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:right;">${line.unitCost != null ? money(line.unitCost) : '—'}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:right;">${line.unitCost != null ? money(line.qtyOrdered * line.unitCost) : '—'}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:right;">${line.unitCost != null ? money(line.unitCost) : '-'}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:right;">${line.unitCost != null ? money(line.qtyOrdered * line.unitCost) : '-'}</td>
     </tr>
   `).join('');
 
@@ -911,8 +1020,8 @@ export async function sendPurchaseOrderEmail(params: {
     const customMessage = params.message?.trim();
     const totalText = params.total != null ? ` Total: ${formatCurrency(params.total, params.currency)}.` : '';
     const text = customMessage
-      ? `Hi ${params.vendorName},\n\n${customMessage}\n\nPurchase order ${params.poNumber} from ${params.org.name} — ${params.lines.length} line(s).${totalText}`
-      : `Hi ${params.vendorName}, purchase order ${params.poNumber} from ${params.org.name} — ${params.lines.length} line(s).${totalText}`;
+      ? `Hi ${params.vendorName},\n\n${customMessage}\n\nPurchase order ${params.poNumber} from ${params.org.name} - ${params.lines.length} line(s).${totalText}`
+      : `Hi ${params.vendorName}, purchase order ${params.poNumber} from ${params.org.name} - ${params.lines.length} line(s).${totalText}`;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
       ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
@@ -929,6 +1038,7 @@ export async function sendPurchaseOrderEmail(params: {
       if (params.record) {
         await persistTransactionalEmail({
           ...params.record,
+          cc: params.cc,
           to: recipientLabel(params.to),
           subject,
           text,
@@ -965,10 +1075,12 @@ function stagePickupEmailHtml(params: {
   scheduledFor?: string | null;
   notes?: string | null;
   lines: StagePickupEmailLine[];
+  /** The ORG's zone. The backend process runs in UTC, so without this the ticket mails a UTC wall clock. */
+  timezone?: string;
 }): string {
   const lineRows = params.lines.map((line) => h`
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#6b7280;">${line.sku || '—'}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#6b7280;">${line.sku || '-'}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;">${line.name}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:center;">${line.qtyReceived}/${line.qtyOrdered}</td>
       <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#374151;text-align:center;">${line.uom}</td>
@@ -976,7 +1088,7 @@ function stagePickupEmailHtml(params: {
   `).join('');
 
   const scheduledRow = params.scheduledFor
-    ? h`<p style="margin:0 0 8px;font-size:14px;color:#6b7280;">Scheduled: ${new Date(params.scheduledFor).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>`
+    ? h`<p style="margin:0 0 8px;font-size:14px;color:#6b7280;">Scheduled: ${new Date(params.scheduledFor).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: params.timezone ?? DEFAULT_TIMEZONE })}</p>`
     : '';
   const notesBlock = params.notes
     ? h`<p style="margin:16px 0 0;font-size:14px;color:#374151;"><strong>Notes:</strong> ${params.notes}</p>`
@@ -1015,14 +1127,19 @@ export async function sendStagePickupEmail(params: {
   scheduledFor?: string | null;
   notes?: string | null;
   lines: StagePickupEmailLine[];
+  /**
+   * The ORG's zone. This was the one sender that prints a visit time and did not thread it,
+   * so it mailed the technician a UTC wall clock - the backend process runs in UTC.
+   */
+  timezone?: string;
   /** Stamp the send on the job's Communication history (pass jobId/jobLabel). */
   record?: TransactionalEmailRecord;
 }): Promise<StagePickupEmailResult> {
-  const subject = params.subject?.trim() || `Pickup Ticket ${params.jobNumber} — ${params.customer}`;
+  const subject = params.subject?.trim() || `Pickup Ticket ${params.jobNumber} - ${params.customer}`;
   const html = stagePickupEmailHtml(params);
   try {
     const customMessage = params.message?.trim();
-    const base = `Pickup ticket ${params.jobNumber} — ${params.customer} at ${params.site}. ${params.lines.length} line(s).`;
+    const base = `Pickup ticket ${params.jobNumber} - ${params.customer} at ${params.site}. ${params.lines.length} line(s).`;
     const text = customMessage ? `${customMessage}\n\n${base}` : base;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
@@ -1038,6 +1155,7 @@ export async function sendStagePickupEmail(params: {
       if (params.record) {
         await persistTransactionalEmail({
           ...params.record,
+          cc: params.cc,
           to: recipientLabel(params.to),
           subject,
           text,
@@ -1072,7 +1190,7 @@ function userInviteHtml(params: {
       </td></tr>
     </table>
     <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">
-      On the next screen you can set a password or continue with Google — no password needed.
+      On the next screen you can set a password or continue with Google - no password needed.
     </p>
     <p style="margin:16px 0 0;font-size:12px;color:#9ca3af;">This invitation link expires in 7 days.</p>
   `, params.org);
@@ -1090,7 +1208,7 @@ export async function sendUserInviteEmail(params: {
   organizationId: string;
 }): Promise<boolean> {
   if (!resend) {
-    logger.warn('RESEND_API_KEY not set — skipping user invite email');
+    logger.warn('RESEND_API_KEY not set - skipping user invite email');
     return false;
   }
   const orgRow = await prisma.organization.findUnique({
@@ -1108,7 +1226,7 @@ export async function sendUserInviteEmail(params: {
       from: env.EMAIL_FROM,
       to: params.to,
       subject: `You're invited to ${org.name} on ServWave`,
-      text: `Hi ${params.firstName}, you've been invited to join ${org.name} on ServWave. Accept your invitation to finish setup: ${params.inviteUrl} — you can set a password or continue with Google.`,
+      text: `Hi ${params.firstName}, you've been invited to join ${org.name} on ServWave. Accept your invitation to finish setup: ${params.inviteUrl} - you can set a password or continue with Google.`,
       html: userInviteHtml({ firstName: params.firstName, orgName: org.name, inviteUrl: params.inviteUrl, org }),
     });
     logger.info(`User invite email sent to ${params.to}`);
@@ -1133,7 +1251,7 @@ function mfaCodeHtml(params: { firstName?: string | null; code: string }): strin
       </td></tr>
     </table>
     <p style="margin:0;font-size:13px;color:#9ca3af;">
-      If you didn't try to sign in, you can ignore this email — someone may have mistyped their address.
+      If you didn't try to sign in, you can ignore this email - someone may have mistyped their address.
     </p>
   `);
 }
@@ -1155,9 +1273,9 @@ export async function sendMfaCodeEmail(params: {
     // is required there); guard on NODE_ENV anyway so a live OTP can never be
     // written to production logs even if that invariant is ever violated.
     if (env.NODE_ENV === 'production') {
-      logger.error(`RESEND_API_KEY not set — cannot send MFA code to ${params.to}`);
+      logger.error(`RESEND_API_KEY not set - cannot send MFA code to ${params.to}`);
     } else {
-      logger.warn(`RESEND_API_KEY not set — MFA code for ${params.to} is ${params.code} (dev fallback)`);
+      logger.warn(`RESEND_API_KEY not set - MFA code for ${params.to} is ${params.code} (dev fallback)`);
     }
     return false;
   }
@@ -1188,7 +1306,7 @@ export async function sendEstimateApprovedNotification(params: {
 }): Promise<void> {
   try {
     const pdfBuffer = await renderEstimatePdfBuffer(params.estimateId);
-    const subject = `Estimate ${params.estimateNumber} — Approved`;
+    const subject = `Estimate ${params.estimateNumber} - Approved`;
     const text = `Hi ${params.customerName}, your estimate ${params.estimateNumber} for ${params.total} has been approved. Please find the signed estimate attached.`;
     const result = await dispatchEmail(params.org.id, {
       to: params.to,
@@ -1258,13 +1376,15 @@ export async function sendEstimateWithDepositEmail(params: {
   `, params.org);
   try {
     const pdfBuffer = await renderEstimatePdfBuffer(params.estimateId);
-    const subject = `Estimate ${params.estimateNumber} — Deposit Required`;
+    const subject = `Estimate ${params.estimateNumber} - Deposit Required`;
     const customMessage = params.message?.trim();
     const text = customMessage
       ? `Hi ${params.customerName},\n\n${customMessage}\n\nEstimate ${params.estimateNumber} for ${params.total} is ready. A deposit of ${params.depositAmount} (${params.depositPercentage}%) is required. View it here: ${params.publicUrl}`
       : `Hi ${params.customerName}, estimate ${params.estimateNumber} for ${params.total} is ready. A deposit of ${params.depositAmount} (${params.depositPercentage}%) is required. View it here: ${params.publicUrl}`;
+    const reply = await prepareTransactionalReply(params.record, params.to);
     const result = await dispatchEmail(params.org.id, {
       to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
       ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
       subject,
       text,
@@ -1274,7 +1394,9 @@ export async function sendEstimateWithDepositEmail(params: {
     if (result.status === 'sent') {
       logger.info(`Estimate with deposit email sent to ${params.to} for ${params.estimateNumber}`);
       if (params.record) {
-        await persistTransactionalEmail({ ...params.record, to: params.to, subject, text, ...sentTrace(result) });
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
       }
     }
     return result;
@@ -1314,7 +1436,7 @@ export async function sendDepositPaymentConfirmation(params: {
         <th style="padding:10px 12px;text-align:right;font-size:13px;color:#6b7280;font-weight:600;">Amount</th>
       </tr>
       <tr>
-        <td style="padding:8px 12px;font-size:14px;color:#374151;">Deposit — ${params.estimateNumber}</td>
+        <td style="padding:8px 12px;font-size:14px;color:#374151;">Deposit - ${params.estimateNumber}</td>
         <td style="padding:8px 12px;font-size:14px;color:#374151;text-align:right;">${formatCurrency(params.depositAmount)}</td>
       </tr>
       <tr style="background:#f9fafb;">
@@ -1332,7 +1454,7 @@ export async function sendDepositPaymentConfirmation(params: {
     </p>
   `);
   try {
-    const subject = `Deposit Receipt — ${params.estimateNumber}`;
+    const subject = `Deposit Receipt - ${params.estimateNumber}`;
     const text = `Hi ${params.customerName}, your deposit of ${formatCurrency(params.totalCharged)} for estimate ${params.estimateNumber} has been received via ${params.paymentMethod}. Thank you for choosing ${params.companyName}.`;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
@@ -1395,7 +1517,7 @@ export async function sendDepositReceivedConfirmation(params: {
     </p>
   `);
   try {
-    const subject = `Deposit Received — ${params.estimateNumber}`;
+    const subject = `Deposit Received - ${params.estimateNumber}`;
     const text = `Hi ${params.customerName}, your deposit of ${formatCurrency(params.depositAmount)} for estimate ${params.estimateNumber} has been received via ${methodLabel} on ${params.receivedDate}. Thank you for choosing ${params.companyName}.`;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
@@ -1446,7 +1568,7 @@ export async function sendRefundNotification(params: {
     </p>
   `);
   try {
-    const subject = `Refund Issued — ${params.estimateNumber}`;
+    const subject = `Refund Issued - ${params.estimateNumber}`;
     const text = `Hi ${params.customerName}, a refund of ${formatCurrency(params.refundAmount)} has been issued for estimate ${params.estimateNumber}. Reason: ${params.reason}. Please allow 5–10 business days for the refund to appear.`;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
@@ -1490,7 +1612,7 @@ export async function sendInvoiceRefundNotification(params: {
     </p>
   `);
   try {
-    const subject = `Refund Issued — ${params.invoiceNumber}`;
+    const subject = `Refund Issued - ${params.invoiceNumber}`;
     const text = `Hi ${params.customerName}, a refund of ${formatCurrency(params.refundAmount)} has been issued for invoice ${params.invoiceNumber}. Please allow 5–10 business days for the refund to appear.`;
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
@@ -1532,7 +1654,7 @@ export async function sendDepositPaidAlert(params: {
   const html = wrapHtml(h`
     <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Deposit Received</h2>
     <p style="margin:0 0 16px;font-size:15px;color:#374151;">
-      Deposit received for <strong>${params.estimateNumber}</strong> from <strong>${params.customerName}</strong> —
+      Deposit received for <strong>${params.estimateNumber}</strong> from <strong>${params.customerName}</strong> -
       <strong>${formatCurrency(params.depositAmount)}</strong> via ${methodLabel}.
     </p>
     <p style="margin:0;font-size:15px;color:#374151;">
@@ -1542,8 +1664,8 @@ export async function sendDepositPaidAlert(params: {
   try {
     await dispatchEmail(params.organizationId, {
       to: params.to,
-      subject: `Deposit Received — ${params.estimateNumber}`,
-      text: `Deposit received for ${params.estimateNumber} from ${params.customerName} — ${formatCurrency(params.depositAmount)} via ${methodLabel}. You can now create a job.`,
+      subject: `Deposit Received - ${params.estimateNumber}`,
+      text: `Deposit received for ${params.estimateNumber} from ${params.customerName} - ${formatCurrency(params.depositAmount)} via ${methodLabel}. You can now create a job.`,
       html,
     });
     logger.info(`Deposit paid alert sent to ${params.to} for ${params.estimateNumber}`);
@@ -1585,7 +1707,7 @@ export async function sendPaymentMethodSelectedAlert(params: {
   try {
     await dispatchEmail(params.organizationId, {
       to: params.to,
-      subject: `Payment Method Selected — ${params.estimateNumber}`,
+      subject: `Payment Method Selected - ${params.estimateNumber}`,
       text: `Customer selected ${methodLabel} for ${formatCurrency(params.depositAmount)} deposit on ${params.estimateNumber}. Watch for incoming payment.`,
       html,
     });
@@ -1689,7 +1811,7 @@ function paymentsRateChangeNoticeHtml(params: {
       </td></tr>
     </table>
     <p style="margin:0;font-size:13px;color:#9ca3af;">
-      No action is needed — this stays within the terms you've already accepted, so no re-acceptance is required.
+      No action is needed - this stays within the terms you've already accepted, so no re-acceptance is required.
     </p>
   `);
 }
@@ -1710,7 +1832,7 @@ export async function sendPaymentsRateChangeNotice(params: {
 }): Promise<void> {
   try {
     const subject = 'Your ServWave Payments rate is changing.';
-    const text = `${params.orgName}'s ServWave Payments processing rate is changing from ${params.oldRate} to ${params.newRate}, effective ${params.effectiveDate}. No action is needed — no re-acceptance is required.`;
+    const text = `${params.orgName}'s ServWave Payments processing rate is changing from ${params.oldRate} to ${params.newRate}, effective ${params.effectiveDate}. No action is needed - no re-acceptance is required.`;
     await dispatchEmail(params.organizationId, {
       to: params.to,
       subject,
@@ -1728,56 +1850,6 @@ export async function sendPaymentsRateChangeNotice(params: {
   }
 }
 
-// ─── Custom sending domain — verification success (email slice 10) ──────────
-//
-// Fired the FIRST time an org's own domain transitions into Resend
-// status=verified (lib/organization-domain.ts's applyFreshDomainStatus gates
-// this to exactly once per domain, however the transition is observed — the
-// domain.updated webhook or the controller's own live re-fetch). Platform
-// voice like every other ServWave-to-contractor notice in this file: this is
-// ServWave confirming the org's own setup succeeded, not the org talking to
-// its customers.
-
-function domainVerifiedHtml(params: { domainName: string }): string {
-  return wrapHtml(h`
-    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Your sending domain is verified</h2>
-    <p style="margin:0 0 16px;font-size:15px;color:#374151;">
-      <strong>${params.domainName}</strong> is now verified. Emails to your customers — estimates,
-      invoices, receipts, and more — will now be sent from your own domain instead of ServWave's shared one.
-    </p>
-    <p style="margin:0;font-size:13px;color:#9ca3af;">
-      No action is needed. If this domain ever stops passing verification, sending will automatically
-      fall back to ServWave's shared domain so nothing ever goes undelivered.
-    </p>
-  `);
-}
-
-/**
- * Sent to every active org ADMIN the first time OrganizationDomain.verified_at
- * is set (see applyFreshDomainStatus). Never throws — mirrors every other
- * sender here; the caller fires this fire-and-forget after its own DB write
- * commits.
- */
-export async function sendDomainVerifiedEmail(params: {
-  organizationId: string;
-  to: string;
-  domainName: string;
-}): Promise<void> {
-  try {
-    const subject = `${params.domainName} is verified — you're all set`;
-    const text = `${params.domainName} is now verified. Emails to your customers will now be sent from your own domain instead of ServWave's shared one. No action is needed.`;
-    await dispatchEmail(params.organizationId, {
-      to: params.to,
-      subject,
-      text,
-      html: domainVerifiedHtml({ domainName: params.domainName }),
-    }, { senderIdentity: 'platform' });
-    logger.info(`Domain-verified notification sent to ${params.to} for org ${params.organizationId} (${params.domainName})`);
-  } catch (err) {
-    logger.error(`Failed to send domain-verified notification for org ${params.organizationId}:`, err);
-  }
-}
-
 // ─── Invoice Email Functions ──────────────────────────────
 
 const methodLabels: Record<string, string> = {
@@ -1791,6 +1863,834 @@ const methodLabels: Record<string, string> = {
   CASH_APP: 'Cash App',
   OTHER: 'Other',
 };
+
+// ─── Schedule notices to the customer (SRVW-243) ──────────────────────────
+//
+// These four are the pre-#1003 senders, restored. #1003 deleted them on the
+// premise that the Automation Center would carry the same messages, but a
+// workflow only speaks for an org that HAS the workflow rows, and four of five
+// prod orgs never got them - so between the cutover and now, scheduling a job
+// told the customer nothing while the confirm dialog claimed otherwise.
+//
+// The one deliberate change from the deleted versions: they were
+// `Promise<void>` around a swallowing catch, and these return
+// EmailDispatchResult. A caller that just pressed "notify the customer" is owed
+// the answer (#973's send-honesty rule), and cannot get it from a void.
+//
+// Customer-facing only. The performer/owner/crew copies the old walkthrough
+// senders also fanned out are internal notices with no opt-in behind them, and
+// stay the automation engine's business.
+
+function jobScheduledHtml(params: {
+  customerName: string;
+  jobNumber: string;
+  technicianName: string;
+  scheduledStart?: string | null;
+  serviceAddress: string;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — wrapHtml's own
+   *  'ServWave' fallback is reserved for exactly that case, not a routine omission. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Your Service Has Been Scheduled</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      Your service appointment <strong>${params.jobNumber}</strong> has been scheduled. Here are the details:
+    </p>`)}
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Technician</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.technicianName}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Service Address</p>
+        <p style="margin:0 0 16px;font-size:15px;color:#374151;">${params.serviceAddress}</p>
+        ${raw(params.scheduledStart ? h`
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Scheduled Date &amp; Time</p>
+        <p style="margin:0;font-size:15px;font-weight:600;color:#111827;">${params.scheduledStart}</p>
+        ` : '')}
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      If you need to reschedule, please contact us.
+    </p>
+  `, params.org);
+}
+
+function jobRescheduledHtml(params: {
+  customerName: string;
+  jobNumber: string;
+  newScheduledStart: string;
+  technicianName: string;
+  serviceAddress: string;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Job Rescheduled: ${params.jobNumber}</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      Your scheduled job has been rescheduled. Here are the updated details:
+    </p>`)}
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">New Date &amp; Time</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.newScheduledStart}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Technician</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.technicianName}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Service Address</p>
+        <p style="margin:0;font-size:15px;color:#374151;">${params.serviceAddress}</p>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      If you have any questions, please contact us.
+    </p>
+  `, params.org);
+}
+
+/**
+ * Multi-visit D19 / user story 39. The heading names the TRIP, never the job: cancelling a visit
+ * unschedules that visit and leaves the job standing (D16), so copy that reads "Job J00001
+ * cancelled" would tell the customer something false.
+ */
+function jobVisitCancelledHtml(params: {
+  customerName: string;
+  tripLabel: string;
+  /** The trip's window, already rendered on the org clock. Start alone when it had no end. */
+  cancelledWindow: string | null;
+  /** The crew, or "Our team" when the trip carried none. */
+  technicianName?: string;
+  reason: string;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Visit Cancelled: ${params.tripLabel}</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      One of your scheduled visits has been cancelled. The rest of your service is unaffected.
+    </p>`)}
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        ${raw(params.cancelledWindow ? h`
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Was Scheduled For</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.cancelledWindow}</p>
+        ` : '')}
+        ${raw(params.technicianName ? h`
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Your Technician</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.technicianName}</p>
+        ` : '')}
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Reason</p>
+        <p style="margin:0;font-size:15px;color:#374151;">${params.reason}</p>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      We will be in touch to rebook. If you have any questions, please contact us.
+    </p>
+  `, params.org);
+}
+
+/**
+ * Calendar Entries (slice 07, spec §5) — customer-facing half of the three-outcome family
+ * (scheduled / moved / cancelled). The whole point of the SCHEDULED outcome is free text (the
+ * entry's own title/description, editable in the send dialog) — this is the ONE outcome of the
+ * three that carries a `message` on its sender, exactly like jobScheduledHtml above.
+ */
+function calendarEntryScheduledHtml(params: {
+  customerName: string;
+  entryTitle: string;
+  whenLabel?: string | null;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">You're Invited: ${params.entryTitle}</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      You've been added to <strong>${params.entryTitle}</strong> on the schedule.
+    </p>`)}
+    ${raw(params.whenLabel ? h`
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">When</p>
+        <p style="margin:0;font-size:15px;font-weight:600;color:#111827;">${params.whenLabel}</p>
+      </td></tr>
+    </table>
+    ` : '')}
+  `, params.org);
+}
+
+/**
+ * MOVED — fixed system wording (spec §5: "a dispatcher who has to hand-write [this] skips the
+ * compose step and the customer never learns the time changed" — #1550 arriving through the UI).
+ * Deliberately no `message` parameter anywhere in this function's signature — there is nothing
+ * for a caller to plumb through, which is what makes the wording actually fixed rather than
+ * fixed-by-convention.
+ */
+function calendarEntryMovedHtml(params: {
+  customerName: string;
+  entryTitle: string;
+  whenLabel: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Event Moved: ${params.entryTitle}</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    <p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      <strong>${params.entryTitle}</strong> has been moved to a new time. Here are the updated details:
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">New Date &amp; Time</p>
+        <p style="margin:0;font-size:15px;font-weight:600;color:#111827;">${params.whenLabel}</p>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      If you have any questions, please contact us.
+    </p>
+  `, params.org);
+}
+
+/** CANCELLED — fixed system wording, same reasoning as calendarEntryMovedHtml above. */
+function calendarEntryCancelledHtml(params: {
+  customerName: string;
+  entryTitle: string;
+  whenLabel?: string | null;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Cancelled: ${params.entryTitle}</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    <p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      <strong>${params.entryTitle}</strong> has been cancelled${params.whenLabel ? ` (was scheduled for ${params.whenLabel})` : ''}.
+    </p>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      If you have any questions, please contact us.
+    </p>
+  `, params.org);
+}
+
+function walkthroughScheduledHtml(params: {
+  customerName: string;
+  scheduledDate: string;
+  performerName: string;
+  serviceAddress: string;
+  companyName: string;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Site Visit Scheduled</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      Your site visit has been scheduled. Here are the details:
+    </p>`)}
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Date &amp; Time</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.scheduledDate}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Your Technician</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.performerName}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Service Address</p>
+        <p style="margin:0;font-size:15px;color:#374151;">${params.serviceAddress}</p>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#9ca3af;">
+      Need to reschedule? Contact us at ${params.companyName}.
+    </p>
+  `, params.org);
+}
+
+function walkthroughRescheduledHtml(params: {
+  customerName: string;
+  newDate: string;
+  performerName: string;
+  serviceAddress: string;
+  message?: string;
+  /** Undefined only when the org row itself could not be loaded — see jobScheduledHtml. */
+  org?: OrganizationBrandingSubset;
+}): string {
+  return wrapHtml(h`
+    <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Site Visit Rescheduled</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:#6b7280;">Hi ${params.customerName},</p>
+    ${raw(params.message?.trim()
+      ? customMessageBlock(params.message)
+      : h`<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+      Your site visit has been rescheduled. Here are the updated details:
+    </p>`)}
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
+      <tr><td style="padding:16px 20px;">
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">New Date &amp; Time</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.newDate}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Your Technician</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#111827;">${params.performerName}</p>
+        <p style="margin:0 0 8px;font-size:13px;color:#6b7280;">Service Address</p>
+        <p style="margin:0;font-size:15px;color:#374151;">${params.serviceAddress}</p>
+      </td></tr>
+    </table>
+  `, params.org);
+}
+
+/**
+ * SRVW-243 - the text/plain twin of the HTML body.
+ *
+ * The HTML templates already render the admin's message in place of the
+ * boilerplate intro while keeping the details table beneath it. The text part
+ * was built from boilerplate alone, which broke two things at once: a
+ * plain-text client read wording the admin never wrote, and
+ * persistTransactionalEmail derives the mirrored row's snippet and body from
+ * this same string, so the Communication tab misquoted an email that had left
+ * the building correctly.
+ *
+ * `details` always follows the message, for the same reason the HTML table sits
+ * below it - edited prose may add to the announcement but must never replace
+ * what it states. Shape copied from sendEstimateEmail, which had this right.
+ */
+function composeNotifyText(customerName: string, details: string, message?: string): string {
+  const custom = message?.trim();
+  if (!custom) return `Hi ${customerName}, ${details}`;
+  // Every caller writes `details` to continue "Hi {name}, " inline, so it opens
+  // lowercase. Dropped under a custom message it starts its own paragraph and
+  // needs a capital - prod sent "...this is a test\n\nyour service J00005 has
+  // been scheduled...", and the same string is what the Communication tab
+  // quotes back. Capitalising here rather than at the four call sites keeps the
+  // no-message shape reading as one sentence.
+  return `Hi ${customerName},\n\n${custom}\n\n${details.charAt(0).toUpperCase()}${details.slice(1)}`;
+}
+
+/**
+ * Multi-visit D13: the customer is told about a TRIP, so the label names it. `visit_seq` is the
+ * number that has already been in an inbox - never an index into the time-sorted list, which
+ * renumbers when a trip is added or cancelled.
+ *
+ * Absent visitSeq the label is the bare job number, byte-identical to what the legacy /assign
+ * door has always sent - that door passes none, so it has zero regression here.
+ */
+function tripLabel(jobNumber: string, visitSeq?: number | null): string {
+  return visitSeq == null ? jobNumber : `${jobNumber} - Visit ${visitSeq}`;
+}
+
+export async function sendJobScheduledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - the org row the header wordmark/logo renders from
+   *  (email.ts:80's From-name convention, applied to the body header too). Optional
+   *  only so a caller that genuinely could not load the org still sends rather than
+   *  throwing; wrapHtml's 'ServWave' fallback is reserved for exactly that case. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  jobNumber: string;
+  /** Multi-visit D13 - names the trip in the subject and the body. Omitted on the legacy
+   *  /assign door, which keeps sending exactly what it always did. */
+  visitSeq?: number | null;
+  technicianName: string;
+  scheduledStart?: Date | null;
+  serviceAddress: string;
+  timezone: string;
+  /** SRVW-243 - extra addressees from the compose dialog (max 5, validated at the schema). */
+  cc?: string[];
+  /** SRVW-243 - the admin's own wording. Replaces the boilerplate intro line;
+   *  the details table below it always renders, so an edited message can never
+   *  make the email disagree with the schedule it is announcing. */
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const scheduledStart = params.scheduledStart
+    ? formatDateTimeInZone(params.scheduledStart, params.timezone)
+    : null;
+  const label = tripLabel(params.jobNumber, params.visitSeq);
+  const subject = `Service Scheduled: ${label}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `your service ${label} has been scheduled${scheduledStart ? ` for ${scheduledStart}` : ''}. Technician: ${params.technicianName}. Address: ${params.serviceAddress}.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      subject,
+      text,
+      html: jobScheduledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        jobNumber: label,
+        technicianName: params.technicianName,
+        scheduledStart,
+        serviceAddress: params.serviceAddress,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Job scheduled email sent to ${params.to} for ${params.jobNumber}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send job scheduled email for ${params.jobNumber}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+export async function sendJobRescheduledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  jobNumber: string;
+  /** Multi-visit D13 - see sendJobScheduledEmail. */
+  visitSeq?: number | null;
+  newScheduledStart: Date;
+  technicianName: string;
+  serviceAddress: string;
+  timezone: string;
+  /** SRVW-243 - extra addressees from the compose dialog (max 5, validated at the schema). */
+  cc?: string[];
+  /** SRVW-243 - the admin's own wording. Replaces the boilerplate intro line;
+   *  the details table below it always renders, so an edited message can never
+   *  make the email disagree with the schedule it is announcing. */
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const scheduledStr = formatDateTimeInZone(params.newScheduledStart, params.timezone);
+  const label = tripLabel(params.jobNumber, params.visitSeq);
+  const subject = `Job ${label} Rescheduled`;
+  const text = composeNotifyText(
+    params.customerName,
+    `your job ${label} has been rescheduled to ${scheduledStr}. Technician: ${params.technicianName}. Address: ${params.serviceAddress}.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      subject,
+      text,
+      html: jobRescheduledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        jobNumber: label,
+        newScheduledStart: scheduledStr,
+        technicianName: params.technicianName,
+        serviceAddress: params.serviceAddress,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Job rescheduled email sent to ${params.to} for ${params.jobNumber}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send job rescheduled email for ${params.jobNumber}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+/**
+ * Multi-visit D19 / user story 39: the customer is told a TRIP is off.
+ *
+ * Same parameter shape and the same composeNotifyText / prepareTransactionalReply /
+ * dispatchEmail / finalizeTransactionalSend pipeline as its scheduled and rescheduled siblings -
+ * additive, not a second pipeline. The reply anchor stays on the JOB for the same reason theirs
+ * does: one address for the whole conversation.
+ */
+export async function sendJobVisitCancelledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  jobNumber: string;
+  visitSeq?: number | null;
+  cancelledStart?: Date | null;
+  /** The trip's end, so the notice names the WINDOW the customer was holding open. */
+  cancelledEnd?: Date | null;
+  /**
+   * The crew, already resolved to "Our team" for a crewless trip by the caller. Optional
+   * only so the legacy job-level door can omit it; every visit door passes it.
+   */
+  technicianName?: string;
+  reason: string;
+  timezone: string;
+  cc?: string[];
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const label = tripLabel(params.jobNumber, params.visitSeq);
+  const cancelledStart = params.cancelledStart
+    ? formatDateTimeInZone(params.cancelledStart, params.timezone)
+    : null;
+  // The customer held a WINDOW open, not an instant, so the notice names both ends - the
+  // end is appended as a bare time because the start already carries the date, and a trip
+  // that runs past midnight is the one case where that is not enough, so it re-dates.
+  const cancelledWindow = cancelledStart && params.cancelledEnd
+    ? `${cancelledStart} - ${formatEndOfWindowInZone(params.cancelledStart!, params.cancelledEnd, params.timezone)}`
+    : cancelledStart;
+  const subject = `Visit Cancelled: ${label}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `one of your scheduled visits${cancelledWindow ? ` (${cancelledWindow})` : ''} for ${label} has been cancelled. Reason: ${params.reason}. The rest of your service is unaffected and we will be in touch to rebook.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      subject,
+      text,
+      html: jobVisitCancelledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        tripLabel: label,
+        cancelledWindow,
+        technicianName: params.technicianName,
+        reason: params.reason,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Job visit cancelled email sent to ${params.to} for ${label}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send job visit cancelled email for ${label}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+/**
+ * Calendar Entries (slice 07, spec §5) — three outcomes mirroring the sendJob* trio above so
+ * they inherit the same Reply-To resolution (#1594 → #1603), org branding (SRVW-243) and CC
+ * path. WHICH of the three fires is decided entirely by the CALLER (calendar-entry.controller.ts
+ * / lib/calendar-entries/notify.ts) from a diff of the entry's previous and next start/end and
+ * each participant's own notified_at — never from a status column, because CalendarEntry has
+ * none (spec §9 risk 3, issue #1550's precedent).
+ *
+ * SCHEDULED is the only one of the three that takes a `message` — free text, seeded from the
+ * entry's own title/description in the send dialog and editable there (spec §5). MOVED and
+ * CANCELLED below take no `message` parameter at all, which is what makes their wording
+ * genuinely fixed rather than fixed-by-convention: there is no plumbing a caller could use to
+ * override it even by mistake.
+ */
+export async function sendCalendarEntryScheduledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  entryTitle: string;
+  /** Null for an entry with no scheduled instant is not a real case today (start/end are
+   *  required columns) but kept nullable defensively, mirroring sendJobScheduledEmail. */
+  start?: Date | null;
+  isAllDay?: boolean;
+  timezone: string;
+  /** Free text, seeded from the entry's title/description by the send dialog and editable
+   *  there before it goes (spec §5). Falls back to a plain "you've been added" line when
+   *  absent, exactly like every other sender in this family. */
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const whenLabel = params.start && !params.isAllDay
+    ? formatDateTimeInZone(params.start, params.timezone)
+    : null;
+  const subject = `You're Invited: ${params.entryTitle}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `you've been added to ${params.entryTitle}${whenLabel ? ` on ${whenLabel}` : ''}.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      subject,
+      text,
+      html: calendarEntryScheduledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        entryTitle: params.entryTitle,
+        whenLabel,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Calendar entry scheduled email sent to ${params.to} for ${params.entryTitle}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send calendar entry scheduled email for ${params.entryTitle}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+export async function sendCalendarEntryMovedEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  entryTitle: string;
+  newStart: Date;
+  isAllDay?: boolean;
+  timezone: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const whenLabel = params.isAllDay
+    ? formatDateTimeInZone(params.newStart, params.timezone).split(',')[0] // date only for an all-day entry
+    : formatDateTimeInZone(params.newStart, params.timezone);
+  const subject = `Event Moved: ${params.entryTitle}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `${params.entryTitle} has been moved to a new time: ${whenLabel}.`,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      subject,
+      text,
+      html: calendarEntryMovedHtml({
+        customerName: params.customerName,
+        entryTitle: params.entryTitle,
+        whenLabel,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Calendar entry moved email sent to ${params.to} for ${params.entryTitle}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send calendar entry moved email for ${params.entryTitle}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+export async function sendCalendarEntryCancelledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  entryTitle: string;
+  cancelledStart?: Date | null;
+  isAllDay?: boolean;
+  timezone: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const whenLabel = params.cancelledStart
+    ? (params.isAllDay
+        ? formatDateTimeInZone(params.cancelledStart, params.timezone).split(',')[0]
+        : formatDateTimeInZone(params.cancelledStart, params.timezone))
+    : null;
+  const subject = `Cancelled: ${params.entryTitle}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `${params.entryTitle}${whenLabel ? ` (${whenLabel})` : ''} has been cancelled.`,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      subject,
+      text,
+      html: calendarEntryCancelledHtml({
+        customerName: params.customerName,
+        entryTitle: params.entryTitle,
+        whenLabel,
+        org: params.org,
+      }),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Calendar entry cancelled email sent to ${params.to} for ${params.entryTitle}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error(`Failed to send calendar entry cancelled email for ${params.entryTitle}:`, err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+export async function sendWalkthroughScheduledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  /** Multi-visit D13 - names the trip. Omitted on the legacy /walkthrough/schedule door, which
+   *  keeps sending exactly what it always did. */
+  visitSeq?: number | null;
+  scheduledDate: Date;
+  performerName: string;
+  serviceAddress: string;
+  companyName: string;
+  timezone: string;
+  replyTo?: string;
+  /** SRVW-243 - extra addressees from the compose dialog (max 5, validated at the schema). */
+  cc?: string[];
+  /** SRVW-243 - the admin's own wording. Replaces the boilerplate intro line;
+   *  the details table below it always renders, so an edited message can never
+   *  make the email disagree with the schedule it is announcing. */
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const dateStr = formatDateTimeInZone(params.scheduledDate, params.timezone);
+  const visitLabel = params.visitSeq == null ? 'Site Visit' : `Visit ${params.visitSeq}`;
+  const subject = `${visitLabel} Scheduled - ${dateStr}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `your site visit has been scheduled for ${dateStr}. ${params.performerName} will visit ${params.serviceAddress}.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      subject,
+      text,
+      html: walkthroughScheduledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        scheduledDate: dateStr,
+        performerName: params.performerName,
+        serviceAddress: params.serviceAddress,
+        companyName: params.companyName,
+        org: params.org,
+      }),
+      ...(params.replyTo ? { replyTo: params.replyTo } : {}),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Walkthrough scheduled email sent to ${params.to}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error('Failed to send walkthrough scheduled email:', err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
+
+export async function sendWalkthroughRescheduledEmail(params: {
+  organizationId: string;
+  /** SRVW-243 header-brand fix - see sendJobScheduledEmail. */
+  org?: OrganizationBrandingSubset;
+  to: string;
+  customerName: string;
+  /** Multi-visit D13 - see sendWalkthroughScheduledEmail. */
+  visitSeq?: number | null;
+  newDate: Date;
+  performerName: string;
+  serviceAddress: string;
+  timezone: string;
+  replyTo?: string;
+  /** SRVW-243 - extra addressees from the compose dialog (max 5, validated at the schema). */
+  cc?: string[];
+  /** SRVW-243 - the admin's own wording. Replaces the boilerplate intro line;
+   *  the details table below it always renders, so an edited message can never
+   *  make the email disagree with the schedule it is announcing. */
+  message?: string;
+  record?: TransactionalEmailRecord;
+}): Promise<EmailDispatchResult> {
+  const dateStr = formatDateTimeInZone(params.newDate, params.timezone);
+  const visitLabel = params.visitSeq == null ? 'Site Visit' : `Visit ${params.visitSeq}`;
+  const subject = `${visitLabel} Rescheduled - ${dateStr}`;
+  const text = composeNotifyText(
+    params.customerName,
+    `your site visit has been rescheduled to ${dateStr}. ${params.performerName} will visit ${params.serviceAddress}.`,
+    params.message,
+  );
+  try {
+    const reply = await prepareTransactionalReply(params.record, params.to);
+    const result = await dispatchEmail(params.organizationId, {
+      to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
+      ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
+      subject,
+      text,
+      html: walkthroughRescheduledHtml({
+        message: params.message,
+        customerName: params.customerName,
+        newDate: dateStr,
+        performerName: params.performerName,
+        serviceAddress: params.serviceAddress,
+        org: params.org,
+      }),
+      ...(params.replyTo ? { replyTo: params.replyTo } : {}),
+    });
+    if (result.status === 'sent') {
+      logger.info(`Walkthrough rescheduled email sent to ${params.to}`);
+      if (params.record) {
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
+      }
+    }
+    return result;
+  } catch (err) {
+    logger.error('Failed to send walkthrough rescheduled email:', err);
+    return { status: 'failed', error: err instanceof Error ? err.message : 'Unexpected email error' };
+  }
+}
 
 export async function sendInvoiceEmail(params: {
   invoiceId: string;
@@ -1864,8 +2764,10 @@ export async function sendInvoiceEmail(params: {
     const text = customMessage
       ? `Hi ${params.customerName},\n\n${customMessage}\n\nInvoice ${params.invoiceNumber} for ${formatCurrency(params.amountDue)} is due on ${dueFormatted}. Pay here: ${params.publicUrl}`
       : `Hi ${params.customerName}, invoice ${params.invoiceNumber} for ${formatCurrency(params.amountDue)} is due on ${dueFormatted}. Pay here: ${params.publicUrl}`;
+    const reply = await prepareTransactionalReply(params.record, params.to);
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
       ...(params.cc && params.cc.length > 0 ? { cc: params.cc } : {}),
       subject,
       text,
@@ -1875,7 +2777,9 @@ export async function sendInvoiceEmail(params: {
     if (result.status === 'sent') {
       logger.info(`Invoice email sent to ${params.to} for ${params.invoiceNumber}`);
       if (params.record) {
-        await persistTransactionalEmail({ ...params.record, to: params.to, subject, text, ...sentTrace(result) });
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, cc: params.cc, subject, text, result,
+        });
       }
     }
     return result;
@@ -1928,10 +2832,12 @@ export async function sendPaymentReceivedEmail(params: {
     <p style="margin:0;font-size:13px;color:#9ca3af;">Thank you for your payment.</p>
   `);
   try {
-    const subject = `Payment Received — Invoice ${params.invoiceNumber}`;
+    const subject = `Payment Received - Invoice ${params.invoiceNumber}`;
     const text = `Hi ${params.customerName}, we received your payment of ${formatCurrency(params.amount)} via ${methodLabel} for invoice ${params.invoiceNumber}. Remaining balance: ${params.newBalance <= 0 ? 'Paid in Full' : formatCurrency(params.newBalance)}.`;
+    const reply = await prepareTransactionalReply(params.record, params.to);
     const result = await dispatchEmail(params.organizationId, {
       to: params.to,
+      ...(reply ? { replyTo: reply.address } : {}),
       subject,
       text,
       html,
@@ -1939,7 +2845,9 @@ export async function sendPaymentReceivedEmail(params: {
     if (result.status === 'sent') {
       logger.info(`Payment received email sent to ${params.to} for ${params.invoiceNumber}`);
       if (params.record) {
-        await persistTransactionalEmail({ ...params.record, to: params.to, subject, text, ...sentTrace(result) });
+        await finalizeTransactionalSend({
+          record: params.record, reply, to: params.to, subject, text, result,
+        });
       }
     }
   } catch (err) {
@@ -1966,7 +2874,7 @@ export async function sendClockOverrideRequestedEmail(params: {
   if (params.to.length === 0) return;
   const when = formatDateTimeInZone(params.requestedAt, params.timezone);
   const distance = Math.round(params.distanceM);
-  const subject = `Clock-in override requested — ${params.technicianName}`;
+  const subject = `Clock-in override requested - ${params.technicianName}`;
   const html = wrapHtml(h`
     <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">Clock-in Override Requested</h2>
     <p style="margin:0 0 16px;font-size:15px;color:#374151;">
@@ -2110,7 +3018,7 @@ function aiFarmBookingNotifyHtml(params: AiFarmBookingParams): string {
     <h2 style="margin:0 0 8px;font-size:22px;color:#111827;">New AI Agentic Farm Call Request</h2>
     <p style="margin:0 0 16px;font-size:15px;color:#374151;">
       <strong>${params.requesterName}</strong> (${params.orgName}) wants to talk about
-      <strong>${params.agentName}</strong> — ${params.agentRole}.
+      <strong>${params.agentName}</strong> - ${params.agentRole}.
     </p>
     <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;margin:0 0 24px;">
       <tr><td style="padding:16px 20px;">
@@ -2136,13 +3044,13 @@ function aiFarmBookingConfirmationHtml(params: AiFarmBookingParams): string {
 
 export async function sendAiFarmBookingEmails(params: AiFarmBookingParams): Promise<void> {
   if (!resend) {
-    logger.warn('RESEND_API_KEY not set — skipping AI Agentic Farm booking emails');
+    logger.warn('RESEND_API_KEY not set - skipping AI Agentic Farm booking emails');
     return;
   }
   await resend.emails.send({
     from: env.EMAIL_FROM,
     to: env.AI_FARM_SALES_EMAIL,
-    subject: `New AI Agentic Farm call request: ${params.agentName} — ${params.orgName}`,
+    subject: `New AI Agentic Farm call request: ${params.agentName} - ${params.orgName}`,
     text: `${params.requesterName} (${params.orgName}) wants to talk about ${params.agentName} (${params.agentRole}) on ${params.day} at ${params.slot}. Contact: ${params.requesterEmail}.`,
     html: aiFarmBookingNotifyHtml(params),
     replyTo: params.requesterEmail,
@@ -2150,9 +3058,94 @@ export async function sendAiFarmBookingEmails(params: AiFarmBookingParams): Prom
   await resend.emails.send({
     from: env.EMAIL_FROM,
     to: params.requesterEmail,
-    subject: `You're booked — ${params.agentName} call, ${params.day} ${params.slot}`,
+    subject: `You're booked - ${params.agentName} call, ${params.day} ${params.slot}`,
     text: `Hi ${params.requesterName}, your call about ${params.agentName} (${params.agentRole}) is confirmed for ${params.day} at ${params.slot}. Our team will reach out shortly beforehand.`,
     html: aiFarmBookingConfirmationHtml(params),
   });
   logger.info(`AI Agentic Farm booking emails sent for ${params.agentName} (${params.requesterEmail})`);
+}
+
+// ─── "Reach sales" - the in-app sales/support contact form ───────────────────
+//
+// The Phone header's plan-usage panel lets an owner write to us. The recipient
+// is fixed HERE, server-side, and is never read off the request body: the
+// composer would otherwise be an authenticated open relay - anyone with a login
+// could post an arbitrary `to` and have our own verified sending domain deliver
+// it. The frontend shows the same address purely as a label.
+export const SALES_CONTACT_EMAIL = 'info@servwave.com';
+
+/**
+ * Deliver an owner's sales/support message to the ServWave inbox.
+ *
+ * Platform voice: this is a contractor writing TO us, so the From must not be
+ * stamped with the org's display name as if the org were the sender. The org is
+ * identified in the body instead, and `replyTo` carries the person who wrote it,
+ * so hitting reply in the inbox answers the human rather than the mailer.
+ *
+ * The body's identity block is read HERE, from the org row, rather than taken
+ * from the request - the sender names only their message, subject, reply-to and
+ * topic. See sales-request-email.ts for what it renders.
+ *
+ * Returns the raw dispatch result. Unlike most senders here this one does NOT
+ * swallow its failure - the composer told the owner their message was sent, so
+ * the caller has to be able to tell them the truth when it was not.
+ */
+export async function sendSalesContactEmail(params: {
+  organizationId: string;
+  to: string;
+  subject: string;
+  message: string;
+  replyTo: string;
+  topic: SalesTopic | null;
+  sender: { id: string; name: string | null; email: string; role: string };
+}): Promise<EmailDispatchResult> {
+  const org = await prisma.organization.findUnique({
+    where: { id: params.organizationId },
+    select: {
+      name: true,
+      plan: true,
+      is_demo: true,
+      city: true,
+      state: true,
+      phone: true,
+      ctm_account_id: true,
+      _count: { select: { users: true } },
+    },
+  });
+
+  const { text, html } = buildSalesRequestEmail({
+    organization: {
+      id: params.organizationId,
+      name: org?.name?.trim() || 'Unknown organization',
+      plan: org?.plan ?? 'Unknown plan',
+      isDemo: org?.is_demo ?? false,
+      city: org?.city ?? null,
+      state: org?.state ?? null,
+      phone: org?.phone ?? null,
+      phoneModuleConnected: Boolean(org?.ctm_account_id),
+      userCount: org?._count?.users ?? null,
+    },
+    sender: params.sender,
+    topic: params.topic,
+    subject: params.subject,
+    message: params.message,
+  });
+
+  const result = await dispatchEmail(
+    params.organizationId,
+    { to: params.to, subject: params.subject, text, html: wrapHtml(html), replyTo: params.replyTo },
+    // Always sends. See bypassOrgSendingGate on dispatchEmail: the org's
+    // customer-email kill switch must not cut the org's own line to us.
+    { senderIdentity: 'platform', bypassOrgSendingGate: true },
+  );
+  if (result.status === 'sent') {
+    logger.info(
+      `Sales request from user ${params.sender.id} (org ${params.organizationId}) delivered to ${params.to}`,
+    );
+  } else {
+    logger.error(
+      `Sales request from user ${params.sender.id} (org ${params.organizationId}) was not delivered (${result.status})`,
+    );
+  }
+  return result;
 }

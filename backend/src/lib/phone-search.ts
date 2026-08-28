@@ -76,7 +76,7 @@ export function phoneSearchClauses(term: string): PhoneContainsClause[] {
 
 /**
  * Phone-match OR-clauses against the `phones[]` relation (`CustomerPhone`, entity-redesign
- * §2), where the current create/edit path now stores numbers (and Talon-import rows live
+ * §2), where the current create/edit path now stores numbers (and Riverbend-import rows live
  * digit-only). Mirrors the `extra_emails: { some: { email: { contains } } }` relation
  * pattern and reuses the identical candidate set as `phoneSearchClauses` (#460).
  * Returns `[]` for any term with no digits.

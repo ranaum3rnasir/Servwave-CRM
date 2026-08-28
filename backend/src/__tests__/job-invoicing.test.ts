@@ -40,7 +40,7 @@ describe('legacy ensure-invoice route', () => {
     // so the (still-present, pre-removal) controller would otherwise answer 200.
     mockPrisma.job.findUnique.mockResolvedValue({
       id: JOB_ID,
-      status: 'UNASSIGNED',
+      status: 'UNSCHEDULED',
       source_plan_id: null,
       customer: { id: 'c0000000-0000-0000-0000-000000000001', payment_type: null, tax_exempt: false },
       service_location: { state: 'TX' },
@@ -79,7 +79,7 @@ const LINE_C = 'aa000000-0000-0000-0000-000000000003';
 // deposit-credit lookup. canAccessRow does its own scoped query, so ownership-join fields
 // (assignees/lead_assignees) aren't needed on this row.
 function jobRow({
-  status = 'UNASSIGNED' as string,
+  status = 'UNSCHEDULED' as string,
   sourcePlanId = null as string | null,
   taxExempt = false,
   jobLineItems = [] as any[],

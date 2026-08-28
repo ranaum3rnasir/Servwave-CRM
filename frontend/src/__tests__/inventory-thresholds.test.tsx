@@ -16,8 +16,20 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
+
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_MAIN: 'aaaaaaa1-0000-4000-8000-000000000001',
@@ -148,6 +160,9 @@ describe('InventoryPage - reserve levels (SRVW-91)', () => {
     const { dialog } = await openAddItemDialog();
 
     await userEvent.type(dialog.getByLabelText(/Item Name/), 'Blower Motor');
+    // SKU is required since the 2026-08-12 restructure - it used to be minted
+    // silently from the name on save.
+    await userEvent.type(dialog.getByLabelText(/^SKU/), 'BLOWER-1');
     await userEvent.type(dialog.getByLabelText(/Min/), '10');
     await userEvent.type(dialog.getByLabelText(/Max/), '20');
     await userEvent.click(dialog.getByRole('button', { name: /save item/i }));
@@ -175,6 +190,10 @@ describe('InventoryPage - reserve levels (SRVW-91)', () => {
     expect(await screen.findByText('Invalid body')).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(dialog.getByLabelText('Min reserve')).toHaveValue(10);
-    expect(screen.queryByText(/reserve levels at Main Warehouse set to/i)).toBeNull();
+    // Asserted on the toast CALL, not on rendered text: the routed page reports through
+    // sonner and no toaster is mounted here, so a queryByText would pass vacuously.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.stringMatching(/reserve levels at Main Warehouse set to/i),
+    );
   }, SLOW);
 });

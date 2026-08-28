@@ -71,7 +71,7 @@ const SCHEDULED_JOB_FIXTURE = {
   status: 'SCHEDULED' as const,
   scheduled_start: new Date('2026-06-01T09:00:00Z'),
   scheduled_end: new Date('2026-06-01T11:00:00Z'),
-  assignees: [{ user_id: TECH_USER.id }],
+  assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
   customer_scheduled_email_sent_at: new Date('2026-06-01T00:00:00Z'),
 };
 
@@ -81,10 +81,41 @@ const SCHEDULED_JOB_FIXTURE = {
  * Wire the $transaction mock used by assign().
  * Returns tx spy handles so individual tests can assert on them.
  */
-function wireAssignTx(updatedJob: any, currentCrew: { user_id: string }[] = []) {
+/**
+ * `currentCrew` must AGREE with the crew on the job fixture the handler pre-reads. From S3 the
+ * added/removed diff that drives the timeline events and the dispatches is the one replaceJobCrew
+ * actually computed inside this transaction (under the union, the request's omissions are not the
+ * same thing as a removal), so a fake that says "nobody is on this job" while the fixture says
+ * otherwise now silently produces an empty diff.
+ */
+/**
+ * `visits` describes the job's TRIPS, and it is not optional decoration for a job that is already
+ * on the calendar. From S3 a scheduled, crewed job always has at least one visit carrying that
+ * crew - the migration folds it there, and every booking made since lands it there - so wiring
+ * "this job has no visits and nobody is on any of them" describes a row the database cannot hold,
+ * and it is the exact input that hides a removal regression: the union read comes back empty, so
+ * whatever ordering the handler uses, the request's omissions look like removals. The
+ * visit_assignees delegate is therefore STATEFUL, so what the union reads is what the visit write
+ * left behind rather than a fixture.
+ */
+function wireAssignTx(
+  updatedJob: any,
+  currentCrew: { user_id: string }[] = [],
+  visits: { liveVisits?: any[]; crew?: { visit_id: string; user_id: string }[] } = {},
+) {
   // Conflict queries default to "no conflict".
   mockPrisma.job.findMany.mockResolvedValue([]);
   mockPrisma.lead.findMany.mockResolvedValue([]);
+
+  const liveVisits = visits.liveVisits ?? [];
+  const visitRows = [...(visits.crew ?? [])];
+  const visitIdsOfJob = new Set(liveVisits.map((v) => v.id));
+  const matchesVisit = (r: { visit_id: string; user_id: string }, where: any) => {
+    if (where?.visit?.job_id !== undefined && !visitIdsOfJob.has(r.visit_id)) return false;
+    if (where?.visit_id !== undefined && r.visit_id !== where.visit_id) return false;
+    if (where?.user_id?.in !== undefined && !where.user_id.in.includes(r.user_id)) return false;
+    return true;
+  };
 
   const txJobAssigneeFindMany = vi.fn().mockResolvedValue(currentCrew);
   const txJobAssigneeCreateMany = vi.fn().mockResolvedValue({ count: 0 });
@@ -95,6 +126,41 @@ function wireAssignTx(updatedJob: any, currentCrew: { user_id: string }[] = []) 
 
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        visit: {
+          findMany: vi.fn().mockResolvedValue(liveVisits),
+          create: vi.fn().mockResolvedValue({ id: 'v0000000-0000-0000-0000-0000000000ff' }),
+          update: vi.fn().mockResolvedValue({}),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: null } }),
+        },
+      // Multi-visit S3: replaceJobCrew now reads the job's VISIT crew inside this same
+      // transaction, so the union it writes can never evict someone off another visit. Without
+      // this delegate the read throws inside the tx and the route 500s opaquely.
+      visitAssignee: {
+        findMany: vi.fn(async ({ where }: any) =>
+          visitRows.filter((r) => matchesVisit(r, where)).map((r) => ({ user_id: r.user_id, visit_id: r.visit_id })),
+        ),
+        // S3: /assign now lands the crew change on the visit it booked or moved, so this tx
+        // client needs the WRITE delegates too, not just the union read - and they have to MOVE
+        // the same rows the read serves, or the read would be answering from a fixture.
+        createMany: vi.fn(async ({ data }: any) => {
+          const list = Array.isArray(data) ? data : [data];
+          for (const row of list) visitRows.push({ visit_id: row.visit_id, user_id: row.user_id });
+          return { count: list.length };
+        }),
+        deleteMany: vi.fn(async ({ where }: any) => {
+          let removed = 0;
+          for (let i = visitRows.length - 1; i >= 0; i--) {
+            if (matchesVisit(visitRows[i]!, where)) {
+              visitRows.splice(i, 1);
+              removed++;
+            }
+          }
+          return { count: removed };
+        }),
+      },
       jobAssignee: {
         findMany: txJobAssigneeFindMany,
         createMany: txJobAssigneeCreateMany,
@@ -122,6 +188,33 @@ function wireSetAssigneesTx(updatedJob: any, currentCrew: { user_id: string }[] 
 
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        // S8 (D6): the crew statement lands on the job's CURRENT visit, so it needs one.
+        visit: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+              visit_seq: 1, status: 'SCHEDULED',
+              scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+              scheduled_end: new Date('2026-10-01T11:00:00.000Z'),
+              is_all_day: false, created_at: new Date('2026-09-01T00:00:00.000Z'),
+              en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+            },
+          ]),
+          create: vi.fn().mockResolvedValue({}),
+          update: vi.fn().mockResolvedValue({}),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+      // S8 (D6): the crew delta the notifications read comes off THIS delegate now.
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue(currentCrew),
+        // S3: /assign now restates the named crew on the visit it booked or moved, so this
+        // tx client needs the WRITE delegates too, not just the union read.
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       jobAssignee: {
         findMany: txJobAssigneeFindMany,
         createMany: txJobAssigneeCreateMany,
@@ -172,7 +265,7 @@ afterEach(() => {
 describe('POST /api/jobs/:id/assign — notification hooks', () => {
   it('emits dispatch.job_assigned with the added tech id when crew member is added', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, no current assignees
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, no current assignees
 
     // mockAuthAs wires user.findUnique for TEST_USERS by id.
     // TECH_USER.id === TEST_USERS.technician.id → already handled.
@@ -208,7 +301,7 @@ describe('POST /api/jobs/:id/assign — notification hooks', () => {
     mockAuthAs('admin');
     const fixture = {
       ...SCHEDULED_JOB_FIXTURE,
-      assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }],
+      assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }], visits: [{ assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }] }],
     };
     mockPrisma.job.findUnique.mockResolvedValue(fixture);
 
@@ -219,7 +312,24 @@ describe('POST /api/jobs/:id/assign — notification hooks', () => {
       return Promise.resolve(match ? { ...match, organization: TEST_ORG } : null);
     });
 
-    wireAssignTx({ ...fixture, assignees: [{ user_id: TECH_USER.id }] });
+    // The post-migration shape of an already-scheduled crewed job: one live visit carrying both.
+    const VISIT_1 = 'v0000000-0000-0000-0000-000000000001';
+    wireAssignTx(
+      { ...fixture, assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }] },
+      [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }],
+      {
+        liveVisits: [{
+          id: VISIT_1, job_id: JOB_FIXTURE.id, visit_seq: 1, status: 'SCHEDULED',
+          scheduled_at: new Date('2026-06-01T09:00:00Z'),
+          scheduled_end: new Date('2026-06-01T11:00:00Z'),
+          created_at: new Date('2026-05-20T10:00:00Z'),
+        }],
+        crew: [
+          { visit_id: VISIT_1, user_id: TECH_USER.id },
+          { visit_id: VISIT_1, user_id: TECH2_ID },
+        ],
+      },
+    );
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/assign`)
@@ -246,7 +356,26 @@ describe('POST /api/jobs/:id/assign — notification hooks', () => {
     // Existing crew = [TECH_USER]; new crew = [TECH_USER] (no add/remove); time changes.
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(SCHEDULED_JOB_FIXTURE);
-    wireAssignTx({ ...SCHEDULED_JOB_FIXTURE, scheduled_start: new Date('2026-09-01T09:00:00Z') });
+    // S8 (D6): a scheduled, crewed job HAS a trip carrying that crew - wiring "no visits" would
+    // describe a row the database cannot hold, and the wholesale-replace branch would then report
+    // the kept technician as newly added, suppressing the reschedule notice under test.
+    wireAssignTx(
+      { ...SCHEDULED_JOB_FIXTURE, scheduled_start: new Date('2026-09-01T09:00:00Z') },
+      [{ user_id: TECH_USER.id }],
+      {
+        liveVisits: [
+          {
+            id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+            visit_seq: 1, status: 'SCHEDULED',
+            scheduled_at: new Date('2026-06-01T09:00:00Z'),
+            scheduled_end: new Date('2026-06-01T11:00:00Z'),
+            is_all_day: false, created_at: new Date('2026-05-01T00:00:00Z'),
+            en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+          },
+        ],
+        crew: [{ visit_id: 'v0000000-0000-0000-0000-0000000000f1', user_id: TECH_USER.id }],
+      },
+    );
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/assign`)
@@ -280,7 +409,7 @@ describe('POST /api/jobs/:id/assign — notification hooks', () => {
       const match = Object.values(TEST_USERS).find((u) => u.id === args.where.id);
       return Promise.resolve(match ? { ...match, organization: TEST_ORG } : null);
     });
-    wireAssignTx({ ...SCHEDULED_JOB_FIXTURE, assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }] });
+    wireAssignTx({ ...SCHEDULED_JOB_FIXTURE, assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }], visits: [{ assignees: [{ user_id: TECH_USER.id }, { user_id: TECH2_ID }] }] });
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/assign`)
@@ -305,7 +434,7 @@ describe('POST /api/jobs/:id/assignees (setAssignees) — notification hook', ()
   it('emits dispatch.job_assigned when a crew member is added via the crew-only endpoint', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // no current assignees
-    wireSetAssigneesTx({ ...JOB_FIXTURE, assignees: [{ user_id: TECH_USER.id }] });
+    wireSetAssigneesTx({ ...JOB_FIXTURE, assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }] });
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/assignees`)
@@ -329,14 +458,14 @@ describe('POST /api/jobs/:id/assignees (setAssignees) — notification hook', ()
     const fixture = {
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       customer: JOB_FIXTURE.customer,
       service_location: JOB_FIXTURE.service_location,
       scope_notes: null,
       scheduled_start: new Date('2026-06-01T09:00:00Z'),
     };
     mockPrisma.job.findUnique.mockResolvedValue(fixture);
-    wireSetAssigneesTx({ ...fixture, assignees: [] });
+    wireSetAssigneesTx({ ...fixture, assignees: [], visits: [{ assignees: [] }] }, [{ user_id: TECH_USER.id }]);
 
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/assignees`)

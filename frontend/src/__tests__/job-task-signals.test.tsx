@@ -12,7 +12,7 @@ import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import * as jobsApi from '@/lib/api/jobs';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { useTasksStore } from '@/stores/tasksStore';
 
 // ── Stubs ────────────────────────────────────────────────────────────────────
@@ -117,42 +117,22 @@ beforeEach(() => {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/*
+ * The three header chips this file used to open with - Open, Overdue and Next
+ * due, keyed on `task-chip-open` / `task-chip-overdue` / `task-chip-next-due` -
+ * are gone, and their cases with them. Not an oversight: the live page
+ * (`pages/v2/jobs/JobDetailPage.tsx`) records the removal and its reason at the
+ * point where they used to render, namely that all three were on screen at all
+ * times including the overwhelmingly common "0 Open, 0 Overdue, Next due -",
+ * spending a header row to report that there was nothing to report.
+ *
+ * Nothing they carried went unwatched. The open COUNT is asserted below on the
+ * Tasks tab label, and the one state that has to interrupt - something overdue -
+ * is asserted below on the at-risk strip. Both of those cases pass against the
+ * live page unchanged, which is why the chips could go and this file still
+ * covers P3-2.
+ */
 describe('JobDetailPage — task signals (P3-2)', () => {
-  it('renders the Open task chip', async () => {
-    mockAll();
-    renderWithProviders(<JobDetailPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText(/Open/i)).toBeInTheDocument();
-    });
-    // "3" open tasks
-    expect(screen.getByText('3')).toBeInTheDocument();
-  });
-
-  it('renders the Overdue chip with danger styling when overdue > 0', async () => {
-    mockAll();
-    renderWithProviders(<JobDetailPage />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('task-chip-overdue')).toBeInTheDocument();
-    });
-    const chip = screen.getByTestId('task-chip-overdue');
-    // Should have danger styling applied (class contains "danger")
-    expect(chip.className).toMatch(/danger/);
-  });
-
-  it('renders the Next Due chip with formatted date', async () => {
-    mockAll();
-    renderWithProviders(<JobDetailPage />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('task-chip-next-due')).toBeInTheDocument();
-    });
-    // Should contain some date representation (not "—")
-    const chip = screen.getByTestId('task-chip-next-due');
-    expect(chip.textContent).not.toBe('—');
-  });
-
   it('renders the at-risk amber strip when overdue > 0', async () => {
     mockAll();
     renderWithProviders(<JobDetailPage />);
@@ -214,7 +194,8 @@ const LINKED_TASK = {
   description: '',
   status: 'TODO' as const,
   priority: 'MEDIUM' as const,
-  owner_id: null,
+  assignee_ids: ['admin'],
+  assignees: [{ id: 'admin', name: 'Admin User' }],
   watcher_ids: [],
   due_at: null,
   linked_entity: { type: 'JOB' as const, id: JOB_ID, label: 'J00001' },

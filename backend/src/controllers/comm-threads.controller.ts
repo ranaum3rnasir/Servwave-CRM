@@ -22,6 +22,7 @@ import {
   SMS_ROUTER_RECENCY_WINDOW_DAYS,
   type JobTextCandidate,
 } from '../lib/sms-reply-router';
+import { recordLeadOutboundContact } from '../services/lead-contact.service';
 
 // ─── Zod Schemas ───────────────────────────────────────
 
@@ -661,6 +662,42 @@ export async function sendMessage(req: Request, res: Response) {
       message.status = 'skipped';
       message.status_reason = blockedReason;
       delivery = 'skipped';
+    }
+
+    // Spec #1751 D5: an outbound text a person wrote is one of the three things that mark a lead
+    // contacted. Read off the ROW rather than off `req.body`, so the filter tests exactly what was
+    // persisted — `automated` and `direction` both have defaults applied at the create above, and a
+    // second derivation from the request is a second place for the two to disagree.
+    //
+    // The automation SMS writer (services/automations/smsRecord.ts) writes `automated: true` and
+    // does not stamp a lead at all, so an appointment confirmation cannot reach this. An inbound
+    // simulated write (`direction: 'in'`) cannot either: the customer texting us is not us
+    // reaching out (user story 15).
+    //
+    // AFTER the delivery block, never before it, and gated on the SETTLED status. THE STAMP HAS TO
+    // FOLLOW THE OUTCOME, NOT THE INTENT — the same rule lead.controller.ts states about
+    // `customer_email_sent_at`, and the rule the email arm of this feature already keeps (its row
+    // is created only once the provider has accepted). Stamping at row-creation time marked the
+    // lead contacted on every org where delivery is not configured, where the row settles
+    // `skipped` and nothing ever left the building; first-touch-wins then makes that permanent, so
+    // the real outreach that follows can never correct it.
+    //
+    // `sent` and `delivered` are the two statuses that mean it went out: sendCtmSms settles an
+    // accepted send to `sent`, and the carrier's own confirmation later promotes that row to
+    // `delivered` (lib/ctm/ingest.ts). Everything else here is `queued` (nothing attempted),
+    // `skipped` (a gate refused it) or `failed`.
+    //
+    // Awaited, and never able to throw — see lead-contact.service.ts. The text has already gone
+    // out by this point; a bookkeeping failure must not turn that into a 500.
+    if (message.status === 'sent' || message.status === 'delivered') {
+      await recordLeadOutboundContact(prisma, {
+        leadId: message.lead_id,
+        orgId: message.organization_id,
+        channel: 'text',
+        direction: message.direction,
+        automated: message.automated,
+        at: message.ts,
+      });
     }
 
     // Compose-to-number returns the resolved thread id so the composer can

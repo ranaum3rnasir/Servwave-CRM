@@ -70,17 +70,46 @@ beforeEach(() => {
   // Walkthrough-as-entity redesign, PR-B2: default to "no active/scheduled visit" so tests
   // that don't exercise a specific visit state don't need to know findActiveWalkthrough/
   // findScheduledWalkthrough exist. Tests below override this per-scenario.
-  mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
-  mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+  mockPrisma.visit.findFirst.mockResolvedValue(null);
+  mockPrisma.visit.findMany.mockResolvedValue([]);
 });
 
 // ── job assign: TECH_ASSIGNED + JOB_SCHEDULED / JOB_RESCHEDULED ──────────────
 
-function wireAssignTx(updatedJob: any, currentCrew: { user_id: string }[] = []) {
+/** S8 (D6): the trip a job-level crew statement lands on. */
+const S8_FIXTURE_VISIT =
+  {
+    id: 'v0000000-0000-0000-0000-0000000000f1', job_id: JOB_FIXTURE.id, lead_id: null,
+    visit_seq: 1, status: 'SCHEDULED',
+    scheduled_at: new Date('2026-06-01T09:00:00.000Z'),
+    scheduled_end: new Date('2026-06-01T11:00:00.000Z'),
+    is_all_day: false, created_at: new Date('2026-05-01T00:00:00.000Z'),
+    en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+  };
+
+function wireAssignTx(updatedJob: any, currentCrew: { user_id: string }[] = [], liveVisits: any[] = [S8_FIXTURE_VISIT]) {
   mockPrisma.job.findMany.mockResolvedValue([]);
   mockPrisma.lead.findMany.mockResolvedValue([]);
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
+        // Multi-visit S2: /assign now keeps the job's ONE window in step with its visit set
+        // (D14's mirror runs both ways), so the transaction touches `visits` too. Empty here -
+        // these jobs hold no visit yet, which is the create branch.
+        // S8 (D6): the crew statement lands on the job's CURRENT trip, so it needs one.
+        visit: {
+          findMany: vi.fn().mockResolvedValue(liveVisits),
+          create: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          update: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+      // S8 (D6): the crew delta the automation events read comes off THIS delegate now.
+      visitAssignee: {
+        findMany: vi.fn().mockResolvedValue(currentCrew),
+        // S3: /assign now restates the named crew on the visit it booked or moved, so this
+        // tx client needs the WRITE delegates too, not just the union read.
+        createMany: vi.fn().mockResolvedValue({ count: 0 }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
       jobAssignee: {
         findMany: vi.fn().mockResolvedValue(currentCrew),
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -96,7 +125,7 @@ function wireAssignTx(updatedJob: any, currentCrew: { user_id: string }[] = []) 
 describe('POST /api/jobs/:id/assign — automation events', () => {
   it('first schedule with a new tech → TECH_ASSIGNED (occurrence = tech id) + JOB_SCHEDULED, no re-arm', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, unscheduled
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, unscheduled
     wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
 
     const res = await request(app)
@@ -143,7 +172,7 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
   // sending where the hard-coded sender never did.
   it('first schedule with NO crew (state-4) → JOB_SCHEDULED is NOT dispatched', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, unscheduled
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, unscheduled
     wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
 
     const res = await request(app)
@@ -162,14 +191,14 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
   // The customer "scheduled" email gates on stampScheduledFlag, NOT on
   // isFirstScheduleWithCrew alone — i.e. it also requires the send-guard flag to
   // still be unset (job.controller.ts, Spec B1). A job that was backward-cleared
-  // to UNASSIGNED and re-forward-assigned satisfies isFirstScheduleWithCrew but
+  // to UNSCHEDULED and re-forward-assigned satisfies isFirstScheduleWithCrew but
   // already carries the flag, and the hard-coded sender deliberately stayed
   // silent so the customer is not told "scheduled" twice. The dispatch has to
   // honour that same guard or the migrated automation re-emails them.
   it('re-assigning a job that already carries the scheduled-email flag → JOB_SCHEDULED is NOT dispatched', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValue({
-      ...JOB_FIXTURE, // UNASSIGNED + unscheduled → isFirstScheduleWithCrew is true
+      ...JOB_FIXTURE, // UNSCHEDULED + unscheduled → isFirstScheduleWithCrew is true
       customer_scheduled_email_sent_at: new Date('2026-06-01T00:00:00Z'), // …but already emailed
     });
     wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
@@ -192,12 +221,18 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
 
   it('moving an already-scheduled job → JOB_RESCHEDULED with the NEW start as occurrence + rearmAnchoredWaits', async () => {
     mockAuthAs('admin');
+    // S8 (RATIFIED, A5): isReschedule now reads resolveJobScheduleWindow(existing.visits) -
+    // the flat scheduled_start/scheduled_end fixture fields below no longer feed it at all, so
+    // the visit entry must carry a real, matching, live window for `isReschedule` to resolve true.
     const fixture = {
       ...JOB_FIXTURE,
       status: 'SCHEDULED' as const,
-      scheduled_start: new Date('2026-06-01T09:00:00Z'),
-      scheduled_end: new Date('2026-06-01T11:00:00Z'),
       assignees: [{ user_id: TECH_USER.id }],
+      visits: [{
+        status: 'SCHEDULED', scheduled_at: new Date('2026-06-01T09:00:00Z'), scheduled_end: new Date('2026-06-01T11:00:00Z'),
+        is_all_day: false, created_at: new Date('2026-05-01T00:00:00Z'),
+        assignees: [{ user_id: TECH_USER.id }],
+      }],
       customer_scheduled_email_sent_at: new Date('2026-06-01T00:00:00Z'),
     };
     mockPrisma.job.findUnique.mockResolvedValue(fixture);
@@ -234,7 +269,7 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
       status: 'SCHEDULED' as const,
       scheduled_start: new Date('2026-06-01T09:00:00Z'),
       scheduled_end: new Date('2026-06-01T11:00:00Z'),
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       customer_scheduled_email_sent_at: null,
     };
     mockPrisma.job.findUnique.mockResolvedValue(fixture);
@@ -274,7 +309,7 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
       status: 'SCHEDULED' as const,
       scheduled_start: new Date('2026-06-01T09:00:00Z'),
       scheduled_end: new Date('2026-06-01T11:00:00Z'),
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       customer_scheduled_email_sent_at: new Date('2026-06-01T00:00:00Z'),
     };
     mockPrisma.job.findUnique.mockResolvedValue(fixture);
@@ -312,7 +347,7 @@ describe('POST /api/jobs/:id/assign — automation events', () => {
 
   it('does NOT dispatch TECH_UNASSIGNED when no one is removed', async () => {
     mockAuthAs('admin');
-    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNASSIGNED, no crew
+    mockPrisma.job.findUnique.mockResolvedValue(JOB_FIXTURE); // UNSCHEDULED, no crew
     wireAssignTx({ ...JOB_FIXTURE, status: 'SCHEDULED' });
 
     const res = await request(app)
@@ -331,13 +366,28 @@ describe('POST /api/jobs/:id/assignees — automation events', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
     });
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: TECH_USER.id, email: TECH_USER.email, first_name: TECH_USER.first_name, last_name: TECH_USER.last_name },
     ]);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // S8 (D6): the crew statement lands on the job's CURRENT trip, so it needs one.
+        visit: {
+          findMany: vi.fn().mockResolvedValue([S8_FIXTURE_VISIT]),
+          create: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          update: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+        // S8 (D6): the crew delta the automation events read comes off THIS delegate now.
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([{ user_id: TECH_USER.id }]),
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: {
           findMany: vi.fn().mockResolvedValue([{ user_id: TECH_USER.id }]),
           createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -377,13 +427,28 @@ describe('POST /api/jobs/:id/assignees — automation events', () => {
     mockPrisma.job.findUnique.mockResolvedValue({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
     });
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: TECH_USER.id, email: TECH_USER.email, first_name: TECH_USER.first_name, last_name: TECH_USER.last_name },
     ]);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
+        // S8 (D6): the crew statement lands on the job's CURRENT trip, so it needs one.
+        visit: {
+          findMany: vi.fn().mockResolvedValue([S8_FIXTURE_VISIT]),
+          create: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          update: vi.fn().mockResolvedValue(S8_FIXTURE_VISIT),
+          aggregate: vi.fn().mockResolvedValue({ _max: { visit_seq: 1 } }),
+        },
+        // S8 (D6): the crew delta the automation events read comes off THIS delegate now.
+        visitAssignee: {
+          findMany: vi.fn().mockResolvedValue([{ user_id: TECH_USER.id }]),
+          // S3: /assign now restates the named crew on the visit it booked or moved, so this
+          // tx client needs the WRITE delegates too, not just the union read.
+          createMany: vi.fn().mockResolvedValue({ count: 0 }),
+          deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        },
         jobAssignee: {
           findMany: vi.fn().mockResolvedValue([{ user_id: TECH_USER.id }]),
           createMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -413,7 +478,7 @@ describe('job lifecycle — automation events', () => {
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       id: JOB_FIXTURE.id,
       status: 'IN_PROGRESS',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       job_number: JOB_FIXTURE.job_number,
       source_plan_id: null,
     });
@@ -435,7 +500,8 @@ describe('job lifecycle — automation events', () => {
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       id: JOB_FIXTURE.id,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id, user: { first_name: TECH_USER.first_name } }],
+      // S8 (D6): the en-route handler reads the crew through the job's trips.
+      visits: [{ assignees: [{ user_id: TECH_USER.id, user: { first_name: TECH_USER.first_name } }] }],
       job_number: JOB_FIXTURE.job_number,
       scheduled_start: new Date('2026-08-01T09:00:00Z'),
       customer: { id: CUSTOMER_FIXTURE.id, email: CUSTOMER_FIXTURE.email, first_name: 'Sarah', company_name: null },
@@ -503,10 +569,11 @@ describe('job lifecycle — automation events', () => {
     mockAuthAs('admin');
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       id: JOB_FIXTURE.id,
-      status: 'UNASSIGNED',
+      status: 'UNSCHEDULED',
       // Crewed, so this isolates the STATUS dimension — the crew gate is covered
       // by its own test above.
-      assignees: [{ user_id: TECH_USER.id, user: { first_name: TECH_USER.first_name } }],
+      // S8 (D6): the en-route handler reads the crew through the job's trips.
+      visits: [{ assignees: [{ user_id: TECH_USER.id, user: { first_name: TECH_USER.first_name } }] }],
       job_number: JOB_FIXTURE.job_number,
       scheduled_start: null,
       customer: { id: CUSTOMER_FIXTURE.id, email: CUSTOMER_FIXTURE.email, first_name: 'Sarah', company_name: null },
@@ -529,7 +596,7 @@ describe('job lifecycle — automation events', () => {
     mockPrisma.job.findUnique.mockResolvedValueOnce({
       ...JOB_FIXTURE,
       status: 'SCHEDULED',
-      assignees: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
       invoices: [],
     });
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
@@ -541,6 +608,8 @@ describe('job lifecycle — automation events', () => {
         // Inventory P1 (§4.2): cancel's auto-return pass — nothing SYNCED in this flow.
         jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
         invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { aggregate: mockPrisma.visit.aggregate, updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       }),
     );
 
@@ -585,6 +654,8 @@ describe('estimate lifecycle — automation events', () => {
         deposit: { create: vi.fn().mockResolvedValue({}) },
         invoice: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn().mockResolvedValue({ id: 'dep-inv-1' }) },
         invoiceLineItem: { create: vi.fn().mockResolvedValue({}) },
+        // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+        visit: { aggregate: mockPrisma.visit.aggregate, updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         timelineEvent: { create: vi.fn().mockResolvedValue({}) },
       }),
     );
@@ -893,7 +964,7 @@ describe('lead creation — automation events', () => {
         customer: { update: vi.fn().mockResolvedValue({}) },
         lead: { create: vi.fn().mockResolvedValue(createdLead) },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue({ id: LOCATION_FIXTURE.id }) },
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
       }),
     );
     mockPrisma.lead.findUnique.mockResolvedValue(createdLead);
@@ -934,7 +1005,7 @@ describe('lead creation — automation events', () => {
         customer: { update: vi.fn().mockResolvedValue({}) },
         lead: { create: vi.fn().mockResolvedValue(createdLead) },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue({ id: LOCATION_FIXTURE.id }) },
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+        visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
       }),
     );
     mockPrisma.lead.findUnique.mockResolvedValue(createdLead);
@@ -973,16 +1044,16 @@ function wireScheduleWalkthroughTx(updated: any) {
   mockPrisma.lead.findMany.mockResolvedValue([]);
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
-      leadWalkthroughPerformer: {
+      visitAssignee: {
         findMany: vi.fn().mockResolvedValue([]),
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
-      walkthrough: {
+      visit: { aggregate: mockPrisma.visit.aggregate,
         create: vi.fn().mockResolvedValue({ id: 'wt-new-1' }),
         update: vi.fn().mockResolvedValue({ id: 'wt-active-1' }),
       },
-      lead: { update: vi.fn().mockResolvedValue(updated) },
+      lead: { update: vi.fn().mockResolvedValue(updated), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
       timelineEvent: { create: vi.fn().mockResolvedValue({}) },
     }),
   );
@@ -992,7 +1063,7 @@ function wireScheduleWalkthroughTx(updated: any) {
 function wireSetPerformersTx(updated: any) {
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
-      leadWalkthroughPerformer: {
+      visitAssignee: {
         findMany: vi.fn().mockResolvedValue([{ user_id: TECH_USER.id }]),
         createMany: vi.fn().mockResolvedValue({ count: 0 }),
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -1015,7 +1086,7 @@ describe('POST /api/leads/:id/walkthrough/schedule — automation events', () =>
     mockPrisma.lead.findUnique.mockResolvedValue({
       ...LEAD_FIXTURE,
       status: 'CONTACTED',
-      walkthrough_performers: [],
+      visit_assignees: [],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -1063,7 +1134,7 @@ describe('POST /api/leads/:id/walkthrough/schedule — automation events', () =>
     mockPrisma.lead.findUnique.mockResolvedValue({
       ...LEAD_FIXTURE,
       status: 'CONTACTED',
-      walkthrough_performers: [],
+      visit_assignees: [],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -1085,7 +1156,7 @@ describe('POST /api/leads/:id/walkthrough/schedule — automation events', () =>
     mockPrisma.lead.findUnique.mockResolvedValue({
       ...LEAD_FIXTURE,
       status: 'CONTACTED',
-      walkthrough_performers: [],
+      visit_assignees: [],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -1102,10 +1173,10 @@ describe('POST /api/leads/:id/walkthrough/schedule — automation events', () =>
   it('send_email:false ALSO suppresses WALKTHROUGH_PERFORMER_REMOVED for a performer dropped in the same reschedule', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-07-01T09:00:00Z'),
       customer_email_sent_at: null,
-      performers: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }] }],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -1126,10 +1197,10 @@ describe('POST /api/leads/:id/walkthrough/schedule — automation events', () =>
   it('reschedule (WALKTHROUGH_SCHEDULED, same performer, new time) → WALKTHROUGH_RESCHEDULED (occ = new time) + rearmAnchoredWaits, no re-assign dispatch', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-07-01T09:00:00Z'),
       customer_email_sent_at: null,
-      performers: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
 
@@ -1167,13 +1238,13 @@ describe('POST /api/leads/:id/walkthrough/performers — automation events', () 
   it('adding a new performer to an existing set → ONE WALKTHROUGH_PERFORMER_ASSIGNED for the added id only', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue(LEAD_FIXTURE);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date(),
-      performers: [{ user_id: TECH_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }] }],
     });
     wireSetPerformersTx({
       ...LEAD_FIXTURE,
-      walkthrough_performers: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }],
+      visit_assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }],
     });
 
     const res = await request(app)
@@ -1197,13 +1268,13 @@ describe('POST /api/leads/:id/walkthrough/performers — automation events', () 
   it('does NOT dispatch WALKTHROUGH_PERFORMER_ASSIGNED when no performer is newly added (pure removal), but DOES dispatch WALKTHROUGH_PERFORMER_REMOVED with the removed user as eventPayload.recipient', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue(LEAD_FIXTURE);
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date(),
-      performers: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }] }],
     });
     wireSetPerformersTx({
       ...LEAD_FIXTURE,
-      walkthrough_performers: [{ user_id: TECH_USER.id }],
+      visit_assignees: [{ user_id: TECH_USER.id }],
     });
     mockPrisma.user.findMany.mockResolvedValueOnce([
       { id: SALES_USER.id, email: SALES_USER.email, first_name: SALES_USER.first_name, last_name: SALES_USER.last_name },
@@ -1231,10 +1302,10 @@ describe('POST /api/leads/:id/walkthrough/schedule — WALKTHROUGH_PERFORMER_REM
   it('a reschedule that drops a performer dispatches WALKTHROUGH_PERFORMER_REMOVED for them', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({
+    mockPrisma.visit.findFirst.mockResolvedValue({
       id: 'wt-active-1', status: 'SCHEDULED', scheduled_at: new Date('2026-07-01T09:00:00Z'),
       customer_email_sent_at: null,
-      performers: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }],
+      assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }], visits: [{ assignees: [{ user_id: TECH_USER.id }, { user_id: SALES_USER.id }] }],
     });
     wireScheduleWalkthroughTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.user.findMany.mockResolvedValueOnce([
@@ -1316,9 +1387,13 @@ describe('POST /api/leads/:id/walkthrough/complete — automation events', () =>
   it('completes a scheduled walkthrough → WALKTHROUGH_COMPLETED (no occurrenceKey)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.update.mockResolvedValue({});
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
+    // Spec #1751 D3: the monotonic completion clock is a CONDITIONAL write of its own
+    // (stampLeadClock -> lead.updateMany), whose `count` the writer reads. An unresolved mock
+    // returns undefined and destructuring it 500s the door.
+    mockPrisma.lead.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => fn(mockPrisma));
 
     const res = await request(app)
@@ -1341,9 +1416,9 @@ describe('POST /api/leads/:id/walkthrough/cancel — automation events', () => {
   it('cancels a scheduled walkthrough → WALKTHROUGH_CANCELLED (no occurrenceKey)', async () => {
     mockAuthAs('admin');
     mockPrisma.lead.findUnique.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
-    mockPrisma.walkthrough.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
-    mockPrisma.walkthrough.update.mockResolvedValue({});
-    mockPrisma.walkthrough.create.mockResolvedValue({ id: 'wt-rebooked-1' });
+    mockPrisma.visit.findFirst.mockResolvedValue({ id: 'wt-scheduled-1', status: 'SCHEDULED' });
+    mockPrisma.visit.update.mockResolvedValue({});
+    mockPrisma.visit.create.mockResolvedValue({ id: 'wt-rebooked-1' });
     mockPrisma.lead.update.mockResolvedValue({ ...LEAD_FIXTURE, status: 'CONTACTED' });
     mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) => fn(mockPrisma));
 

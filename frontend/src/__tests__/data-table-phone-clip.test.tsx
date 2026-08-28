@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 // ─── Bug #454 ─────────────────────────────────────────────
-// The Leads Phone column was left-clipped (":555) 555-0204") because the desktop
+// The Leads Phone column was left-clipped (":301) 758-4551") because the desktop
 // table phantom-overflowed its scroll box: DataTable measured the OUTER wrapper's
 // offsetWidth (wider than the inner scroll container's clientWidth), so columns
 // summed wider than the real box → scrollLeft > 0 → the opaque sticky customer
@@ -73,7 +73,7 @@ const columns: ColumnDef<Row, unknown>[] = [
   },
 ];
 
-const data: Row[] = [{ id: 'r1', customer: 'Alpha Co', phone: '(555) 555-0204' }];
+const data: Row[] = [{ id: 'r1', customer: 'Alpha Co', phone: '(301) 758-4551' }];
 
 describe('DataTable measures the scroll-container content box (Bug #454)', () => {
   it('resolved column widths sum within the measured content box (no phantom overflow)', async () => {
@@ -96,6 +96,6 @@ describe('DataTable measures the scroll-container content box (Bug #454)', () =>
 
   it('renders the full phone value (no left clip)', async () => {
     renderWithProviders(<DataTable columns={columns} data={data} tableKey="bug454b" />);
-    expect(await screen.findByText('(555) 555-0204')).toBeInTheDocument();
+    expect(await screen.findByText('(301) 758-4551')).toBeInTheDocument();
   });
 });

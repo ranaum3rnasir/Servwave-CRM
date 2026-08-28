@@ -35,7 +35,7 @@ describe('toCSVRows', () => {
     expect(toCSVRows(['A'], [['x'], ['y']])).toBe('A\r\nx\r\ny');
   });
 
-  // The exact shape that broke for B&G: a comma in the customer name plus a
+  // The exact shape that broke for Lakeside: a comma in the customer name plus a
   // comma in the date pushed every following value one column right.
   it('keeps column count stable when names and dates contain commas', () => {
     const header = ['Customer', 'Type', 'Location', 'Invoice', 'Invoice date', 'Bucket', 'Days Late', 'Balance', 'Next Action'];

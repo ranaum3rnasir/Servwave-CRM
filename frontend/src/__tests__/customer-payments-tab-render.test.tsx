@@ -147,7 +147,7 @@ describe('CustomerDetailPage Payments tab with a collector-less payment', () => 
     );
 
     // Wait for the page to load (hero heading shows the customer name).
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
 
     // Open the Payments tab.
     await user.click(screen.getByRole('tab', { name: /payments/i }));
@@ -184,7 +184,7 @@ describe('CustomerDetailPage Contact Details phone formatting (#352)', () => {
       { initialEntries: ['/customers/c0000000-0000-0000-0000-000000000001'] }
     );
 
-    await screen.findByRole('heading', { name: 'Maria Garcia' });
+    await screen.findByRole('heading', { name: /Maria Garcia/ });
     expect(screen.getByText(/\(469\) 555-0391/)).toBeInTheDocument();
     expect(screen.getByText(/\(555\) 999-8888/)).toBeInTheDocument();
   });

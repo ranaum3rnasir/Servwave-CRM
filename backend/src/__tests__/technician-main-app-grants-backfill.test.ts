@@ -27,16 +27,26 @@ describe('technician main-app grants backfill migration', () => {
     expect(sql).toContain('ON CONFLICT (organization_id, role, action, subject) DO NOTHING');
   });
 
-  it('mirrors defaultGrants: update/start/arrive Job are own-scoped (OWN_JOB)', () => {
+  it('carries the historical own-job shape, which S8 repoints rather than rewrites', () => {
     const OWN_JOB_JSON = '{"assignees":{"some":{"user_id":"{{userId}}"}}}';
+    // The MIGRATION still carries all four rows and always will - it is history, and the orgs it
+    // backfilled keep `complete Job`. But multi-visit S4 (D15) stopped SEEDING complete Job for new
+    // orgs, so only the surviving three are still mirrored in DEFAULT_GRANTS.
     for (const action of ['update', 'start', 'arrive', 'complete']) {
+      const row = `('TECHNICIAN','${action}','Job','${OWN_JOB_JSON}')`;
+      expect(sql, `missing migration row: ${row}`).toContain(row);
+    }
+    // Multi-visit S8 (D6) moved OWN_JOB onto the visits path. This migration is HISTORY and its
+    // text stays byte-identical - rewriting shipped SQL would falsify the ledger. What repairs the
+    // rows it wrote is S8's own guarded UPDATE, matched on exactly the literal above; that pairing
+    // is pinned in schema-visit-teardown-shape.test.ts. Here we only assert that DEFAULT_GRANTS
+    // has moved on, so the two cannot silently drift back into agreement on the dead path.
+    for (const action of ['update', 'start', 'arrive']) {
       const grant = DEFAULT_GRANTS.find((g) => g.role === 'TECHNICIAN' && g.action === action && g.subject === 'Job');
       expect(grant, `defaultGrants.ts is missing TECHNICIAN ${action} Job`).toBeDefined();
       expect((grant as { conditions?: unknown }).conditions).toEqual({
-        assignees: { some: { user_id: '{{userId}}' } },
+        visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } },
       });
-      const row = `('TECHNICIAN','${action}','Job','${OWN_JOB_JSON}')`;
-      expect(sql, `missing migration row: ${row}`).toContain(row);
     }
   });
 

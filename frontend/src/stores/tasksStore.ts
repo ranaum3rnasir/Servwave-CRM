@@ -14,6 +14,7 @@ import {
   type CreateTaskInput,
 } from '@/lib/api/tasks';
 import { toast } from '@/components/ui/use-toast';
+import { registerStoreReset } from '@/lib/storeReset';
 
 interface TasksState {
   tasks: Task[];
@@ -30,9 +31,43 @@ interface TasksState {
   addSubtask: (id: string, text: string) => Promise<void>;
   toggleSubtask: (id: string, sid: string, done: boolean) => Promise<void>;
   deleteSubtask: (id: string, sid: string) => Promise<void>;
+  setAssignees: (id: string, ids: string[]) => Promise<void>;
   setWatchers: (id: string, ids: string[]) => Promise<void>;
   nudge: (id: string) => Promise<void>;
 }
+
+/**
+ * Keys a PATCH response cannot carry, and which therefore have to be re-applied
+ * from the row already in the store.
+ *
+ * `updateTaskApi` answers with a LIST row, and the list mapper hardcodes
+ * `subtasks: []`, `activity: []`, `comments: []` and never sets
+ * `created_by_name` or `watchers` at all - only `GET /api/tasks/:id` resolves
+ * those. Spreading the server row over the detail row therefore blanks every
+ * one of them, which is how the drawer came to print the creator's raw uuid the
+ * moment anybody changed a status or a priority: `created_by_name` went missing
+ * and the render falls back to `task.created_by`.
+ *
+ * `watcher_ids` is the exception, and it is left here on purpose. The list
+ * mapper reads the real column now, so a write response carries the current
+ * ids and re-applying the store's copy over them is a NO-OP rather than a
+ * rescue - #1771's reason for the entry has gone.
+ *
+ * Keeping it costs nothing and keeps it beside `watchers`, the resolved-name
+ * half of the same fact, which only `GET /api/tasks/:id` can produce and which
+ * therefore cannot leave this list. Nothing renders `watchers` today, so
+ * splitting the pair would break nothing today either - it would just leave the
+ * two halves of one fact updated by different rules, waiting for the first
+ * component to read both. Whoever gives `watchers` a reader gets a consistent
+ * pair rather than a bug to find.
+ *
+ * None of the three merge sites edits watchers. `setWatchers` - the one that
+ * does - refetches the detail row outright, as do `setAssignees`, `nudge` and
+ * the comment/subtask mutators, so none of them is affected by this list.
+ */
+const DETAIL_ONLY_KEYS = [
+  'subtasks', 'activity', 'comments', 'ai', 'watcher_ids', 'watchers', 'created_by_name',
+] as const satisfies readonly (keyof Task)[];
 
 export const useTasksStore = create<TasksState>()((set, get) => ({
   tasks: [],
@@ -65,11 +100,37 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
     return t;
   },
 
+  // Optimistic, like `reschedule` below and for the same reason: this is what
+  // a board drag calls, and a card that only moves once the server answers
+  // snaps back under the cursor and reads as a drop that did not take. On
+  // failure the card returns to its lane and says so, rather than the change
+  // disappearing silently - the previous version awaited the round trip and
+  // swallowed any rejection into an unhandled promise.
   updateStatus: async (id, status) => {
-    const t = await updateTaskApi(id, { status });
-    set((s) => ({
-      tasks: s.tasks.map((x) => (x.id === id ? t : x)),
-    }));
+    const prev = get().tasks.find((t) => t.id === id);
+    if (!prev) return;
+    const prevStatus = prev.status;
+
+    set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? { ...t, status } : t)) }));
+    try {
+      // `prev` is the pre-edit task: the PATCH response carries no linked-entity label, so
+      // without it a drag between lanes blanks the chip (redacted loses its padlock too).
+      const serverRow = await updateTaskApi(id, { status }, prev);
+      set((s) => ({
+        tasks: s.tasks.map((t) =>
+          t.id === id
+            ? { ...serverRow, ...pick(t, DETAIL_ONLY_KEYS) }
+            : t,
+        ),
+      }));
+    } catch {
+      set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? { ...t, status: prevStatus } : t)) }));
+      toast({
+        title: 'Status change failed',
+        description: 'Could not move the task. Please try again.',
+        variant: 'destructive',
+      });
+    }
   },
 
   updateTask: async (id, patch) => {
@@ -79,18 +140,21 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
     if (patch.description !== undefined) apiPatch.description = patch.description;
     if (patch.status !== undefined) apiPatch.status = patch.status;
     if (patch.priority !== undefined) apiPatch.priority = patch.priority;
-    if (patch.owner_id !== undefined) apiPatch.owner_id = patch.owner_id;
+    if (patch.assignee_ids !== undefined) apiPatch.assignee_ids = patch.assignee_ids;
     if (patch.due_at !== undefined) apiPatch.due_at = patch.due_at;
     if (patch.tags !== undefined) apiPatch.tags = patch.tags;
 
-    const serverRow = await updateTaskApi(id, apiPatch);
+    const serverRow = await updateTaskApi(id, apiPatch, get().tasks.find((t) => t.id === id));
     // Re-merge any client-only keys so the UI doesn't lose them
     set((s) => ({
       tasks: s.tasks.map((x) =>
         x.id === id
           ? {
               ...serverRow,
-              ...pick(patch, ['subtasks', 'activity', 'comments', 'ai', 'watcher_ids']),
+              // From `x` - the row in the store - never from `patch`. `patch` is the
+              // caller's partial: the drawer sends `{ priority }` alone, so picking from
+              // it restored nothing and let the empty server row through.
+              ...pick(x, DETAIL_ONLY_KEYS),
             }
           : x,
       ),
@@ -104,12 +168,12 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
     // Optimistic: move the chip to the new day immediately so the calendar re-renders.
     set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? { ...t, due_at } : t)) }));
     try {
-      const serverRow = await updateTaskApi(id, { due_at });
+      const serverRow = await updateTaskApi(id, { due_at }, prev);
       // Reconcile with the server row; re-apply client-only keys the list-row mapper drops.
       set((s) => ({
         tasks: s.tasks.map((t) =>
           t.id === id
-            ? { ...serverRow, ...pick(t, ['subtasks', 'activity', 'comments', 'ai', 'watcher_ids']) }
+            ? { ...serverRow, ...pick(t, DETAIL_ONLY_KEYS) }
             : t,
         ),
       }));
@@ -149,6 +213,31 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
     await get().fetchTaskDetail(id);
   },
 
+  // A full REPLACE of the assignee set, mirroring setWatchers. Refetches the
+  // detail row rather than trusting the optimistic array: the PATCH response is
+  // a list row, and only the detail row carries watchers/subtasks/activity,
+  // which a bare merge would blank.
+  //
+  // The empty case is caught HERE, not sent. A live task always has at least one
+  // assignee, and the server answers an empty array with a 400 - but this is
+  // reached from a multi-select's onChange, where a rejected promise has no
+  // catch and would surface as an unhandled rejection with the chip already
+  // gone from the UI. Refusing locally keeps the widget and the server agreeing
+  // on the same invariant, and says why.
+  setAssignees: async (id, ids) => {
+    if (ids.length === 0) {
+      toast({
+        title: 'A task needs at least one assignee',
+        description: 'Add someone else before removing the last one.',
+        variant: 'destructive',
+      });
+      await get().fetchTaskDetail(id);
+      return;
+    }
+    await updateTaskApi(id, { assignee_ids: ids });
+    await get().fetchTaskDetail(id);
+  },
+
   setWatchers: async (id, ids) => {
     await updateTaskApi(id, { watcher_ids: ids });
     await get().fetchTaskDetail(id);
@@ -160,8 +249,19 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
   },
 }));
 
+/**
+ * Logout must empty this store, not just the query cache.
+ *
+ * `fetchTasks` short-circuits on `loaded`, and a Zustand module singleton outlives a logout -
+ * signing back in is a client-side navigation. Without this, an admin's org-wide board stayed
+ * on screen for the technician who signed in next, and never re-fetched.
+ */
+registerStoreReset(() => {
+  useTasksStore.setState({ tasks: [], loaded: false, loading: false });
+});
+
 // Helper: pick a subset of keys from an object (avoids a lodash dep)
-function pick<T extends object, K extends keyof T>(obj: T, keys: K[]): Pick<T, K> {
+function pick<T extends object, K extends keyof T>(obj: T, keys: readonly K[]): Pick<T, K> {
   const result = {} as Pick<T, K>;
   for (const k of keys) {
     if (k in obj) result[k] = obj[k];

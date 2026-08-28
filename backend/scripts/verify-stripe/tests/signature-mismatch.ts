@@ -17,7 +17,7 @@ export async function run(_f: Fixtures, _opts: { verbose: boolean }): Promise<nu
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'stripe-signature': 't=5555550224,v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      'stripe-signature': 't=9999999999,v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
     },
     body: payload,
   });

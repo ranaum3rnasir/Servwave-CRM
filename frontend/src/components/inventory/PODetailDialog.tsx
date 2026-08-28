@@ -838,8 +838,8 @@ function DocumentsTabStub() {
     <EmptyState
       variant="card"
       icon={FileText}
-      title="Documents ship in the next rev"
-      description="Will list: PO PDF · vendor quote PDFs (if RFQ) · packing slip photos uploaded during receive · vendor bill (when 3-way match runs). Drag-drop upload zone at top."
+      title="No documents yet"
+      description="Documents for this PO will appear here: the PO PDF, vendor quotes, packing slip photos uploaded during receiving, and the vendor bill."
     />
   );
 }
@@ -860,8 +860,8 @@ function MatchTabStub({ po }: { po: PurchaseOrder }) {
     <EmptyState
       variant="card"
       icon={CheckCircle2}
-      title="3-Way Match wiring ships with PRD §7.4"
-      description={'Side-by-side Ordered · Received · Billed per line. Variance row highlighted amber/red when delta > tolerance. "Resolve exception" opens the AP queue sub-flow.'}
+      title="Waiting on the vendor bill"
+      description="Once the vendor bill arrives, this compares Ordered · Received · Billed for every line and flags any variance above your tolerance."
     />
   );
 }

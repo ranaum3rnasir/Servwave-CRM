@@ -72,7 +72,10 @@ const ROUTE_PERMISSIONS: { action: string; subject: string; allowedRoles: string
   { action: 'en_route',             subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER'] }, // still a per-user toggle — Spec A D10 builds no en-route UI
   { action: 'arrive',               subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER','TECHNICIAN'] }, // Spec A D3: own-scoped default; pre-grant for Spec B1's On Site node
   { action: 'start',                subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER','TECHNICIAN'] }, // Spec A D3: own-scoped default; pre-grant for Spec B1's Start button
-  { action: 'complete',             subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER','TECHNICIAN'] }, // `complete` restored as a TECHNICIAN default (own jobs); en_route/arrive/start stay per-user toggles
+  // Multi-visit S4 (D15/D7a): closing the JOB is a dispatcher/admin capability by default. A
+  // technician closes their own VISIT instead, which rides the `start Job` gate. Existing orgs keep
+  // the row they were seeded with - it is simply no longer a DEFAULT.
+  { action: 'complete',             subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER'] },
   { action: 'cancel',               subject: 'Job',          allowedRoles: ['ADMIN','DISPATCHER'] },
   { action: 'reopen',               subject: 'Job',          allowedRoles: ['ADMIN'] },
   // Invoice
@@ -95,6 +98,8 @@ const ROUTE_PERMISSIONS: { action: string; subject: string; allowedRoles: string
   // Tag
   { action: 'read',                 subject: 'Tag',          allowedRoles: ['ADMIN','DISPATCHER','SALES'] },
   { action: 'create',               subject: 'Tag',          allowedRoles: ['ADMIN','DISPATCHER','SALES'] },
+  { action: 'update',               subject: 'Tag',          allowedRoles: ['ADMIN'] },
+  { action: 'delete',               subject: 'Tag',          allowedRoles: ['ADMIN'] },
   // User
   { action: 'create',               subject: 'User',         allowedRoles: ['ADMIN'] },
   { action: 'read',                 subject: 'User',         allowedRoles: ['ADMIN', 'DISPATCHER', 'TECHNICIAN'] }, // ruled 2026-07-21: unconditional — crew names on the tech's own calendar

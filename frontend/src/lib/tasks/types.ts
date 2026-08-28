@@ -1,14 +1,71 @@
-export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'BLOCKED' | 'DONE';
+export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'BLOCKED' | 'DONE' | 'CANCELLED';
 export type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type LinkedEntityType = 'JOB' | 'LEAD' | 'CUSTOMER' | 'ESTIMATE';
 
-export const TASK_STATUSES: TaskStatus[] = ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE'];
+export const TASK_STATUSES: TaskStatus[] = ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED'];
 export const TASK_PRIORITIES: TaskPriority[] = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
+
+/**
+ * The FINISHED statuses - the frontend twin of `backend/src/lib/tasks/status.ts`.
+ *
+ * `DONE` means the work completed; `CANCELLED` means it was abandoned. They differ in every
+ * other respect, but neither is an outstanding obligation, so neither is open, overdue or at
+ * risk. Every "is this task still work?" test in the frontend reads from here rather than
+ * spelling out `status !== 'DONE'`, because each of those said it in its own words and adding
+ * one value made all of them wrong at once.
+ *
+ * The two lists are deliberately duplicated across the wire rather than shared: there is no
+ * common package, and a frontend that guessed at the backend's enumeration would be wrong
+ * silently. Keep them in step.
+ */
+export const TERMINAL_TASK_STATUSES: TaskStatus[] = ['DONE', 'CANCELLED'];
+
+/**
+ * True when the task is finished (either way) and so is not an open obligation.
+ *
+ * Takes a plain `string` rather than `TaskStatus`, matching the backend twin: several callers
+ * hold a column key or a wire value that is only probably a status, and a cast at each of those
+ * sites would be a place to get it wrong.
+ */
+export function isTerminalTaskStatus(status: string | null | undefined): boolean {
+  return !!status && (TERMINAL_TASK_STATUSES as string[]).includes(status);
+}
+
+/**
+ * True when the work actually FINISHED, as opposed to merely stopping.
+ *
+ * The narrow question, and the one the on-time rate and the completion trend ask: a cancelled
+ * task was never completed, on time or otherwise, so counting it would deflate a percentage
+ * that is supposed to describe delivered work. Named rather than left as a bare `=== 'DONE'`
+ * so the two questions cannot be confused again at a glance.
+ */
+export function isCompletedTaskStatus(status: string | null | undefined): boolean {
+  return status === 'DONE';
+}
+
+/**
+ * The statuses the Kanban board gives a column to.
+ *
+ * `CANCELLED` is absent by decision (issue 03): a column for abandoned work is dead weight on
+ * a board meant for work in flight. Cancelled tasks are reachable on the History tab and on the
+ * record's own Tasks tab, and nowhere on the board.
+ */
+export const BOARD_TASK_STATUSES: TaskStatus[] = TASK_STATUSES.filter((s) => s !== 'CANCELLED');
 
 export interface LinkedEntity {
   type: LinkedEntityType;
   id: string;
   label: string;
+  /**
+   * The reader may not open this entity, so `label` is a neutral placeholder rather than its
+   * number, its job type or the customer's name. Optional because the create dialogs build a
+   * `LinkedEntity` from a picker, where the user demonstrably CAN see what they picked; only a
+   * row that came off the API carries it. Absent means the same as false.
+   *
+   * Distinct from an EMPTY label with `redacted` false, which is a dangling link - the entity is
+   * deleted or out of the org - and keeps rendering exactly as it always has.
+   */
+  redacted?: boolean;
 }
 
 export interface Subtask {
@@ -19,7 +76,7 @@ export interface Subtask {
 
 export interface TaskActivity {
   id: string;
-  type: 'created' | 'assigned' | 'status_changed' | 'priority_changed' | 'due_changed' | 'commented' | 'nudged' | 'completed';
+  type: 'created' | 'assigned' | 'status_changed' | 'priority_changed' | 'due_changed' | 'commented' | 'nudged' | 'completed' | 'cancelled';
   actor_id: string;
   at: string; // ISO
   meta?: Record<string, string>;
@@ -44,6 +101,20 @@ export interface TaskAI {
   source: TaskSource;
 }
 
+/**
+ * A person attached to a task, as the API resolves them.
+ *
+ * `name` is null when the id no longer resolves to an active user - the wire
+ * arrays carry ids with no foreign key, so a deactivated or deleted user leaves
+ * the id behind with nothing to resolve it to. EVERY renderer must tolerate
+ * that; `assigneeLabel()` in `assignees.ts` is the one place that decides what
+ * to show instead.
+ */
+export interface TaskPersonRef {
+  id: string;
+  name: string | null;
+}
+
 export interface Task {
   id: string;
   task_number: string;       // e.g. "T00001"
@@ -51,10 +122,12 @@ export interface Task {
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
-  owner_id: string;
-  owner_name?: string | null;
+  /** Never empty for a live task - the API guarantees at least one. */
+  assignee_ids: string[];
+  /** Resolved names, in the same order as `assignee_ids`. */
+  assignees: TaskPersonRef[];
   watcher_ids: string[];
-  watchers?: { id: string; name: string }[];
+  watchers?: TaskPersonRef[];
   due_at: string | null;     // ISO
   linked_entity: LinkedEntity | null;
   tags: string[];

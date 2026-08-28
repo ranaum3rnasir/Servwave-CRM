@@ -1,7 +1,7 @@
 import { ResizableTable } from '@/components/data/ResizableTable';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
-import type { TrainingImpactResult, TrainingImpactRow } from '../communication-tracking-logic';
+import type { TrainingImpactResult, TrainingImpactRow } from '@/lib/reports/communication-tracking-logic';
 
 const ROLE_LABEL: Record<string, string> = {
   csr: 'Office / CSR',

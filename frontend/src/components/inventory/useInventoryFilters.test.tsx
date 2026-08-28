@@ -46,20 +46,23 @@ const lowStockMaterial = makeItem({
   kind: 'material',
   stock: [{ locationId: 'loc-1', onHand: 1, min: 5 }],
 });
-const laborItem = makeItem({
+const serviceItem = makeItem({
   id: 'l-1',
   sku: 'LABOR-1',
   name: 'Install Labor',
   category: 'Labor',
-  kind: 'labor',
+  kind: 'service',
   stock: [],
 });
-const bundleItem = makeItem({
+// Was kind: 'bundle'. Bundle and fee are retired; this fixture stays because
+// the grid used to drop it, and the assertion below is what stops that
+// regression returning under a different kind name.
+const kitItem = makeItem({
   id: 'b-1',
   sku: 'BUNDLE-1',
   name: 'Door Kit',
   category: 'Kits',
-  kind: 'bundle',
+  kind: 'service',
   stock: [],
 });
 const backorderMaterial = makeItem({
@@ -72,17 +75,20 @@ const backorderMaterial = makeItem({
   stock: [{ locationId: 'loc-1', onHand: 0, min: 3 }],
 });
 
-const allItems = [inStockMaterial, lowStockMaterial, laborItem, bundleItem, backorderMaterial];
+const allItems = [inStockMaterial, lowStockMaterial, serviceItem, kitItem, backorderMaterial];
 
 describe('useInventoryFilters', () => {
-  it('excludes kinds that are not material/labor/service', () => {
+  it('hides no item on the basis of its kind', () => {
+    // This assertion is inverted from what it used to be. The old allowlist -
+    // material|labor|service - dropped every bundle and fee item, which the
+    // Add Item dialog happily let you create, so those items saved and then
+    // could not be found. With kind narrowed to material|service the grid shows
+    // everything the org owns.
     const { result } = renderHook(() =>
       useInventoryFilters({ allItems, search: '', activeLoc: 'all', filters: emptyFilters }),
     );
     const ids = result.current.filteredItems.map((i) => i.id);
-    expect(ids).not.toContain('b-1'); // bundle filtered out
-    expect(ids).toContain('m-in');
-    expect(ids).toContain('l-1'); // labor kept
+    expect(ids).toEqual(allItems.map((i) => i.id));
   });
 
   it('search matches against sku/name/category/vendor/mpn/upc', () => {
@@ -105,6 +111,40 @@ describe('useInventoryFilters', () => {
       useInventoryFilters({ allItems, search: 'UPC-999', activeLoc: 'all', filters: emptyFilters }),
     );
     expect(byUpc.result.current.filteredItems.map((i) => i.id)).toEqual(['m-in']);
+  });
+
+  it('re-filters when the finish map resolves after the search was typed', () => {
+    // The finishes query is independent of the four inputs the operator touches,
+    // so on a slow response the map lands AFTER the last keystroke. `search` and
+    // `filters` are useState values with stable references, and `allItems` and
+    // `activeLoc` do not move either - so this rerender changes ONE thing, which
+    // is exactly the case that used to leave the memo serving its stale result.
+    const withFinish = makeItem({
+      id: 'm-finish',
+      sku: 'PULL-9',
+      name: 'Cabinet Pull',
+      finishId: 'fin-1',
+    });
+    const items = [...allItems, withFinish];
+    const filters: Filters = { ...emptyFilters };
+
+    // Render 1 mirrors the page before `useFinishes` resolves: an empty Map,
+    // which is what the page's own memo builds from `data ?? []`.
+    const { result, rerender } = renderHook(
+      ({ finishNameById }: { finishNameById: Map<string, string> }) =>
+        useInventoryFilters({
+          allItems: items,
+          search: 'satin',
+          activeLoc: 'all',
+          filters,
+          finishNameById,
+        }),
+      { initialProps: { finishNameById: new Map<string, string>() } },
+    );
+    expect(result.current.filteredItems).toEqual([]);
+
+    rerender({ finishNameById: new Map([['fin-1', 'Satin Chrome']]) });
+    expect(result.current.filteredItems.map((i) => i.id)).toEqual(['m-finish']);
   });
 
   it('per-location stock-state branch (activeLoc set) keeps low_stock items at that location', () => {

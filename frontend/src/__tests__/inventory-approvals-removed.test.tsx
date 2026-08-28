@@ -14,7 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 
 vi.mock('@/lib/api/inventory', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api/inventory')>();
@@ -55,8 +55,10 @@ vi.mock('@/lib/api/inventory', async (importOriginal) => {
   };
 });
 
-// Mirrors the App.tsx inventory route block after the P0 parking: the
-// approvals path is a redirect, not an InventoryPage mount.
+// Mirrors the routed inventory route block (`pages/v2/routes/inventory.routes.tsx`)
+// after the P0 parking: the approvals path is a redirect, not an InventoryPage
+// mount. `v2Path` is a no-op shim, so the redirect target is `/inventory` there
+// too.
 function InventoryRoutes() {
   return (
     <Routes>
@@ -70,12 +72,12 @@ function InventoryRoutes() {
   );
 }
 
-describe('InventoryPage — approvals surface removed (QA-901)', () => {
+describe('v2 InventoryPage - approvals surface removed (QA-901)', () => {
   it('renders Items + Staging tabs and NO Approvals tab or stat tile', () => {
     renderWithProviders(<InventoryRoutes />, { initialEntries: ['/inventory'] });
 
-    expect(screen.getByRole('button', { name: /Items/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Staging/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Items/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Staging/ })).toBeInTheDocument();
     expect(screen.queryByText('Approvals')).not.toBeInTheDocument();
     expect(screen.queryByText('Needs Approval')).not.toBeInTheDocument();
   });

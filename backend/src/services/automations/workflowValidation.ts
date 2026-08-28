@@ -20,7 +20,7 @@ import {
 } from '@prisma/client';
 import { TRIGGERS, audiencesFor, type AutomationEntity } from './catalog';
 import { type RecipientKey } from './recipients';
-import { ANCHORS_FOR_ENTITY, type AnchorKey } from './anchors';
+import { ANCHORS_FOR_ENTITY, ALL_ANCHOR_KEYS, LEAD_STAGE_CLOCK_ANCHORS, type AnchorKey } from './anchors';
 
 /** Stop-if conditions legal per trigger entity (lead has none in v1). */
 export const STOP_IF_CONDITIONS: Record<'job' | 'estimate' | 'invoice' | 'lead', readonly string[]> = {
@@ -197,12 +197,11 @@ export interface DateAnchorTriggerConfig {
 
 export const dateAnchorTriggerConfigSchema = z
   .object({
-    anchor: z.enum([
-      'job.scheduled_start',
-      'lead.walkthrough_scheduled_at',
-      'invoice.due_date',
-      'estimate.valid_until',
-    ]),
+    // Derived from the registry, never re-listed here — see ALL_ANCHOR_KEYS. The hand-written
+    // copy this replaces would have rejected every anchor spec #1751 D8 added while the builder
+    // was already offering them, and the failure would have surfaced as an unexplained validation
+    // error on save rather than as a missing option.
+    anchor: z.enum(ALL_ANCHOR_KEYS),
     direction: z.enum(['before', 'after']),
     offset_minutes: z.number().int().min(0).max(MAX_OFFSET_MINUTES),
   })
@@ -311,6 +310,22 @@ export function validateWorkflowDefinition(def: {
         step_index: -1,
         path: 'trigger_config.anchor',
         message: 'This timing anchor isn’t available for this trigger',
+      });
+    } else if (parsed.data.direction === 'before' && LEAD_STAGE_CLOCK_ANCHORS.has(parsed.data.anchor)) {
+      // A lead stage clock records a moment AS IT HAPPENS, so "two hours BEFORE the lead arrives"
+      // is a rule that can never fire — by the time the column carries a date, the window the
+      // per-minute sweep looks forward into is already behind it. Refused here rather than left
+      // constructible, because the failure mode is pure silence: the rule saves, reads correctly
+      // in the builder, and then nothing ever fires and nothing ever goes red.
+      //
+      // Kept here rather than in the schema above on purpose. That schema is also a member of
+      // createWorkflowSchema's DTO union, where a refinement failure surfaces as a path-less
+      // union error on every draft save; this is the layer that speaks in plain English and
+      // points at a field, and it is where the sibling anchor check already lives.
+      issues.push({
+        step_index: -1,
+        path: 'trigger_config.direction',
+        message: 'This moment is recorded as it happens, so an automation can only run after it — choose “after”',
       });
     }
   } else if (trigger.timeBased) {

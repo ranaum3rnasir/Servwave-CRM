@@ -1,7 +1,7 @@
 import { ResizableTable } from '@/components/data/ResizableTable';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
-import type { CadenceResult, JobCadenceRow, Band } from '../communication-tracking-logic';
+import type { CadenceResult, JobCadenceRow, Band } from '@/lib/reports/communication-tracking-logic';
 
 const BAND_STYLE: Record<Band, string> = {
   under: 'bg-danger/10 text-danger',

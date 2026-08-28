@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import { useFilteredTasks } from '@/lib/tasks/useFilteredTasks';
 
 import { useTaskDetailStore } from '@/stores/taskDetailStore';
+import { taskAssignees } from '@/lib/tasks/assignees';
+import { AssigneeStack } from '@/components/tasks/AssigneeStack';
 import { useTasksStore } from '@/stores/tasksStore';
 import { useAppAbility } from '@/contexts/AbilityContext';
 import { cn } from '@/lib/utils';
@@ -23,7 +25,7 @@ const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MAX_PER_CELL = 3;
 
 /**
- * TaskStatus is a closed 4-value union and STATUS_REGISTRY.task covers all four
+ * TaskStatus is a closed 5-value union and STATUS_REGISTRY.task covers all five
  * (asserted by the registry guard test), so the fallback below is unreachable.
  * It exists only so this file never spells out a class string of its own, the
  * same shape StatusBadge and PriorityDot use.
@@ -470,7 +472,7 @@ function DayView({ anchor, tasks, open, tz }: DayViewProps) {
         </div>
       ) : (
         <div className="divide-y divide-border">
-          {/* Full-width list-row click target (time + status dot + title + owner),
+          {/* Full-width list-row click target (time + status dot + title + assignees),
               not a Button-shaped control - left raw per the program's
               non-Button-shape carve-out. */}
           {dayTasks.map((t) => (
@@ -498,10 +500,8 @@ function DayView({ anchor, tasks, open, tz }: DayViewProps) {
                 {t.title}
               </span>
 
-              {/* Owner */}
-              <span className="shrink-0 text-xs text-text-secondary">
-                {t.owner_name ?? t.owner_id}
-              </span>
+              {/* Assignees */}
+              <AssigneeStack assignees={taskAssignees(t)} className="shrink-0" />
             </button>
           ))}
         </div>

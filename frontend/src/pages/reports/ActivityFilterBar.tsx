@@ -21,8 +21,8 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
 } from '@/components/ui/dropdown-menu';
-import type { Division, UserActivity } from './activity-logic';
-import { type Filters, DEFAULT_DATE_RANGE, allRoles, activeFilterCount } from './activity-logic';
+import type { Division, UserActivity } from '@/lib/reports/activity-logic';
+import { type Filters, DEFAULT_DATE_RANGE, allRoles, activeFilterCount } from '@/lib/reports/activity-logic';
 
 const DATE_PRESETS = ['Today', 'Last 7 days', 'Last 30 days', 'This month', 'Last month', 'Year to date'];
 

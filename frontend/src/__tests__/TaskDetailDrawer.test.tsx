@@ -7,7 +7,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './helpers';
+import { buildAbility } from '@/lib/ability';
+import { useTaskDetailStore } from '@/stores/taskDetailStore';
 import { TaskDetailDrawer } from '@/components/tasks/TaskDetailDrawer';
+
+/** The signed-in user in the harness (src/__tests__/setup.ts mocks auth.store). */
+const ME = '00000000-0000-0000-0000-000000000001';
 
 // ── Store mocks ────────────────────────────────────────────────────────────────
 
@@ -17,9 +22,11 @@ const mockAddSubtask = vi.fn().mockResolvedValue(undefined);
 const mockToggleSubtask = vi.fn().mockResolvedValue(undefined);
 const mockDeleteSubtask = vi.fn().mockResolvedValue(undefined);
 const mockSetWatchers = vi.fn().mockResolvedValue(undefined);
+const mockSetAssignees = vi.fn().mockResolvedValue(undefined);
 const mockNudge = vi.fn().mockResolvedValue(undefined);
 const mockUpdateTask = vi.fn().mockResolvedValue(undefined);
 const mockUpdateStatus = vi.fn().mockResolvedValue(undefined);
+const mockDeleteTask = vi.fn().mockResolvedValue(undefined);
 
 // Default task object used in most tests
 const TASK = {
@@ -29,8 +36,8 @@ const TASK = {
   description: 'Needs attention',
   status: 'TODO' as const,
   priority: 'HIGH' as const,
-  owner_id: 'u1',
-  owner_name: 'Oved Adani',
+  assignee_ids: ['u1'],
+  assignees: [{ id: 'u1', name: 'Oved Adani' }],
   watcher_ids: ['u2'],
   watchers: [{ id: 'u2', name: 'Priya' }],
   due_at: null,
@@ -57,6 +64,8 @@ vi.mock('@/stores/tasksStore', () => ({
     addSubtask: mockAddSubtask,
     toggleSubtask: mockToggleSubtask,
     deleteSubtask: mockDeleteSubtask,
+    deleteTask: mockDeleteTask,
+    setAssignees: mockSetAssignees,
     setWatchers: mockSetWatchers,
     nudge: mockNudge,
     updateTask: mockUpdateTask,
@@ -81,16 +90,28 @@ vi.mock('@/components/crm/AssigneeSelect', () => ({
 }));
 
 // MultiAssigneeSelect: stub — clicking fires onChange with []
+// The drawer now mounts TWO of these - assignees and watchers - so the stub
+// keys its testid off the `id` the drawer passes. A single shared testid would
+// make `getByTestId` ambiguous and, worse, let an assertion about watchers pass
+// against the assignee widget.
 vi.mock('@/components/crm/MultiAssigneeSelect', () => ({
   MultiAssigneeSelect: ({
+    id,
     value,
     onChange,
+    disabled,
   }: {
+    id?: string;
     value: string[];
     onChange: (ids: string[]) => void;
+    disabled?: boolean;
   }) => (
-    <button data-testid="multi-assignee-select" onClick={() => onChange([])}>
-      {`Watchers: ${value.join(',')}`}
+    <button
+      data-testid={id ?? 'multi-assignee-select'}
+      disabled={disabled}
+      onClick={() => onChange([])}
+    >
+      {`${id ?? 'people'}: ${value.join(',')}`}
     </button>
   ),
 }));
@@ -98,6 +119,7 @@ vi.mock('@/components/crm/MultiAssigneeSelect', () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mockTasks = [TASK]; // reset to default fixture
+  mockDeleteTask.mockResolvedValue(undefined);
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -207,16 +229,43 @@ describe('TaskDetailDrawer FE-6 rich mutations', () => {
 
   it('renders MultiAssigneeSelect for watchers with current watcher_ids', () => {
     renderWithProviders(<TaskDetailDrawer />);
-    const watcherWidget = screen.getByTestId('multi-assignee-select');
+    const watcherWidget = screen.getByTestId('task-watchers');
     expect(watcherWidget).toBeInTheDocument();
     expect(watcherWidget.textContent).toContain('u2');
   });
 
   it('setWatchers is called when watchers change', async () => {
     renderWithProviders(<TaskDetailDrawer />);
-    const watcherWidget = screen.getByTestId('multi-assignee-select');
+    const watcherWidget = screen.getByTestId('task-watchers');
     await userEvent.click(watcherWidget);
     expect(mockSetWatchers).toHaveBeenCalledWith('t1', []);
+  });
+
+  // ── Assignees (multi-assignee) ────────────────────────────────────────────
+
+  it('renders the assignee widget with the task\'s current assignee_ids', () => {
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.getByTestId('task-assignees').textContent).toContain('u1');
+  });
+
+  it('disables the assignee field for a caller WITHOUT `assign` on Task', () => {
+    // No `ability` passed -> emptyAbility -> can('assign','Task') is false.
+    // This is the custom-role case the feature exists for: the API would 403 an
+    // assignee edit from this user, so the control must not offer one.
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.getByTestId('task-assignees')).toBeDisabled();
+    // ...while a field they ARE allowed to edit stays live.
+    expect(screen.getByTestId('task-watchers')).not.toBeDisabled();
+  });
+
+  it('enables the assignee field and calls setAssignees for a caller WITH `assign` on Task', async () => {
+    renderWithProviders(<TaskDetailDrawer />, {
+      ability: buildAbility([{ action: 'assign', subject: 'Task' }]),
+    });
+    const widget = screen.getByTestId('task-assignees');
+    expect(widget).not.toBeDisabled();
+    await userEvent.click(widget);
+    expect(mockSetAssignees).toHaveBeenCalledWith('t1', []);
   });
 
   // ── QA-Fix-4b: created_by_name ─────────────────────────────────────────────
@@ -233,5 +282,105 @@ describe('TaskDetailDrawer FE-6 rich mutations', () => {
     renderWithProviders(<TaskDetailDrawer />);
     // TASK fixture has created_by: 'u1', no created_by_name
     expect(screen.getByText('u1')).toBeInTheDocument();
+  });
+});
+
+// ── Delete control ────────────────────────────────────────────────────────────
+// The DELETE endpoint has TWO independent arms (task.controller.remove): the
+// `delete` grant on Task, OR the row-level exception - creator AND sole
+// assignee. The control must appear under exactly those, and never key off
+// `role === 'ADMIN'`, which is invisible to the custom roles now in production.
+
+describe('TaskDetailDrawer delete control', () => {
+  const deleteGrant = () => buildAbility([{ action: 'delete', subject: 'Task' }]);
+
+  it('is HIDDEN for a user with neither the grant nor the ownership exception', () => {
+    // Default fixture: created_by 'u1', assignee_ids ['u1'] - neither is ME.
+    // No ability passed -> emptyAbility -> can('delete','Task') is false.
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.queryByRole('button', { name: /^delete task$/i })).not.toBeInTheDocument();
+    // The subtask row action is a different control and must still be there.
+    expect(screen.getByRole('button', { name: /delete subtask/i })).toBeInTheDocument();
+  });
+
+  it('is SHOWN for the creator who is the task\'s sole assignee, with no grant at all', () => {
+    mockTasks = [{ ...TASK, created_by: ME, assignee_ids: [ME], assignees: [{ id: ME, name: 'Test Admin' }] }];
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.getByRole('button', { name: /^delete task$/i })).toBeInTheDocument();
+  });
+
+  it('is HIDDEN for the creator once somebody ELSE is also assigned', () => {
+    // The exception is creator AND *sole* assignee - a shared task is not a
+    // private todo item any more, so only the grant may remove it.
+    mockTasks = [{
+      ...TASK,
+      created_by: ME,
+      assignee_ids: [ME, 'u9'],
+      assignees: [{ id: ME, name: 'Test Admin' }, { id: 'u9', name: 'Sam' }],
+    }];
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.queryByRole('button', { name: /^delete task$/i })).not.toBeInTheDocument();
+  });
+
+  it('is HIDDEN for a sole assignee who did NOT create the task', () => {
+    mockTasks = [{ ...TASK, created_by: 'someone-else', assignee_ids: [ME], assignees: [{ id: ME, name: 'Test Admin' }] }];
+    renderWithProviders(<TaskDetailDrawer />);
+    expect(screen.queryByRole('button', { name: /^delete task$/i })).not.toBeInTheDocument();
+  });
+
+  it('is SHOWN for a holder of the `delete` grant on somebody else\'s task', () => {
+    renderWithProviders(<TaskDetailDrawer />, { ability: deleteGrant() });
+    expect(screen.getByRole('button', { name: /^delete task$/i })).toBeInTheDocument();
+  });
+
+  it('requires a confirmation that names what else is destroyed, and only then calls deleteTask', async () => {
+    renderWithProviders(<TaskDetailDrawer />, { ability: deleteGrant() });
+
+    await userEvent.click(screen.getByRole('button', { name: /^delete task$/i }));
+    // Nothing has been deleted just by opening the confirmation.
+    expect(mockDeleteTask).not.toHaveBeenCalled();
+
+    expect(await screen.findByText(/Delete T00001\?/)).toBeInTheDocument();
+    expect(screen.getByText(/every comment and its whole activity history/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /delete permanently/i }));
+    await waitFor(() => expect(mockDeleteTask).toHaveBeenCalledWith('t1'));
+  });
+
+  it('closes the drawer on a successful delete', async () => {
+    renderWithProviders(<TaskDetailDrawer />, { ability: deleteGrant() });
+    await userEvent.click(screen.getByRole('button', { name: /^delete task$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /delete permanently/i }));
+
+    await waitFor(() => expect(useTaskDetailStore.getState().close).toHaveBeenCalled());
+  });
+
+  it('does NOT close the drawer when the server refuses (403) and surfaces the rejection', async () => {
+    // `deleteTask` rejects; the handler must catch it - an unhandled rejection
+    // here would leave the drawer claiming nothing happened.
+    mockDeleteTask.mockRejectedValue(
+      Object.assign(new Error('Request failed'), {
+        response: { status: 403, data: { error: 'Insufficient permissions' } },
+      }),
+    );
+
+    renderWithProviders(<TaskDetailDrawer />, { ability: deleteGrant() });
+    await userEvent.click(screen.getByRole('button', { name: /^delete task$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /delete permanently/i }));
+
+    await waitFor(() => expect(mockDeleteTask).toHaveBeenCalledWith('t1'));
+    expect(useTaskDetailStore.getState().close).not.toHaveBeenCalled();
+    // The drawer is still up, still showing the task it failed to delete.
+    expect(screen.getByDisplayValue('Fix the valve')).toBeInTheDocument();
+  });
+
+  it('can be backed out of without deleting anything', async () => {
+    renderWithProviders(<TaskDetailDrawer />, { ability: deleteGrant() });
+    await userEvent.click(screen.getByRole('button', { name: /^delete task$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /keep task/i }));
+
+    await waitFor(() => expect(screen.queryByText(/Delete T00001\?/)).not.toBeInTheDocument());
+    expect(mockDeleteTask).not.toHaveBeenCalled();
+    expect(useTaskDetailStore.getState().close).not.toHaveBeenCalled();
   });
 });

@@ -45,7 +45,7 @@ describe('phoneSearchClauses', () => {
 
   it('partial digits match the right customer and not unrelated ones', () => {
     expect(matchesStored('1234567', '(555) 123-4567')).toBe(true);
-    expect(matchesStored('1234567', '(555) 555-0223')).toBe(false);
+    expect(matchesStored('1234567', '(999) 888-7777')).toBe(false);
   });
 
   it('returns no clauses for a term with no digits (name search must be untouched)', () => {
@@ -86,23 +86,23 @@ function relationMatchesStored(term: string, stored: string): boolean {
 
 describe('phoneRelationSearchClauses', () => {
   it('produces the same candidate set as phoneSearchClauses (canonical query)', () => {
-    const scalar = phoneSearchClauses('(555) 555-0218').map((c) => c.phone.contains);
-    expect(relationContainsSet('(555) 555-0218')).toEqual(scalar);
+    const scalar = phoneSearchClauses('(917) 817-6226').map((c) => c.phone.contains);
+    expect(relationContainsSet('(917) 817-6226')).toEqual(scalar);
   });
 
   it('produces the same candidate set as phoneSearchClauses (digits-only query)', () => {
-    const scalar = phoneSearchClauses('5555550218').map((c) => c.phone.contains);
-    expect(relationContainsSet('5555550218')).toEqual(scalar);
+    const scalar = phoneSearchClauses('9178176226').map((c) => c.phone.contains);
+    expect(relationContainsSet('9178176226')).toEqual(scalar);
   });
 
   it('produces the same candidate set as phoneSearchClauses (dashed query)', () => {
-    const scalar = phoneSearchClauses('555-555-0218').map((c) => c.phone.contains);
-    expect(relationContainsSet('555-555-0218')).toEqual(scalar);
+    const scalar = phoneSearchClauses('917-817-6226').map((c) => c.phone.contains);
+    expect(relationContainsSet('917-817-6226')).toEqual(scalar);
   });
 
-  it('finds a Talon-style digits-only store from a canonical query and vice-versa', () => {
-    expect(relationMatchesStored('(555) 555-0218', '5555550218')).toBe(true);
-    expect(relationMatchesStored('5555550218', '(555) 555-0218')).toBe(true);
+  it('finds a Riverbend-style digits-only store from a canonical query and vice-versa', () => {
+    expect(relationMatchesStored('(917) 817-6226', '9178176226')).toBe(true);
+    expect(relationMatchesStored('9178176226', '(917) 817-6226')).toBe(true);
   });
 
   it('every clause is shaped { phones: { some: { phone: { contains } } } }', () => {

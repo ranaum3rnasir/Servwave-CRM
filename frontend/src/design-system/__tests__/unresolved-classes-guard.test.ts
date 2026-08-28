@@ -58,7 +58,13 @@ describe('unresolved-class guard (real Tailwind config, committed baseline)', ()
     }
 
     expect(violated).toEqual([]);
-  }, 30000);
+    // 180s, not 30s. This case shells out to the Tailwind CLI to compile every
+    // candidate class in src/ against the real config - 22-42s on its own, but
+    // the suite runs 21 files in parallel and it timed out at 30s there while
+    // passing standalone. A timeout reads as a red guard, which is exactly the
+    // signal this file exists to make trustworthy, so the cap has to clear the
+    // contended case rather than the quiet one.
+  }, 180000);
 
   it('flags a baselined class that appears in a file the baseline does not list', () => {
     // The hole this format closes. The probe class is a real dead class that is

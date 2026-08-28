@@ -25,20 +25,21 @@ import { ChartCard } from '@/components/charts';
 import { chartPalette, token } from '@/design-system';
 import { formatCurrency } from '@/lib/utils';
 import { exportCsvFile } from '@/lib/csv';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
-import { Delta, Sparkline, ReportToolbar, ReportPager } from './_shared';
+import { ReportToolbar, ReportPager } from './_shared';
+import { Delta, Sparkline } from '@/components/reports/ReportIndicators';
 import { DateRangeControl } from './DateRangeControl';
 import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
 import {
   usePaymentsReport, PAYMENT_METHODS, PAYMENT_CATEGORIES, PAYMENT_STATUSES, TECHNICIANS,
   type PaymentCategory, type PaymentStatus, type PaymentTxn,
-} from './payments-report-data';
-import { usePaymentFeesReport } from './payment-fees-data';
+} from '@/lib/reports/payments-report-data';
+import { usePaymentFeesReport } from '@/lib/reports/payment-fees-data';
 import {
   DATE_PRESETS, resolveRange, priorRange, filterNoCategory, filterPayments,
   computeKpis, categoryBreakdown, weeklyTrend, filteredTotals, countable, type DatePreset,
-} from './payments-report-logic';
+} from '@/lib/reports/payments-report-logic';
 
 const money = (n: number) => formatCurrency(n);
 const fmtDate = (ms: number) => new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });

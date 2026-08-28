@@ -443,7 +443,9 @@ describe('GET /api/customers', () => {
     mockPrisma.customer.count.mockResolvedValue(0);
     await request(app).get('/api/customers?active_jobs=true').set(authHeader('admin'));
     const where = mockPrisma.customer.findMany.mock.calls[0][0].where;
-    expect(where.jobs).toEqual({ some: { status: { in: ['UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
+    // S4 (D17): EN_ROUTE/ON_SITE retired from JobStatus. A customer whose tech is on the way or
+    // on site still reads as having an active job - that job now derives SCHEDULED or IN_PROGRESS.
+    expect(where.jobs).toEqual({ some: { status: { in: ['UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS'] } } });
   });
 });
 
@@ -839,7 +841,7 @@ describe('GET /api/customers/:id', () => {
     mockSummaryQueries();
     // open (2: e.g. one NEW + one CONTACTED) then active (1: the CONTACTED) — distinct values prove active ⊆ open
     mockPrisma.lead.count.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
-    // one TODO task linked to the customer; DONE tasks excluded by the where
+    // one TODO task linked to the customer; FINISHED tasks excluded by the where
     mockPrisma.task.count.mockResolvedValue(1);
 
     const res = await request(app)
@@ -849,6 +851,11 @@ describe('GET /api/customers/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.summary.leads).toEqual({ open: 2, active: 1 });
     expect(res.body.summary.tasks).toEqual({ open: 1 });
+    // Issue 03: the count must exclude BOTH terminal statuses, and must read them from the
+    // one constant rather than naming DONE on its own.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const taskWhere = (mockPrisma.task.count.mock.calls[0][0] as any).where;
+    expect(taskWhere.status).toEqual({ notIn: ['DONE', 'CANCELLED'] });
   });
 
   it('keeps the scalar notes string separate from the Note[] rows (no [object Object])', async () => {
@@ -901,6 +908,43 @@ describe('GET /api/customers/:id', () => {
     expect(custArgs.select.jobs.select.is_urgent).toBeUndefined();
   });
 
+  // Multi-visit S8 (D6): the nested job select reaches crew through the TRIPS, because
+  // `Job.assignees` went with `job_assignees`. The customer detail page's Jobs tab still reads
+  // `job.assignees` and falls back to "Unassigned" when the key is missing, so the payload has to
+  // carry the derived union - the same one the jobs list and the job detail serve.
+  it('serves each job\'s crew under `assignees`, derived from the trips', async () => {
+    mockAuthAs('admin');
+    (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CUSTOMER_FIXTURE,
+      jobs: [
+        {
+          id: 'job-1',
+          job_number: 'J00042',
+          status: 'SCHEDULED',
+          visits: [
+            { assignees: [{ user: { id: 'user-pat', first_name: 'Pat', last_name: 'Plumber' } }] },
+            // Same person on a second trip, plus a different one - the union is deduped.
+            { assignees: [
+              { user: { id: 'user-pat', first_name: 'Pat', last_name: 'Plumber' } },
+              { user: { id: 'user-hal', first_name: 'Hal', last_name: 'Hvac' } },
+            ] },
+          ],
+          invoices: [],
+        },
+      ],
+    });
+    mockPrisma.note.findMany.mockResolvedValue([]);
+    mockSummaryQueries();
+
+    const res = await request(app)
+      .get(`/api/customers/${CUSTOMER_FIXTURE.id}`)
+      .set(authHeader('admin'));
+
+    expect(res.status).toBe(200);
+    const job = res.body.customer.jobs[0];
+    expect(job.assignees.map((a: { user: { id: string } }) => a.user.id)).toEqual(['user-pat', 'user-hal']);
+  });
+
   it('returns 404 for non-existent customer', async () => {
     mockAuthAs('admin');
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
@@ -908,7 +952,7 @@ describe('GET /api/customers/:id', () => {
     mockSummaryQueries();
 
     const res = await request(app)
-      .get('/api/customers/00000000-0000-0000-0000-995555550224')
+      .get('/api/customers/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -1132,7 +1176,7 @@ describe('PATCH /api/customers/:id', () => {
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const res = await request(app)
-      .patch('/api/customers/00000000-0000-0000-0000-995555550224')
+      .patch('/api/customers/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'))
       .send({ first_name: 'Updated' });
 
@@ -1333,7 +1377,7 @@ describe('DELETE /api/customers/:id', () => {
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const res = await request(app)
-      .delete('/api/customers/00000000-0000-0000-0000-995555550224')
+      .delete('/api/customers/00000000-0000-0000-0000-999999999999')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -1395,7 +1439,7 @@ describe('POST /api/customers/:id/locations', () => {
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/customers/00000000-0000-0000-0000-995555550224/locations')
+      .post('/api/customers/00000000-0000-0000-0000-999999999999/locations')
       .set(authHeader('admin'))
       .send(validLocation);
 
@@ -1541,7 +1585,7 @@ describe('GET /api/customers/stats', () => {
       expect.objectContaining({ leads: { some: { status: { in: ['NEW', 'CONTACTED', 'ESTIMATED'] } } } }),
     );
     expect(wheres).toContainEqual(
-      expect.objectContaining({ jobs: { some: { status: { in: ['UNASSIGNED', 'SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } } }),
+      expect.objectContaining({ jobs: { some: { status: { in: ['UNSCHEDULED', 'SCHEDULED', 'IN_PROGRESS'] } } } }),
     );
   });
 
@@ -1687,7 +1731,7 @@ describe('GET /api/customers/:id/summary', () => {
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const res = await request(app)
-      .get('/api/customers/00000000-0000-0000-0000-995555550224/summary')
+      .get('/api/customers/00000000-0000-0000-0000-999999999999/summary')
       .set(authHeader('admin'));
 
     expect(res.status).toBe(404);
@@ -1819,7 +1863,7 @@ describe('POST /api/customers/:id/notes', () => {
     (prisma.customer.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
     const res = await request(app)
-      .post('/api/customers/00000000-0000-0000-0000-995555550224/notes')
+      .post('/api/customers/00000000-0000-0000-0000-999999999999/notes')
       .set(authHeader('admin'))
       .send({ content: 'Some note' });
 

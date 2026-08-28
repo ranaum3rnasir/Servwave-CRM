@@ -16,6 +16,7 @@ import { logAudit } from '../lib/audit';
 import { CtmApiError, getCall as ctmGetCall, getCallTranscription as ctmGetCallTranscription, isCtmConfigured, isOutboundAllowed, placeCall } from '../lib/ctm/client';
 import { summaryOf, transcriptOf, transcriptTurnsOf, unwrapActivity, TranscriptTurn } from '../lib/ctm/ingest';
 import { resolveOutboundNumber } from '../lib/communication/resolveOutboundNumber';
+import { recordLeadOutboundContact } from '../services/lead-contact.service';
 
 // Short-lived playback URLs on the private recordings bucket (plan §4/§10:
 // 300s TTL, minted per play + audited; list payloads never carry URLs).
@@ -32,6 +33,35 @@ function toApiDirection(direction: string): string {
   return direction;
 }
 
+/**
+ * Who answered, in the one identity both sides can agree on.
+ *
+ * The stored `answered_by` JSON names the answerer differently depending on how
+ * the call was taken: a softphone answer carries the vendor's `ctm_agent_id`, a
+ * resolved forwarded answer carries `user_id`. The UI, meanwhile, has always
+ * read `answeredBy.id` - to label the Calls table and to scope the per-agent
+ * Performance drawer - and nothing ever wrote that key, so every per-agent
+ * figure was zero regardless of what ingest resolved.
+ *
+ * `agent_id` is the column that already holds the ServWave user across all
+ * three paths (agent-email match, claimed click-to-call stash, forwarded-answer
+ * resolver), so that is what `id` means. It surfaces only when someone actually
+ * answered: on an outbound leg `agent_id` is who PLACED the call, and stamping
+ * that onto an unanswered row would credit it to them in every stat.
+ */
+export function mapAnsweredBy(row: {
+  answered_by?: unknown;
+  agent_id?: string | null;
+}): Record<string, unknown> {
+  const stored = (row.answered_by ?? { kind: 'none' }) as Record<string, unknown>;
+  if (stored.kind === 'none') return stored;
+  const userId =
+    (typeof stored.user_id === 'string' && stored.user_id) ||
+    (typeof row.agent_id === 'string' && row.agent_id) ||
+    null;
+  return userId ? { ...stored, id: userId } : stored;
+}
+
 // CallSession → frontend `CallSession` (phone-calls.ts).
 function mapCallSession(row: any) {
   const direction = toApiDirection(row.direction);
@@ -45,8 +75,7 @@ function mapCallSession(row: any) {
     // (CTM may still stamp a meaningless `source`), so never surface it there.
     ...(direction === 'inbound' && row.tracking_source != null && { trackingSource: row.tracking_source }),
     status: row.status,
-    // answered_by is a Json column holding { kind, id? }.
-    answeredBy: row.answered_by ?? { kind: 'none' },
+    answeredBy: mapAnsweredBy(row),
     startedAt: (row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at),
     ...(row.duration_sec != null && { durationSec: row.duration_sec }),
     ...(row.customer_id != null && { customerId: row.customer_id }),
@@ -831,6 +860,23 @@ export async function createCall(req: Request, res: Response) {
         job_label: jobStamp?.job_label ?? null,
         organization_id: orgId,
       },
+    });
+
+    // Spec #1751 D5: an outbound call marks the lead contacted. `automated: false` is stated
+    // outright rather than omitted — outbound calls are human by nature TODAY because a person
+    // presses dial, and there is no column to read. Naming it here is the hook the first
+    // autodialer has to change, instead of silently inheriting a default that was only ever true
+    // by accident of what had been built.
+    //
+    // An INBOUND call is filtered out inside the helper: the customer ringing us is not us
+    // reaching out (user story 15), and this same door records both directions.
+    await recordLeadOutboundContact(prisma, {
+      leadId: row.lead_id,
+      orgId: row.organization_id,
+      channel: 'call',
+      direction: row.direction,
+      automated: false,
+      at: row.started_at,
     });
 
     logger.info(

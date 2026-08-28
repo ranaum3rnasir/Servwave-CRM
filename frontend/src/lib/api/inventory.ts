@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 import api from '@/lib/axios';
 import * as mock from '@/lib/api/_mock/inventory';
 import { useFeature } from '@/lib/entitlements';
@@ -15,7 +16,12 @@ const USE_MOCK = false;
 // prototype seeds: `reserved` is gone from stock rows (QA-904 — no v1 write
 // path populates it), and `unitCost`/`listPrice` are optional because the
 // server strips costs for users without pricing visibility (canSeePricing).
-export type ItemKind = 'material' | 'service' | 'labor' | 'bundle' | 'fee';
+// Two values, deliberately. `labor`, `bundle` and `fee` were retired on
+// 2026-08-12: all three already billed as SERVICE through typeForKind, and the
+// Stock > Items grid filtered bundle and fee out, so an item saved as either
+// was created and then invisible. The server folds the retired tokens into
+// 'service' on write (normalizeKind), so no reader has to know they existed.
+export type ItemKind = 'material' | 'service';
 export type Trade = 'locksmith' | 'door' | 'security' | 'hvac' | 'plumbing';
 export type ItemStatus = 'active' | 'on_backorder' | 'discontinued';
 export type ItemVisibility = 'catalog' | 'internal_only';
@@ -30,9 +36,11 @@ export type StockAtLocation = {
 export type Item = {
   id: string;
   sku: string;
-  /** Manufacturer part number - shown in the UI as "Part Number". */
-  mpn?: string;
-  modelNumber?: string;
+  /** Manufacturer part number - shown in the UI as "Part Number". Null once
+   *  the operator clears it: an ABSENT key means "leave unchanged" to the
+   *  price-book PATCH, so a clear has to travel as an explicit null. */
+  mpn?: string | null;
+  modelNumber?: string | null;
   upc?: string;
   name: string;
   category: string;
@@ -55,7 +63,10 @@ export type Item = {
   serials?: string[];
   photoUrl?: string;
   updatedAt: string;
-  brandId?: string;
+  /** Same clear-versus-omit contract as `mpn` above. */
+  brandId?: string | null;
+  /** Same clear-versus-omit contract as `mpn` above. */
+  finishId?: string | null;
   visibility?: ItemVisibility;
   customerName?: string;
   customerDescription?: string;
@@ -67,6 +78,24 @@ export type Item = {
   type?: 'SERVICE' | 'MATERIAL';
   /** SRVW-90: apply sales tax on estimates and invoices. Server default true. */
   taxable?: boolean;
+};
+
+/** Per-org catalog entity, mirroring Brand. The item points at it by id. */
+export type Finish = {
+  id: string;
+  name: string;
+  /** BHMA code, e.g. "626". Optional - trades outside door hardware have none. */
+  code?: string;
+  isActive?: boolean;
+};
+
+/** Supplies the unit dropdown's options ONLY. `Item.uom` remains the code
+ *  string, not a foreign key - see the schema comment on the model. */
+export type UomOption = {
+  id: string;
+  code: string;
+  label?: string;
+  isActive?: boolean;
 };
 
 export type POStatus = 'draft' | 'sent' | 'partial' | 'received' | 'closed';
@@ -181,11 +210,13 @@ export type ItemWritePayload = {
   id?: string;
   name: string;
   sku?: string;
-  mpn?: string;
-  modelNumber?: string;
+  /** An explicit null CLEARS the column; omitting the key leaves it alone. */
+  mpn?: string | null;
+  modelNumber?: string | null;
   upc?: string;
-  brandId?: string;
-  vendorId?: string;
+  brandId?: string | null;
+  finishId?: string | null;
+  vendorId?: string | null;
   categoryId?: string;
   trade?: string;
   kind?: string;
@@ -211,7 +242,7 @@ export type ItemWritePayload = {
  *  server 400s on `z.string().uuid()` today - loudly. Silently stripping it
  *  would trade that loud failure for a quiet one: a success toast with the
  *  brand/vendor/category never actually saved. Throw instead. */
-function assertServerFk(field: string, v?: string) {
+function assertServerFk(field: string, v?: string | null) {
   if (v && PLACEHOLDER_ID_RE.test(v)) {
     throw new Error(`${field} is still a local placeholder id (${v}) - the parent entity was not saved.`);
   }
@@ -219,7 +250,8 @@ function assertServerFk(field: string, v?: string) {
 }
 
 /** camelCase → price-book snake_case body. Undefined keys drop out of the
- *  JSON payload, so untouched fields are simply not sent. Exported for tests. */
+ *  JSON payload, so untouched fields are simply not sent; an explicit null
+ *  survives and is what clears a column. Exported for tests. */
 export function toPriceBookBody(p: ItemWritePayload) {
   return {
     name: p.name,
@@ -228,6 +260,7 @@ export function toPriceBookBody(p: ItemWritePayload) {
     model_number: p.modelNumber,
     upc: p.upc,
     brand_id: assertServerFk('brand_id', p.brandId),
+    finish_id: assertServerFk('finish_id', p.finishId),
     vendor_id: assertServerFk('vendor_id', p.vendorId),
     category_id: assertServerFk('category_id', p.categoryId),
     trade: p.trade,
@@ -304,18 +337,40 @@ export function inventoryValue(item: Item) {
 /** `includeArchived` surfaces items the hybrid delete archived instead of
  *  hard-deleting (Task 2's `include_archived` query flag) - the Items grid's
  *  "Show archived" toggle threads it through. */
+// parsePagination caps `limit` at 100 on every paginated endpoint, so one
+// request can never carry a whole catalog. The 17 consumers of this hook all
+// want the full item list (search, item pickers, KPI roll-ups), so we walk the
+// {data,meta} envelope (P0 §D5) here and keep handing them a plain Item[].
+const ITEMS_PAGE_SIZE = 100;
+// Belt-and-braces stop: 100 pages is 10k items, far past any real catalog, and
+// bounds the loop even if `meta` ever comes back malformed.
+const ITEMS_MAX_PAGES = 100;
+
+async function fetchAllItems(includeArchived: boolean): Promise<Item[]> {
+  const archived = includeArchived ? '&include_archived=true' : '';
+  const getPage = (page: number) =>
+    api.get(`/api/inventory/items?limit=${ITEMS_PAGE_SIZE}&page=${page}${archived}`);
+
+  const first = await getPage(1);
+  const all: Item[] = [...(first.data.data ?? [])];
+  // Trust meta for the bound; fall back to "stop" when it is absent so a
+  // server that drops the envelope degrades to today's single-page result.
+  const totalPages = Math.min(Number(first.data.meta?.totalPages) || 1, ITEMS_MAX_PAGES);
+
+  for (let page = 2; page <= totalPages; page += 1) {
+    const { data } = await getPage(page);
+    all.push(...(data.data ?? []));
+  }
+
+  return all;
+}
+
 export function useInventoryItems(includeArchived = false) {
   return useQuery<Item[]>({
     queryKey: ['inventory', 'items', { includeArchived }],
     queryFn: USE_MOCK
       ? () => Promise.resolve(mock.items)
-      : // {data,meta} envelope (P0 §D5). parsePagination caps limit at 100 —
-        // orgs beyond 100 catalog items truncate the Stock view until the
-        // follow-up server-driven pagination lands.
-        () =>
-          api
-            .get(`/api/inventory/items?limit=100${includeArchived ? '&include_archived=true' : ''}`)
-            .then((r) => r.data.data),
+      : () => fetchAllItems(includeArchived),
   });
 }
 export function useVendors() {
@@ -323,6 +378,14 @@ export function useVendors() {
 }
 export function useBrands() {
   return useQuery<Brand[]>({ queryKey: ['inventory', 'brands'], queryFn: USE_MOCK ? () => Promise.resolve(mock.brands) : () => api.get('/api/inventory/brands').then((r) => r.data.brands) });
+}
+// Finish and UomOption post-date the mock seed layer, so they have no
+// `mock.*` fallback - USE_MOCK is false module-wide and these are server-only.
+export function useFinishes() {
+  return useQuery<Finish[]>({ queryKey: ['inventory', 'finishes'], queryFn: () => api.get('/api/inventory/finishes').then((r) => r.data.finishes) });
+}
+export function useUomOptions() {
+  return useQuery<UomOption[]>({ queryKey: ['inventory', 'uom-options'], queryFn: () => api.get('/api/inventory/uom-options').then((r) => r.data.uomOptions) });
 }
 export function useCategories() {
   return useQuery<Category[]>({ queryKey: ['inventory', 'categories'], queryFn: USE_MOCK ? () => Promise.resolve(mock.categories) : () => api.get('/api/inventory/categories').then((r) => r.data.categories) });
@@ -481,12 +544,92 @@ export function useMyVan(enabled = true) {
   });
 }
 
-function useInventoryMutation<TArgs>(path: string) {
+/**
+ * A mutation's `onSuccess`, refreshing `queryKey` without holding the mutation
+ * open while it refreshes.
+ *
+ * The braces are the whole point. Every mutation below used to write
+ * `onSuccess: () => qc.invalidateQueries(...)`, and an arrow with no braces
+ * RETURNS that promise - which TanStack Query then awaits before it settles
+ * `mutateAsync`. `invalidateQueries` settles only once every matching ACTIVE
+ * query has finished refetching, and a retry-paused fetch never settles at all,
+ * so one stalled inventory query left the mutation pending forever.
+ *
+ * The dialogs are what made that visible. AddBrandDialog - and the vendor,
+ * category and finish dialogs beside it - set `saving = true` on click, disable
+ * the save button on it, and clear it only after awaiting the mutation. So a
+ * brand the server had already created (201) left its dialog open with the save
+ * button permanently disabled and nothing on screen saying why.
+ *
+ * A caller waits on the WRITE. The refresh that follows is this module's
+ * business, not the caller's.
+ */
+function invalidating(qc: QueryClient, ...queryKeys: readonly (readonly unknown[])[]) {
+  return () => {
+    for (const queryKey of queryKeys) void qc.invalidateQueries({ queryKey });
+  };
+}
+
+/**
+ * Every query key prefix under ['inventory'], named once so each mutation can
+ * declare the blast radius of its own write beside the write itself.
+ *
+ * Why this exists: every mutation below used to end in
+ * `invalidating(qc, ['inventory'])`, and there are 22 query hooks under that
+ * prefix. One catalog delete therefore refetched every inventory query mounted
+ * on the page. The general API limiter allows 100 requests per 60 seconds per
+ * user across all of /api, so a person clicking at normal speed can exhaust it -
+ * and when the refused request is the one that would have refreshed a list, the
+ * row the server already deleted stays on screen indefinitely. The limit is not
+ * the defect; the request volume is.
+ */
+const KEYS = {
+  items: ['inventory', 'items'],
+  vendors: ['inventory', 'vendors'],
+  brands: ['inventory', 'brands'],
+  finishes: ['inventory', 'finishes'],
+  uomOptions: ['inventory', 'uom-options'],
+  categories: ['inventory', 'categories'],
+  itemGroups: ['inventory', 'item-groups'],
+  locations: ['inventory', 'locations'],
+  branches: ['inventory', 'branches'],
+  movements: ['inventory', 'movements'],
+  lowStock: ['inventory', 'low-stock'],
+  purchaseOrders: ['inventory', 'purchase-orders'],
+  poActivity: ['inventory', 'po-activity'],
+  estimateReservations: ['inventory', 'estimate-reservations'],
+  jobStages: ['inventory', 'job-stages'],
+  stockApprovals: ['inventory', 'stock-approvals'],
+  jobs: ['inventory', 'jobs'],
+  techs: ['inventory', 'techs'],
+  myVan: ['inventory', 'my-van'],
+  assets: ['inventory', 'assets'],
+  jobMaterialCost: ['inventory', 'job-material-cost'],
+  /** The whole prefix - only for a write whose blast radius really is that wide. */
+  everything: ['inventory'],
+} as const;
+
+/** An item write. The item list obviously; item groups list their member items,
+ *  and both the low-stock rows and the movement log are joined server-side
+ *  against the live item name/sku, so a rename must refresh those too. */
+const ITEM_VIEWS = [KEYS.items, KEYS.itemGroups, KEYS.lowStock, KEYS.movements];
+/** A stock write. On-hand lives on the item rows, every write records a
+ *  movement, any write can cross a reserve level, and a van is a location. */
+const STOCK_VIEWS = [KEYS.items, KEYS.movements, KEYS.lowStock, KEYS.myVan];
+/** A location write. Locations appear on every item's stock rows and on the
+ *  low-stock rows, and one of them may be the requester's own van. */
+const LOCATION_VIEWS = [KEYS.locations, KEYS.items, KEYS.lowStock, KEYS.myVan];
+/** A purchase-order write that does not move stock: the PO and its timeline. */
+const PO_VIEWS = [KEYS.purchaseOrders, KEYS.poActivity];
+/** A vendor write - the name is displayed on items and on purchase orders. */
+const VENDOR_VIEWS = [KEYS.vendors, KEYS.items, KEYS.purchaseOrders];
+
+function useInventoryMutation<TArgs>(path: string, ...queryKeys: readonly (readonly unknown[])[]) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (args: TArgs) =>
       USE_MOCK ? Promise.resolve(args) : api.post(path, args).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...queryKeys),
   });
 }
 
@@ -557,7 +700,7 @@ export function useCreateAsset() {
   return useMutation({
     mutationFn: (body: AssetWriteBody) =>
       api.post('/api/inventory/assets', body).then((r) => r.data.asset as Asset),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'assets'] }),
+    onSuccess: invalidating(qc, KEYS.assets),
   });
 }
 
@@ -566,7 +709,7 @@ export function useUpdateAsset() {
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string } & Partial<AssetWriteBody>) =>
       api.patch(`/api/inventory/assets/${id}`, body).then((r) => r.data.asset as Asset),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'assets'] }),
+    onSuccess: invalidating(qc, KEYS.assets),
   });
 }
 
@@ -575,7 +718,7 @@ export function useDeleteAsset() {
   return useMutation({
     mutationFn: ({ id }: { id: string }) =>
       api.delete(`/api/inventory/assets/${id}`).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'assets'] }),
+    onSuccess: invalidating(qc, KEYS.assets),
   });
 }
 
@@ -587,7 +730,7 @@ export function useAssetAction() {
   return useMutation({
     mutationFn: ({ id, action, ...body }: AssetActionInput) =>
       api.post(`/api/inventory/assets/${id}/${action}`, body).then((r) => r.data.asset as Asset),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'assets'] }),
+    onSuccess: invalidating(qc, KEYS.assets),
   });
 }
 
@@ -603,7 +746,7 @@ export function useUploadAssetPhoto() {
         })
         .then((r) => r.data.asset as Asset);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'assets'] }),
+    onSuccess: invalidating(qc, KEYS.assets),
   });
 }
 
@@ -616,7 +759,7 @@ export function useUpsertItem() {
       p.id
         ? api.patch(`/api/price-book/items/${p.id}`, toPriceBookBody(p)).then((r) => r.data.data)
         : api.post('/api/price-book/items', toPriceBookBody(p)).then((r) => r.data.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...ITEM_VIEWS),
   });
 }
 
@@ -630,7 +773,7 @@ export function useDeleteItem() {
   return useMutation({
     mutationFn: ({ id }: { id: string }) =>
       api.delete(`/api/price-book/items/${id}`).then((r) => r.data as DeleteItemResult),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...ITEM_VIEWS),
   });
 }
 
@@ -641,7 +784,7 @@ export function useRestoreItem() {
   return useMutation({
     mutationFn: ({ id }: { id: string }) =>
       api.patch(`/api/price-book/items/${id}`, { is_active: true }).then((r) => r.data.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...ITEM_VIEWS),
   });
 }
 
@@ -659,7 +802,8 @@ export function useUpsertCategory() {
         ? api.patch(`/api/price-book/categories/${p.id}`, body).then((r) => r.data.data)
         : api.post('/api/price-book/categories', body).then((r) => r.data.data);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // Its own list, plus the item list - an item carries its category name.
+    onSuccess: invalidating(qc, KEYS.categories, KEYS.items),
   });
 }
 
@@ -671,7 +815,28 @@ export function useUpsertBrand() {
     // caller adopting the returned id (adoptServerId) actually sees it.
     mutationFn: (p: Partial<Brand>) =>
       api.post('/api/price-book/brands', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data.brand as Brand),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // The item list too: renaming a brand must not leave a stale label on it.
+    onSuccess: invalidating(qc, KEYS.brands, KEYS.items),
+  });
+}
+
+export function useUpsertFinish() {
+  const qc = useQueryClient();
+  return useMutation({
+    // Same envelope-unwrapping contract as useUpsertBrand: the caller adopts
+    // the returned server id, so a `{finish}` wrapper would hand it undefined.
+    mutationFn: (p: Partial<Finish>) =>
+      api.post('/api/price-book/finishes', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data.finish as Finish),
+    onSuccess: invalidating(qc, KEYS.finishes, KEYS.items),
+  });
+}
+
+export function useUpsertUomOption() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (p: Partial<UomOption>) =>
+      api.post('/api/price-book/uom-options', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data.uomOption as UomOption),
+    onSuccess: invalidating(qc, KEYS.uomOptions, KEYS.items),
   });
 }
 
@@ -680,27 +845,68 @@ export function useUpsertItemGroup() {
   return useMutation({
     mutationFn: (p: Partial<ItemGroup>) =>
       api.post('/api/price-book/item-groups', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // A group is a bundle OF items; no item displays the group it belongs to.
+    onSuccess: invalidating(qc, KEYS.itemGroups),
   });
 }
 
-function useDeleteById(pathPrefix: string) {
+/**
+ * One shared delete for every catalog, parameterised by the list it caches.
+ *
+ * On success the deleted id is pruned from that list with a direct cache write,
+ * so the row leaves the screen the moment the server confirms it rather than
+ * when a follow-up GET happens to come back. Every consumer of the list - the
+ * manage-catalog dialog, the Price Book tabs, the Add Item dropdowns - reads the
+ * same cache, so one write corrects all of them at once.
+ *
+ * Only on success. A refusal (a 400 with a reason, a 404, a 429) leaves the
+ * cache exactly as it was: there is no optimistic pre-removal and no rollback,
+ * because an optimistic removal is what makes a failed delete look like a
+ * successful one. Invalidation still fires afterwards as a background reconcile,
+ * so the server stays the source of truth - and, per `invalidating`, is not
+ * awaited, so a caller waits on the write and never on the refresh.
+ */
+function useDeleteById(
+  pathPrefix: string,
+  listKey: readonly unknown[],
+  ...reconcileKeys: readonly (readonly unknown[])[]
+) {
   const qc = useQueryClient();
+  const reconcile = invalidating(qc, ...reconcileKeys);
   return useMutation({
     mutationFn: ({ id }: { id: string }) => api.delete(`${pathPrefix}/${id}`).then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: (_data, { id }) => {
+      // A list that was never fetched is simply absent - leave it alone.
+      qc.setQueryData<{ id: string }[]>(listKey, (list) =>
+        Array.isArray(list) ? list.filter((entry) => entry.id !== id) : list,
+      );
+      reconcile();
+    },
   });
 }
-export const useDeleteBrand     = () => useDeleteById('/api/price-book/brands');
-export const useDeleteItemGroup = () => useDeleteById('/api/price-book/item-groups');
-export const useDeleteCategory  = () => useDeleteById('/api/price-book/categories');
+// Each catalog reconciles its own list and the item list that displays its
+// label - a deleted brand must not stay printed on an item row.
+export const useDeleteBrand     = () => useDeleteById('/api/price-book/brands', KEYS.brands, KEYS.brands, KEYS.items);
+export const useDeleteFinish    = () => useDeleteById('/api/price-book/finishes', KEYS.finishes, KEYS.finishes, KEYS.items);
+export const useDeleteUomOption = () => useDeleteById('/api/price-book/uom-options', KEYS.uomOptions, KEYS.uomOptions, KEYS.items);
+export const useDeleteItemGroup = () => useDeleteById('/api/price-book/item-groups', KEYS.itemGroups, KEYS.itemGroups);
+export const useDeleteCategory  = () => useDeleteById('/api/price-book/categories', KEYS.categories, KEYS.categories, KEYS.items);
+// The API guards both of these: a location that still holds stock or is the org
+// default gets a 409, a branch with child locations a 400. Surface `error` verbatim.
+export const useDeleteLocation  = () => useDeleteById('/api/inventory/locations', KEYS.locations, ...LOCATION_VIEWS);
+export const useDeleteBranch    = () => useDeleteById('/api/inventory/branches', KEYS.branches, KEYS.branches, KEYS.locations);
 
 export function useImportItemsCSV() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: { items: unknown[] }) =>
       api.post('/api/price-book/items/import', payload).then((r) => r.data as ImportItemsResult),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // DELIBERATELY WIDE. One import creates items and, on the way, categories,
+    // brands, units and vendors, and can seed stock. Naming keys here would be
+    // naming most of them, and missing one leaves a stale screen after a bulk
+    // load - the one moment a user is least able to spot it. It is also a rare,
+    // single-shot action, so the fan-out costs nothing at the limiter.
+    onSuccess: invalidating(qc, KEYS.everything),
   });
 }
 
@@ -741,7 +947,7 @@ export function useUpsertLocation() {
         ? api.patch(`/api/inventory/locations/${p.id}`, body).then((r) => r.data.location as Location)
         : api.post('/api/inventory/locations', body).then((r) => r.data.location as Location);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...LOCATION_VIEWS),
   });
 }
 /** SRVW-93 - the server returns a `{branch}` envelope (inv-locations.controller.ts),
@@ -752,7 +958,8 @@ export function useUpsertBranch() {
   return useMutation({
     mutationFn: (p: Partial<Branch>) =>
       api.post('/api/inventory/branches', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data.branch as Branch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // A branch owns locations and nothing else.
+    onSuccess: invalidating(qc, KEYS.branches, KEYS.locations),
   });
 }
 // SRVW-92 - unitCost is deliberately optional-and-absent (not `number | null`) so a
@@ -766,8 +973,26 @@ export type RestockPayload = {
   reference?: string;
   notes?: string;
 };
-export const useRestock           = () => useInventoryMutation<RestockPayload>('/api/inventory/restock');
-export const useTransferStock     = () => useInventoryMutation<unknown>('/api/inventory/transfer');
+export const useRestock           = () => useInventoryMutation<RestockPayload>('/api/inventory/restock', ...STOCK_VIEWS);
+/**
+ * Many receipts, ONE transaction and ONE audit row - `POST /api/inventory/bulk-restock`,
+ * gated `canDo('update','Inventory')`.
+ *
+ * The body is `bulkRestockSchema` verbatim (`backend/src/controllers/inv-catalog.controller.ts`):
+ * a non-empty `lines` array of `{ itemId, locationId, qty, unitCost? }`, ids as uuids, `qty`
+ * strictly positive. NOT the single restock's shape - there is no `source`, `reference` or
+ * `notes` field on a line, and the server writes the ledger reference itself ('bulk-restock').
+ *
+ * `unitCost` is optional-and-absent rather than `number | null` for the same reason as
+ * `RestockPayload` (SRVW-92): a cost-stripped caller omits the key instead of sending a false 0
+ * the server would persist.
+ *
+ * Every id is re-resolved server-side under `tenantWhere(req)` before anything is written, so a
+ * line naming another org's item or location 404s rather than posting.
+ */
+export type BulkRestockLine = { itemId: string; locationId: string; qty: number; unitCost?: number };
+export const useBulkRestock       = () => useInventoryMutation<{ lines: BulkRestockLine[] }>('/api/inventory/bulk-restock', ...STOCK_VIEWS);
+export const useTransferStock     = () => useInventoryMutation<unknown>('/api/inventory/transfer', ...STOCK_VIEWS);
 /** Inventory P1 §6 — physical count: records ONE `adjust` movement of counted − on-hand.
  *  Deliberately NOT useInventoryMutation: that helper posts its camelCase args verbatim, and
  *  setQuantitySchema is snake_case (item_id/location_id/counted_qty/reason), so posting through
@@ -784,7 +1009,7 @@ export function useSetQuantity() {
           reason: p.reason,
         })
         .then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...STOCK_VIEWS),
   });
 }
 
@@ -803,7 +1028,9 @@ export function useSetThresholds() {
           max: p.max,
         })
         .then((r) => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // A threshold changes what counts as low without moving any stock, so no
+    // movement is written and the movement log cannot have changed.
+    onSuccess: invalidating(qc, KEYS.items, KEYS.lowStock),
   });
 }
 
@@ -831,7 +1058,7 @@ export function useCreatePO() {
       api
         .post('/api/inventory/purchase-orders', input)
         .then((r) => r.data as { purchaseOrder: PurchaseOrder }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...PO_VIEWS),
   });
 }
 
@@ -843,7 +1070,7 @@ export function useUpdatePO() {
       api
         .patch(`/api/inventory/purchase-orders/${id}`, body)
         .then((r) => r.data as { purchaseOrder: PurchaseOrder }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...PO_VIEWS),
   });
 }
 
@@ -859,7 +1086,13 @@ export function useReceivePO() {
       api
         .post('/api/inventory/purchase-orders/receive', payload)
         .then((r) => r.data as { purchaseOrder: PurchaseOrder }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // DELIBERATELY WIDE. A receive lands stock in a location (items, low-stock,
+    // my-van), writes a movement per line, advances the PO and its activity,
+    // and re-costs the job through job-material-cost - which exists under this
+    // prefix precisely because a receive refreshes it. That is most of the
+    // prefix already, and a receive is rare enough that the fan-out is not what
+    // spends a user's rate-limit budget.
+    onSuccess: invalidating(qc, KEYS.everything),
   });
 }
 
@@ -877,7 +1110,9 @@ export function useSendPO() {
       api
         .post(`/api/inventory/purchase-orders/${id}/send`, body)
         .then((r) => r.data as { purchaseOrder: PurchaseOrder; email?: unknown }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // Sending advances the PO status and logs an email on its timeline; it
+    // moves no stock.
+    onSuccess: invalidating(qc, ...PO_VIEWS),
   });
 }
 
@@ -888,7 +1123,8 @@ export function useConvertReservation() {
       api
         .post(`/api/inventory/estimate-reservations/${id}/convert`)
         .then((r) => r.data as { purchaseOrder: PurchaseOrder; estimateReservation: EstimateReservation }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    // A conversion consumes the reservation and creates a PO.
+    onSuccess: invalidating(qc, KEYS.estimateReservations, ...PO_VIEWS),
   });
 }
 
@@ -899,7 +1135,7 @@ export function useDismissReservation() {
       api
         .post(`/api/inventory/estimate-reservations/${id}/dismiss`, reason ? { reason } : {})
         .then((r) => r.data as { estimateReservation: EstimateReservation }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, KEYS.estimateReservations),
   });
 }
 
@@ -915,10 +1151,12 @@ export function useJobMaterialCost(jobId: string | undefined, enabled: boolean) 
   });
 }
 // useCreateRFQ was removed with the RFQ feature-parking (P0 §C).
-export const useCreateStage       = () => useInventoryMutation<unknown>('/api/inventory/job-stages');
-export const useReceiveStageLine  = () => useInventoryMutation<unknown>('/api/inventory/job-stages/receive');
-export const useNotifyTechReady   = () => useInventoryMutation<unknown>('/api/inventory/job-stages/notify');
-export const useEmailStagePickup  = () => useInventoryMutation<{ stageId: string; to: string[]; cc?: string[]; subject: string; message?: string }>('/api/inventory/job-stages/email');
+// Staging writes touch job_stages ONLY - inv-stages.controller.ts writes no
+// stock level and no movement, so nothing else under the prefix can be stale.
+export const useCreateStage       = () => useInventoryMutation<unknown>('/api/inventory/job-stages', KEYS.jobStages);
+export const useReceiveStageLine  = () => useInventoryMutation<unknown>('/api/inventory/job-stages/receive', KEYS.jobStages);
+export const useNotifyTechReady   = () => useInventoryMutation<unknown>('/api/inventory/job-stages/notify', KEYS.jobStages);
+export const useEmailStagePickup  = () => useInventoryMutation<{ stageId: string; to: string[]; cc?: string[]; subject: string; message?: string }>('/api/inventory/job-stages/email', KEYS.jobStages);
 
 // P5 §5 — staging attachments persist to Supabase Storage. The caller builds
 // the multipart FormData (file + lenient metadata text parts); the response
@@ -930,7 +1168,7 @@ export function useUploadStageAttachment() {
       api
         .post(`/api/inventory/job-stages/${stageId}/attachments`, form)
         .then((r) => r.data as { attachment: StageAttachment }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'job-stages'] }),
+    onSuccess: invalidating(qc, KEYS.jobStages),
   });
 }
 export function useDeleteStageAttachment() {
@@ -940,13 +1178,13 @@ export function useDeleteStageAttachment() {
       api
         .delete(`/api/inventory/job-stages/${stageId}/attachments/${attachmentId}`)
         .then((r) => r.data as { success: boolean }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory', 'job-stages'] }),
+    onSuccess: invalidating(qc, KEYS.jobStages),
   });
 }
 // Dormant (feature-parked endpoints): exports stay for the unrouted approval
 // components; no mounted callers.
-export const useCreateApproval    = () => useInventoryMutation<unknown>('/api/inventory/stock-approvals');
-export const useDecideApproval    = () => useInventoryMutation<unknown>('/api/inventory/stock-approvals/decide');
+export const useCreateApproval    = () => useInventoryMutation<unknown>('/api/inventory/stock-approvals', KEYS.stockApprovals);
+export const useDecideApproval    = () => useInventoryMutation<unknown>('/api/inventory/stock-approvals/decide', KEYS.stockApprovals);
 // A dialog-synthesized `vnd_new_<ts>` id must not reach the update branch —
 // it 500ed there (looked up against the UUID `vendors.id` column). Strip it
 // the same way useUpsertBrand/useUpsertItemGroup already do.
@@ -955,9 +1193,9 @@ export function useUpsertVendor() {
   return useMutation({
     mutationFn: (p: Partial<Vendor>) =>
       api.post('/api/inventory/vendors', { ...p, id: isServerId(p.id) ? p.id : undefined }).then((r) => r.data.vendor as Vendor),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: invalidating(qc, ...VENDOR_VIEWS),
   });
 }
 // P2 (QA-610/A-17): canonical DELETE /vendors/:id — the old POST /vendors/delete
 // answers 410 GONE server-side. 409 VENDOR_HAS_POS → archive fallback (VendorsPage).
-export const useDeleteVendor      = () => useDeleteById('/api/inventory/vendors');
+export const useDeleteVendor      = () => useDeleteById('/api/inventory/vendors', KEYS.vendors, ...VENDOR_VIEWS);

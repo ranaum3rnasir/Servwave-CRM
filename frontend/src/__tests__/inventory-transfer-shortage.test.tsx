@@ -18,8 +18,19 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_FROM: 'loc_wh_main',
@@ -99,7 +110,7 @@ beforeEach(() => {
   mockApi.post.mockResolvedValue({ data: { success: true } });
 });
 
-describe('InventoryPage - Transfer between locations (Slice 3)', () => {
+describe('v2 InventoryPage - Transfer between locations (Slice 3)', () => {
   it('submits the camelCase transfer body, closes, toasts, and invalidates the inventory cache', async () => {
     const { dialog, queryClient } = await openTransferDialog();
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
@@ -120,10 +131,16 @@ describe('InventoryPage - Transfer between locations (Slice 3)', () => {
     await waitFor(() => {
       expect(screen.queryByText('Transfer Stock Between Locations')).toBeNull();
     });
-    expect(
-      await screen.findByText(/Transferred 3 × FLT-30 from Main Warehouse/),
-    ).toBeInTheDocument();
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory'] });
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.stringMatching(/Transferred 3 × FLT-30 from Main Warehouse/),
+    );
+    // A stock write now refreshes its own key set rather than the whole
+    // ['inventory'] prefix (#1639): the blanket key refetched all 22 inventory
+    // queries per write and could exhaust the 100-per-60s API limiter.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'items'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'movements'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'low-stock'] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['inventory'] });
   });
 
   it('renders an inline error and keeps the dialog open on a 409 SHORTAGE (QA-204), with no misleading success toast', async () => {
@@ -142,7 +159,7 @@ describe('InventoryPage - Transfer between locations (Slice 3)', () => {
 
     // Dialog stays open - no incorrect success toast fires.
     expect(screen.getByText('Transfer Stock Between Locations')).toBeInTheDocument();
-    expect(screen.queryByText(/✓ Transferred/)).toBeNull();
+    expect(mockToast).not.toHaveBeenCalledWith(expect.stringMatching(/✓ Transferred/));
   });
 
   it('gives useful feedback (not a silent failure) on a non-SHORTAGE error', async () => {

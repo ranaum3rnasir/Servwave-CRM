@@ -17,6 +17,12 @@ vi.mock('@/lib/api/communication', async () => ({
   >('@/lib/api/communication-shared/messageDelivery')),
 }));
 
+// Bubble times render on the ORG's clock, so the drawer reads the org query. This
+// suite renders it bare (no QueryClientProvider), so the zone is pinned here.
+vi.mock('@/lib/api/organization', () => ({
+  useOrganization: () => ({ data: { timezone: 'America/New_York' } }),
+}));
+
 import { EntitySmsDrawer } from '@/components/communication/shared/EntitySmsDrawer';
 
 const THREAD = {

@@ -17,17 +17,14 @@ import { EmptyState } from '@/components/ui/empty-state';
 // Shared CommItem contract — single frontend declaration, field names FROZEN
 // (mirrors the backend mapper).
 import type { CommItem } from '@/lib/api/jobCommunications';
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
-function formatAt(at: string) {
-  return new Date(at).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+function formatAt(at: string, tz: string) {
+  return formatInstant(at, tz);
 }
 
 export function CustomerCommunicationsTab({ customerId }: { customerId: string }) {
+  const tz = useScheduleTimezone();
   const canAccessComms = useFeature('phone');
   // Row → detail drawer (calls only in this slice), gated on comms access — the
   // call/recording/transcript endpoints 404 for non-pilot orgs.
@@ -95,7 +92,8 @@ export function CustomerCommunicationsTab({ customerId }: { customerId: string }
           <CommRow
             key={it.id}
             item={it}
-            formatTimestamp={formatAt}
+            formatTimestamp={(at) => formatAt(at, tz)}
+            tz={tz}
             customerId={customerId}
             onSelect={
               canAccessComms

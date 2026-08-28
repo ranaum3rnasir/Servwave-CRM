@@ -6,8 +6,8 @@
 import { X } from 'lucide-react';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
-import type { UserActivity, PersonMetricKey } from './activity-logic';
-import { personDetail, bandFill } from './activity-logic';
+import type { UserActivity, PersonMetricKey } from '@/lib/reports/activity-logic';
+import { personDetail, bandFill } from '@/lib/reports/activity-logic';
 
 interface Props {
   user: UserActivity;

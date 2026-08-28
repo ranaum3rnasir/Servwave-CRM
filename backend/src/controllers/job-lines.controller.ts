@@ -44,6 +44,7 @@ import {
   type TrackedItemInfo,
 } from './inv-stock.controller';
 import { logAudit } from '../lib/audit';
+import { LINE_DESCRIPTION_MAX } from '../lib/line-items';
 
 function param(req: Request, name: string): string {
   return req.params[name] as string;
@@ -67,7 +68,7 @@ class LineAlreadyGoneError extends Error {}
 // --- Zod Schemas (validate() calls schema.parse(req.body) directly — no body: wrapper) ---
 
 export const addLineSchema = z.object({
-  description: z.string().min(1).max(5000),
+  description: z.string().min(1).max(LINE_DESCRIPTION_MAX),
   quantity: z.number().positive().max(100000),
   // Required for a price-visible requester (enforced in addLine — Zod alone can't see req.ability).
   // OPTIONAL here for a price-blind requester (D13c): the server resolves it from the price book
@@ -82,7 +83,7 @@ export const addLineSchema = z.object({
 });
 
 export const updateLineSchema = z.object({
-  description: z.string().min(1).max(5000).optional(),
+  description: z.string().min(1).max(LINE_DESCRIPTION_MAX).optional(),
   quantity: z.number().positive().max(100000).optional(),
   unit_price: z.number().min(0).optional(),
   unit_cost: z.number().min(0).nullable().optional(),
@@ -162,7 +163,7 @@ const jobGuardSelect = {
   tax_rate: true,
   discount_amount: true,
   customer: { select: { tax_exempt: true } },
-  assignees: { select: { user_id: true } },
+  visits: { select: { assignees: { select: { user_id: true } } } },
   job_line_items: { select: jobLineSelect, orderBy: { sequence: 'asc' as const } },
   invoices: { select: { total_amount: true, voided_at: true } },
   scopes: true,

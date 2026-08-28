@@ -6,14 +6,14 @@ import { screen } from '@testing-library/react';
 import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './helpers';
 import ReportRoute from '@/pages/reports/ReportRoute';
-import type { InventoryUsagePayload } from '@/pages/reports/inventory-usage-data';
+import type { InventoryUsagePayload } from '@/lib/reports/inventory-usage-data';
 
 const hoisted = vi.hoisted(() => ({
   useInventoryUsage: vi.fn(),
 }));
 
-vi.mock('@/pages/reports/inventory-usage-data', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/reports/inventory-usage-data')>();
+vi.mock('@/lib/reports/inventory-usage-data', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/reports/inventory-usage-data')>();
   return { ...actual, useInventoryUsage: hoisted.useInventoryUsage };
 });
 

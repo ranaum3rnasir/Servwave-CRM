@@ -88,7 +88,7 @@ const UNKNOWN_THREAD: MessageThread = {
 
 const SMS_NUMBER = {
   id: 'num-1',
-  e164: '+15555550208',
+  e164: '+15512827064',
   sms_enabled: true,
   created_at: '2026-07-01T00:00:00Z',
 };
@@ -98,7 +98,7 @@ function mockComms({
   contacts = [] as PhoneCustomer[],
 } = {}) {
   mockApi.get.mockImplementation(async (url: string) => {
-    if (url === '/api/organization') return { data: { ctm_account_id: '596375', ctm_sms_ready: true } };
+    if (url === '/api/organization') return { data: { ctm_account_id: '500001', ctm_sms_ready: true } };
     if (url === '/api/communication/contacts') return { data: { contacts } };
     if (url === '/api/communication/agents') return { data: { agents: [] } };
     if (url === '/api/communication/threads') return { data: { threads: serverThreads } };

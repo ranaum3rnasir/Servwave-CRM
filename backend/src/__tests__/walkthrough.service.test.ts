@@ -10,17 +10,27 @@ import {
 // four legacy-shaped SELECT/serialize sites, and the automation merge fields.
 describe('resolveCurrentWalkthrough', () => {
   const base = {
-    id: 'w1', status: 'REQUESTED' as const, scheduled_at: null, duration_minutes: null,
+    id: 'w1', visit_seq: 1, status: 'CANCELLED' as const, scheduled_at: null, duration_minutes: null,
     completed_at: null, notes: null, cancelled_at: null, cancelled_reason: null,
     cancelled_by: null, customer_email_sent_at: null, created_at: new Date('2026-01-01'),
   };
 
-  it('returns null for an empty list (fresh lead, only ever REQUESTED)', () => {
+  it('returns null for a lead that holds no visits at all', () => {
     expect(resolveCurrentWalkthrough([])).toBeNull();
   });
 
-  it('a REQUESTED-only visit is not "current" - nothing has happened yet', () => {
-    expect(resolveCurrentWalkthrough([{ ...base, status: 'REQUESTED' }])).toBeNull();
+  // Multi-visit S1: with several live visits per lead, "current" can no longer be "the first
+  // SCHEDULED row we happen to see" - it has to be the EARLIEST still-coming trip.
+  it('picks the earliest upcoming visit when a lead holds several live ones', () => {
+    const later   = { ...base, id: 'w-later',   status: 'SCHEDULED' as const, scheduled_at: new Date('2026-05-10') };
+    const sooner  = { ...base, id: 'w-sooner',  status: 'SCHEDULED' as const, scheduled_at: new Date('2026-05-02') };
+    expect(resolveCurrentWalkthrough([later, sooner])?.id).toBe('w-sooner');
+  });
+
+  it('prefers a live visit over a completed one regardless of array order', () => {
+    const completed = { ...base, id: 'w-done', status: 'COMPLETED' as const, completed_at: new Date('2026-06-01') };
+    const upcoming  = { ...base, id: 'w-next', status: 'SCHEDULED' as const, scheduled_at: new Date('2026-05-02') };
+    expect(resolveCurrentWalkthrough([completed, upcoming])?.id).toBe('w-next');
   });
 
   it('a SCHEDULED visit is current even alongside older happened visits', () => {
@@ -44,12 +54,12 @@ describe('resolveCurrentWalkthrough', () => {
 
 describe('projectLegacyWalkthroughFields', () => {
   const base = {
-    id: 'w1', status: 'REQUESTED' as const, scheduled_at: null, duration_minutes: null,
+    id: 'w1', visit_seq: 1, status: 'CANCELLED' as const, scheduled_at: null, duration_minutes: null,
     completed_at: null, notes: null, cancelled_at: null, cancelled_reason: null,
     cancelled_by: null, customer_email_sent_at: null, created_at: new Date('2026-01-01'),
   };
 
-  it('an empty/REQUESTED-only walkthrough list projects every field to null', () => {
+  it('an empty visit list projects every field to null', () => {
     expect(projectLegacyWalkthroughFields(undefined, { full: true })).toEqual({
       walkthrough_scheduled_at: null,
       walkthrough_completed_at: null,
@@ -134,10 +144,44 @@ describe('projectLeadWalkthroughFields', () => {
   });
 
   it('projects an empty walkthroughs array to null fields, not a skip (the `in` check)', () => {
-    const lead = { id: 'lead-1', walkthroughs: [] };
+    const lead = { id: 'lead-1', visits: [] };
     const out = projectLeadWalkthroughFields(lead, { full: false }) as Record<string, unknown>;
     expect(out.walkthrough_scheduled_at).toBeNull();
-    expect(out).not.toHaveProperty('walkthroughs');
+    expect(out).not.toHaveProperty('visits');
+  });
+
+  // #1590 renamed the Lead -> VisitAssignee relation from `walkthrough_performers` to
+  // `visit_assignees`, and because a Prisma relation name IS the JSON key, the API quietly
+  // stopped sending a field the whole frontend reads - the lead hero, the walkthrough tab, the
+  // scheduler board's crew and the copilot handler all ask for `walkthrough_performers` and got
+  // `undefined`. The projection's job is to keep the legacy flat NAMES while the model moves
+  // underneath, so the rename belongs here rather than in six frontend readers (#1637).
+  it('projects visit_assignees back onto the legacy walkthrough_performers name', () => {
+    const lead = {
+      id: 'lead-1',
+      visits: [],
+      visit_assignees: [{ user_id: 'u1', user: { id: 'u1', first_name: 'Alex', last_name: 'Romero' } }],
+    };
+    const out = projectLeadWalkthroughFields(lead, { full: true }) as Record<string, unknown>;
+    expect(out.walkthrough_performers).toEqual([
+      { user_id: 'u1', user: { id: 'u1', first_name: 'Alex', last_name: 'Romero' } },
+    ]);
+    expect(out).not.toHaveProperty('visit_assignees');
+  });
+
+  it('leaves a caller that never selected the performers relation without the key', () => {
+    const lead = { id: 'lead-1', visits: [] };
+    const out = projectLeadWalkthroughFields(lead, { full: true }) as Record<string, unknown>;
+    expect(out).not.toHaveProperty('walkthrough_performers');
+  });
+
+  // The two renames are independent: a select carrying performers but no visits must still get
+  // the legacy name, or the early return for untouched callers would swallow it.
+  it('renames the performers even when the visits relation was not selected', () => {
+    const lead = { visit_assignees: [{ user_id: 'u1' }] };
+    const out = projectLeadWalkthroughFields(lead as never, { full: false }) as Record<string, unknown>;
+    expect(out.walkthrough_performers).toEqual([{ user_id: 'u1' }]);
+    expect(out).not.toHaveProperty('visit_assignees');
   });
 
   it('sources walkthrough_scheduled_at from the relation and strips the raw walkthroughs key', () => {
@@ -146,10 +190,10 @@ describe('projectLeadWalkthroughFields', () => {
       completed_at: null, notes: null, cancelled_at: null, cancelled_reason: null,
       cancelled_by: null, customer_email_sent_at: null, created_at: new Date('2026-04-01'),
     };
-    const lead = { id: 'lead-1', status: 'CONTACTED', walkthroughs: [scheduled] };
+    const lead = { id: 'lead-1', status: 'CONTACTED', visits: [scheduled] };
     const out = projectLeadWalkthroughFields(lead, { full: false }) as Record<string, unknown>;
     expect(out.walkthrough_scheduled_at).toEqual(new Date('2026-05-01'));
-    expect(out).not.toHaveProperty('walkthroughs');
+    expect(out).not.toHaveProperty('visits');
     expect(out.id).toBe('lead-1');
   });
 });

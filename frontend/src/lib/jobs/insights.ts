@@ -27,7 +27,9 @@ interface InsightAttachment {
   file_type?: string | null;
 }
 
-const PHOTO_STATUSES = new Set(['ON_SITE', 'IN_PROGRESS', 'COMPLETED']);
+// S4 (D17): ON_SITE left JobStatus. A crew on site leaves the job SCHEDULED, so the photo nudge
+// starts once work has actually started.
+const PHOTO_STATUSES = new Set(['IN_PROGRESS', 'COMPLETED']);
 
 /**
  * Rule-based "AI Operations Insights" (BETA placeholder until the real model —

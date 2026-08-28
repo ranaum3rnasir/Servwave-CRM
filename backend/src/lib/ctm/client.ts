@@ -221,12 +221,25 @@ async function* paginate<T>(
     }
     qp.set('page', String(page));
     const envl = await request<PagedEnvelope>(`${path}${path.includes('?') ? '&' : '?'}${qp.toString()}`);
-    yield extractItems<T>(envl, itemsKey);
-    const totalPages = envl.total_pages !== undefined ? Number(envl.total_pages) : undefined;
-    const nextPage = envl.next_page !== undefined && envl.next_page !== null ? Number(envl.next_page) : undefined;
-    if (!nextPage || Number.isNaN(nextPage) || nextPage <= page) break;
-    if (totalPages !== undefined && !Number.isNaN(totalPages) && page >= totalPages) break;
-    page = nextPage;
+    const items = extractItems<T>(envl, itemsKey);
+    yield items;
+
+    // CTM's `next_page` is a URL, not a page number:
+    //   "https://api.calltrackingmetrics.com/api/v1/accounts/500001/calls?page=2"
+    // so it is a "there is more" flag and nothing else. This walk used to do
+    // Number(next_page), got NaN, and stopped after page one - silently, since
+    // a truncated list looks exactly like a short one. Page size is 10, so
+    // every caller saw the first 10 of everything: 10 of Northwind Services' 20
+    // numbers, 10 of its 123 calls. Advance by counting, and prefer
+    // total_pages (a real number) as the bound.
+    if (items.length === 0) break;
+    const totalPages = Number(envl.total_pages);
+    if (Number.isFinite(totalPages) && totalPages > 0) {
+      if (page >= totalPages) break;
+    } else if (envl.next_page === undefined || envl.next_page === null || envl.next_page === '') {
+      break;
+    }
+    page += 1;
   }
 }
 
@@ -247,9 +260,17 @@ export async function createAccount(name: string, timezoneHint?: string): Promis
 
 // ─── Numbers ─────────────────────────────────────────────────────────────────
 
+/** Every number on the account. Paginated: an org with more than one page of
+ *  numbers must not have Sync report half its inventory as the whole truth. */
 export async function listNumbers(accountId: string): Promise<Array<Record<string, unknown>>> {
-  const res = await request<PagedEnvelope>(`/accounts/${accountId}/numbers`);
-  return extractItems(res, 'numbers');
+  const all: Array<Record<string, unknown>> = [];
+  for await (const page of paginate<Record<string, unknown>>(
+    `/accounts/${accountId}/numbers`,
+    'numbers',
+  )) {
+    all.push(...page);
+  }
+  return all;
 }
 
 /** CTM number-inventory search.
@@ -311,11 +332,49 @@ export async function updateNumberRouting(
   return request(`/accounts/${accountId}/numbers/${tpnId}/update_number`, { method: 'POST', body });
 }
 
+/**
+ * Give a tracking number back, ending its recurring charge.
+ *
+ * CONFIRMED live 2026-08-12 against sub-account 500002, end to end: releasing
+ * the orphaned `+1 609-596-8565` took the account from four numbers to three
+ * and ended its 2026-09-05 billing. The `POST …/release` spelling, by
+ * contrast, returns the router's generic `{"error":"invalid request"}` - no
+ * such route.
+ *
+ * A missing id answers HTTP 404 carrying CTM's typed
+ * `{"status":"error","reason":"object not found"}`. The HTTP status is the
+ * part that matters: `request()` builds CtmApiError from `res.status`, so a
+ * body-only error would arrive as status 200 and silently defeat the caller's
+ * already-released check. Confirmed against a real 404, not a mock.
+ *
+ * IRREVERSIBLE: the number returns to the carrier pool and cannot be
+ * reclaimed. Callers must confirm with the user first.
+ */
+export async function releaseNumber(accountId: string, tpnId: string): Promise<void> {
+  await request(`/accounts/${accountId}/numbers/${tpnId}`, { method: 'DELETE' });
+}
+
 export async function createReceivingNumber(
   accountId: string,
   number: string,
 ): Promise<Record<string, unknown>> {
   return request(`/accounts/${accountId}/receiving_numbers`, { method: 'POST', body: { number } });
+}
+
+/** The account's receiving (forward-target) numbers.
+ *
+ *  Each record carries BOTH ids CTM uses for a receiving number: the `id`
+ *  string (RPN…) that the routing endpoints take, and a numeric `filter_id`.
+ *  The call webhook's `answered_by.receiving_number_id` is the FILTER_ID -
+ *  verified against the live Northwind Services account on 2026-08-07 - which is what
+ *  makes "who picked up this forwarded call" answerable at all. */
+export async function listReceivingNumbers(
+  accountId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const res = await request<PagedEnvelope>(
+    `/accounts/${accountId}/receiving_numbers?per_page=200`,
+  );
+  return extractItems(res, 'receiving_numbers');
 }
 
 export async function addReceivingToTracking(
@@ -436,11 +495,11 @@ export async function deleteWebhook(accountId: string, webhookId: string | numbe
  * Fetch one call activity by the CA… sid we store.
  *
  * CTM's call-detail path is keyed by the NUMERIC activity id, not the sid:
- * `/accounts/596375/calls/4367824697` answers 200 while
- * `/accounts/596375/calls/CA96f6f290523bc59bd930eebc84d324c9` - the SAME call -
+ * `/accounts/500001/calls/4367824697` answers 200 while
+ * `/accounts/500001/calls/CA96f6f290523bc59bd930eebc84d324c9` - the SAME call -
  * answers `404 {"reason":"call not found"}`. We only ever persist the sid (the
  * numeric id has no column), so resolve it through the list endpoint's `search`
- * term, which matches a sid exactly. Verified live against account 596375,
+ * term, which matches a sid exactly. Verified live against account 500001,
  * including for calls old enough that the 404 first read as data expiry.
  *
  * A miss is a 200 with `total_entries: 0`, and `search` is free text, so both

@@ -22,6 +22,7 @@ const FALLBACKS: Record<string, string> = {
   '--ai': '#5B6DFF',
   '--info': '#3B82F6',
   '--notify': '#F43F5E',
+  '--event': '#5A5A2E', // Calendar Entry board accent — slice 03/06 (calendar-entries spec §3), AA-corrected (5.48:1 on the real 10% composite)
   '--background-light': '#EEF1F3',
   '--surface-light': '#FFFFFF',
   '--border-color': '#E4E8EC',
@@ -72,6 +73,7 @@ const FALLBACKS: Record<string, string> = {
   '--amber-700': '#B45309',
   '--terracotta': '#BF5A4C',
   '--indigo-600': '#5B6DFF',
+  '--olive-700': '#5A5A2E', // Calendar Entry board accent — slice 03/06, AA-corrected (see tokens.css)
   '--ai-50': '#F3F0FF',
   '--ai-200': '#D8D0FF',
   '--ai-500': '#8B7CF8',

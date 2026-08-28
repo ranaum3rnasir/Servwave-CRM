@@ -443,6 +443,55 @@ describe('declinePublic — estimate.declined', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 4b. setStatus (free setter, Spec B1) — emits the BUSINESS verb, not a bland correction
+// ─────────────────────────────────────────────────────────────────────────────
+// Estimate status is unordered now, so WON/DECLINED/ARCHIVED are reachable straight from the
+// status pill. That is the same business event as approve-internal/decline-internal/cancel and
+// must raise the same verb - otherwise the feed reports which control the user happened to press.
+
+describe('setStatus (unordered) — emits the business verb per target', () => {
+  it.each([
+    ['WON', 'estimate.approved', {}],
+    ['DECLINED', 'estimate.declined', { lost_reason: 'PRICE' }],
+    ['ARCHIVED', 'estimate.cancelled', {}],
+  ])('a move to %s emits %s', async (target, verb, extra) => {
+    mockAuthAs('admin');
+    mockPrisma.estimate.findUnique.mockResolvedValue({
+      id: ESTIMATE_ID,
+      status: 'SENT',
+      estimate_number: ESTIMATE_NUM,
+      lead_id: ESTIMATE_FIXTURE.lead_id,
+      public_token: 'live-token',
+      job: null,
+      invoices: [],
+      lead: { lead_assignees: [], commission_owner_id: COMMISSION_OWNER_ID, status: 'ESTIMATED' },
+    });
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({
+        estimate: {
+          update: vi.fn().mockResolvedValue({ id: ESTIMATE_ID, estimate_number: ESTIMATE_NUM }),
+          count: vi.fn().mockResolvedValue(0),
+          findUnique: vi.fn().mockResolvedValue(null),
+        },
+        lead: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        invoice: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        timelineEvent: { create: vi.fn().mockResolvedValue({}) },
+        estimateReservation: { findFirst: vi.fn().mockResolvedValue({ id: 'res-1' }), create: vi.fn() },
+      }),
+    );
+    mockEmit.mockClear();
+
+    const res = await request(app)
+      .patch(`/api/estimates/${ESTIMATE_ID}/status`)
+      .set(authHeader('admin'))
+      .send({ status: target, ...extra });
+
+    expect(res.status).toBe(200);
+    expect(mockEmit.mock.calls.find((c: unknown[]) => (c[0] as { verb: string }).verb === verb)).toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 5. cancel — estimate.cancelled (staff actor)
 // ─────────────────────────────────────────────────────────────────────────────
 

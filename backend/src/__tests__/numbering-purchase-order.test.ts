@@ -30,7 +30,7 @@ describe('allocateNumber — purchase_order', () => {
   it('throws when org not found', async () => {
     const tx = { $queryRaw: vi.fn().mockResolvedValue([]) } as never;
     await expect(
-      realAllocateNumber(tx, 'purchase_order', '99555555-0224-9999-9999-995555550224'),
+      realAllocateNumber(tx, 'purchase_order', '99999999-9999-9999-9999-999999999999'),
     ).rejects.toThrow(/not found/);
   });
 });

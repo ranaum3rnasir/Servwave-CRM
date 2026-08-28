@@ -74,6 +74,7 @@ function mapItem(row: any) {
     photoUrl: row.photo_url ?? row.image_url ?? undefined,
     updatedAt: (row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at) as string,
     brandId: row.brand_id ?? undefined,
+    finishId: row.finish_id ?? undefined,
     visibility: row.visibility ?? undefined,
     customerName: row.customer_name ?? undefined,
     customerDescription: row.customer_description ?? undefined,
@@ -103,6 +104,24 @@ export function mapBrand(row: any) {
     description: row.description ?? undefined,
     defaultMarkupPct: decOrUndef(row.default_markup_pct),
     defaultVendorId: row.default_vendor_id ?? undefined,
+    isActive: row.is_active ?? undefined,
+  };
+}
+
+export function mapFinish(row: any) {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    code: row.code ?? undefined,
+    isActive: row.is_active ?? undefined,
+  };
+}
+
+export function mapUomOption(row: any) {
+  return {
+    id: row.id as string,
+    code: row.code as string,
+    label: row.label ?? undefined,
     isActive: row.is_active ?? undefined,
   };
 }
@@ -239,6 +258,36 @@ export async function listBrands(req: Request, res: Response) {
     res.json({ brands: brands.map(mapBrand) });
   } catch (err) {
     logger.error('Failed to list brands:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// ─── Finish + UoM option Handlers (reads) ───────────────
+
+export async function listFinishes(req: Request, res: Response) {
+  try {
+    const finishes = await prisma.finish.findMany({
+      where: tenantWhere(req),
+      orderBy: { name: 'asc' },
+    });
+
+    res.json({ finishes: finishes.map(mapFinish) });
+  } catch (err) {
+    logger.error('Failed to list finishes:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function listUomOptions(req: Request, res: Response) {
+  try {
+    const options = await prisma.uomOption.findMany({
+      where: tenantWhere(req),
+      orderBy: { code: 'asc' },
+    });
+
+    res.json({ uomOptions: options.map(mapUomOption) });
+  } catch (err) {
+    logger.error('Failed to list uom options:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 }

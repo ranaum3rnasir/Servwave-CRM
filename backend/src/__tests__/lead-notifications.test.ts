@@ -84,9 +84,9 @@ function wireScheduleTx(updated: any) {
   const txTimelineCreate = vi.fn().mockResolvedValue({});
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
-      leadWalkthroughPerformer: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
-      walkthrough: { create: txWalkthroughCreate, update: txWalkthroughUpdate },
-      lead: { update: txLeadUpdate },
+      visitAssignee: { findMany: txFindMany, createMany: txCreateMany, deleteMany: txDeleteMany },
+      visit: { aggregate: mockPrisma.visit.aggregate, create: txWalkthroughCreate, update: txWalkthroughUpdate },
+      lead: { update: txLeadUpdate, updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
       timelineEvent: { create: txTimelineCreate },
     }),
   );
@@ -105,7 +105,7 @@ function wireCreateTx(created: any) {
         findFirst: vi.fn().mockResolvedValue({ id: LOCATION_FIXTURE.id }),
       },
       // Walkthrough-as-entity redesign, PR-B2: create() seeds a REQUESTED walkthrough row.
-      walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
+      visit: { aggregate: mockPrisma.visit.aggregate, create: vi.fn().mockResolvedValue({ id: 'wt-fixture-id' }) },
     }),
   );
   return { txCustomerUpdate, txLeadCreate };
@@ -148,8 +148,8 @@ beforeEach(() => {
   (prisma.appSetting as any) && ((prisma.appSetting.findUnique as any).mockResolvedValue(null));
   // Walkthrough-as-entity redesign, PR-B2: default to "no active/scheduled visit" so tests
   // that don't exercise a specific visit state don't need to know findActiveWalkthrough exists.
-  mockPrisma.walkthrough.findFirst.mockResolvedValue(null);
-  mockPrisma.walkthrough.findMany.mockResolvedValue([]);
+  mockPrisma.visit.findFirst.mockResolvedValue(null);
+  mockPrisma.visit.findMany.mockResolvedValue([]);
 });
 
 // ─── assign() → lead.assigned (new owner, no previous owner) ─────────────────
@@ -306,7 +306,7 @@ describe('POST /api/leads/:id/walkthrough/schedule — lead.walkthrough_schedule
     service_zip: '78701',
     customer: { first_name: 'John', last_name: 'Doe', email: 'john@doe.com', company_name: null },
     commission_owner: { first_name: 'Test', last_name: 'Sales', email: 'sales@test.com' },
-    walkthrough_performers: [{ user: { first_name: 'Test', last_name: 'Tech', email: 'tech@test.com' } }],
+    visit_assignees: [{ user: { first_name: 'Test', last_name: 'Tech', email: 'tech@test.com' } }],
     organization: { timezone: null },
   };
 
@@ -316,7 +316,7 @@ describe('POST /api/leads/:id/walkthrough/schedule — lead.walkthrough_schedule
       ...LEAD_FIXTURE,
       status: 'CONTACTED',
       commission_owner_id: SALES_ID,
-      walkthrough_performers: [],
+      visit_assignees: [],
     });
     mockPrisma.lead.findFirst.mockResolvedValue(emailCtxRow);
     wireScheduleTx({ ...LEAD_FIXTURE, status: 'CONTACTED' });

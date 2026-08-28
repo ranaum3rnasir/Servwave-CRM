@@ -27,6 +27,16 @@ interface DateTimePickerProps {
  * outside-click / Escape dismiss deterministically while the dialog stays open. Time
  * choices are generated every `stepMinutes` (default 15 — #416), but typed off-grid times
  * are accepted too.
+ *
+ * The two sub-fields are sized by flex-BASIS, not by a grow ratio. A ratio splits the row
+ * in proportions that have nothing to do with what each field must render: the old
+ * flex-[3]/flex-[2] handed the date input 94px of content box for a 77px date and left the
+ * time input 38px for a 57px "12:45 PM", so inside a max-w-sm dialog the meridiem was clipped
+ * off ("9:00 A") - unreadable as AM or PM, which is the one thing that field exists to say.
+ * Each basis below is the field's measured worst-case text plus its own padding, border,
+ * gap and icon button; `grow` then splits whatever slack the container has left. The inputs
+ * also drop to px-2.5 here (the standalone DatePicker/TimeCombobox keep their own padding),
+ * which is what buys the composed row enough headroom to hold both fields uncut.
  */
 export function DateTimePicker({
   value,
@@ -52,33 +62,37 @@ export function DateTimePicker({
   }
 
   return (
-    <div className={cn('flex items-stretch gap-2', className)}>
+    <div className={cn('flex flex-wrap items-stretch gap-2', className)}>
       <DatePicker
         value={datePart}
         onChange={handleDateChange}
         disabled={disabled}
-        className="flex-[3]"
-        inputClassName={inputClassName}
+        className="min-w-[8.75rem] grow basis-[8.75rem]"
+        inputClassName={cn('px-2.5', inputClassName)}
       />
-      <TimeCombobox
-        value={timePart}
-        onChange={handleTimeChange}
-        stepMinutes={stepMinutes}
-        disabled={disabled}
-        className="flex-[2]"
-        inputClassName={inputClassName}
-      />
-      {value && (
-        <button
-          type="button"
+      {/* Time and Clear share one wrap group so a container too narrow for all three
+          drops them together, rather than orphaning a lone X on its own row. */}
+      <div className="flex min-w-[10rem] grow basis-[10rem] items-stretch gap-2">
+        <TimeCombobox
+          value={timePart}
+          onChange={handleTimeChange}
+          stepMinutes={stepMinutes}
           disabled={disabled}
-          aria-label="Clear date and time"
-          onClick={() => onChange('')}
-          className="flex shrink-0 items-center justify-center self-stretch rounded-lg border border-border px-2 text-text-secondary hover:bg-primary-subtle hover:text-text-primary disabled:pointer-events-none disabled:opacity-50"
-        >
-          <X className="size-4" />
-        </button>
-      )}
+          className="min-w-0 grow"
+          inputClassName={cn('px-2.5', inputClassName)}
+        />
+        {value && (
+          <button
+            type="button"
+            disabled={disabled}
+            aria-label="Clear date and time"
+            onClick={() => onChange('')}
+            className="flex shrink-0 items-center justify-center self-stretch rounded-lg border border-border px-2 text-text-secondary hover:bg-primary-subtle hover:text-text-primary disabled:pointer-events-none disabled:opacity-50"
+          >
+            <X className="size-4" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

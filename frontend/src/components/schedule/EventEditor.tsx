@@ -4,7 +4,7 @@
 // drafts locally and EMITS onSaveCrew / onSaveTime / onUnschedule / onClose — it never
 // POSTs; the PAGE owns mutations, confirms, and toasts. Owner is OFF-BOARD: a read-only
 // field here, never an editable lane.
-import { useId, useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { CalendarX2, CheckCircle2, ExternalLink, Phone, MessageSquare } from 'lucide-react';
@@ -17,11 +17,8 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
 import { EmptyState } from '@/components/ui/empty-state';
 import { MultiAssigneeSelect } from '@/components/crm/MultiAssigneeSelect';
-import { SelectField } from '@/components/form/SelectField';
-import { DatePicker } from '@/components/form/DatePicker';
 import { cn } from '@/lib/utils';
 import {
   EVENT_TYPE_META,
@@ -31,16 +28,14 @@ import {
 } from './scheduleModel';
 import { crewPeopleOf, ownerOf, fullName } from './eventPeople';
 import type { AssignableUser } from '@/lib/api/users';
-import { TimeCombobox } from '@/components/form/TimeCombobox';
+import { ScheduleTimeFields } from './ScheduleTimeFields';
+import {
+  durationMinutesOf,
+  scheduleTimeFrom,
+  startDateOf,
+  type ScheduleTimeValue,
+} from './scheduleTimeValue';
 import { asWallClock, type WallClock } from '@/lib/schedule-tz';
-
-const DURATION_OPTIONS = [30, 60, 90, 120, 180, 240];
-
-const durationLabel = (min: number): string => {
-  if (min < 60) return `${min} min`;
-  const h = min / 60;
-  return Number.isInteger(h) ? `${h} hour${h === 1 ? '' : 's'}` : `${h} hours`;
-};
 
 /** REPLACE semantics — order-insensitive equality ([] is a valid crew). */
 const sameCrew = (a: string[], b: string[]): boolean =>
@@ -50,7 +45,7 @@ const sameCrew = (a: string[], b: string[]): boolean =>
 export function detailUrlOf(event: SchedulableEvent): string {
   return event.type === 'walkthrough'
     ? `/leads/${event.raw.id as string}?tab=walkthrough`
-    : `/jobs/${event.id}`;
+    : `/jobs/${event.parentId}`;
 }
 
 /** #370 — inline tel:/sms: icon links; renders nothing when there is no phone. */
@@ -126,7 +121,7 @@ export function EventEditor({
         {/* Keyed body: drafts reset whenever the dialog reopens (Radix unmounts closed
             content) or a different event opens — no sync effects needed. */}
         <EditorBody
-          key={event.id}
+          key={event.boardId}
           event={event}
           members={members}
           readOnly={readOnly}
@@ -160,7 +155,6 @@ function EditorBody({
   event: SchedulableEvent;
   readOnly: boolean;
 }) {
-  const uid = useId();
   const navigate = useNavigate();
 
   const meta = EVENT_TYPE_META[event.type];
@@ -173,39 +167,26 @@ function EditorBody({
   const crewDirty = !sameCrew(draftCrew, event.crew);
 
   // ── Time draft (timed events only) ──
+  // One value for the whole start/end/duration triple — the same shape every other
+  // scheduling surface edits (ScheduleTimeFields). `onSaveTime` still speaks start +
+  // duration, so the page's mutation is untouched: the duration is DERIVED here.
   const originalDuration =
     event.start && event.end
       ? Math.round((event.end.getTime() - event.start.getTime()) / 60_000)
       : null;
-  const [draftStart, setDraftStart] = useState<WallClock | null>(() => event.start);
-  const [draftDuration, setDraftDuration] = useState<number>(() => originalDuration ?? 0);
+  const originalTime = event.start ? scheduleTimeFrom(event.start, originalDuration ?? 0) : null;
+  const [draftTime, setDraftTime] = useState<ScheduleTimeValue | null>(() => originalTime);
+  const draftStart = draftTime ? startDateOf(draftTime) : null;
+  const draftDuration = draftTime ? durationMinutesOf(draftTime) : null;
   const timeDirty =
-    event.start !== null &&
+    originalTime !== null &&
+    draftTime !== null &&
     draftStart !== null &&
-    (draftStart.getTime() !== event.start.getTime() || draftDuration !== originalDuration);
-
-  // Duration dropdown always includes the current value (odd/resized durations stay picked).
-  const durations = DURATION_OPTIONS.includes(draftDuration)
-    ? DURATION_OPTIONS
-    : [...DURATION_OPTIONS, draftDuration].sort((a, b) => a - b);
-
-  const handleDateChange = (value: string) => {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-    if (!m || !draftStart) return; // ignore partial typing — keep the last valid date
-    // new Date(wallClock) copies the value but drops the brand — draftStart is already
-    // wall-clock space, so this re-asserts it rather than converting anything.
-    const next = asWallClock(new Date(draftStart));
-    next.setFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    setDraftStart(next);
-  };
-
-  const handleTimeChange = (value: string) => {
-    const m = /^(\d{2}):(\d{2})$/.exec(value);
-    if (!m || !draftStart) return;
-    const next = asWallClock(new Date(draftStart));
-    next.setHours(Number(m[1]), Number(m[2]), 0, 0);
-    setDraftStart(next);
-  };
+    draftDuration !== null &&
+    (draftTime.date !== originalTime.date ||
+      draftTime.startTime !== originalTime.startTime ||
+      draftTime.endDate !== originalTime.endDate ||
+      draftTime.endTime !== originalTime.endTime);
 
   const detailUrl = detailUrlOf(event);
   const customerPhone = (event.raw.customer as { phone?: string | null } | undefined)?.phone;
@@ -312,7 +293,7 @@ function EditorBody({
         </div>
 
         {/* Schedule — time edits for timed events; unscheduled events state it plainly */}
-        {event.start && draftStart ? (
+        {event.start && draftTime ? (
           <div>
             <Label>Schedule</Label>
             {readOnly ? (
@@ -322,43 +303,17 @@ function EditorBody({
               </p>
             ) : (
               <>
-                <div className="mt-1 grid grid-cols-2 gap-3">
-                  <div>
-                    <Label htmlFor={`${uid}-date`}>Date</Label>
-                    <DatePicker
-                      id={`${uid}-date`}
-                      value={format(draftStart, 'yyyy-MM-dd')}
-                      onChange={handleDateChange}
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor={`${uid}-time`}>Start time</Label>
-                    <TimeCombobox
-                      id={`${uid}-time`}
-                      aria-label="Start time"
-                      value={format(draftStart, 'HH:mm')}
-                      onChange={handleTimeChange}
-                      className="mt-1"
-                    />
-                  </div>
-                </div>
-                <div className="mt-3">
-                  <Label id={`${uid}-duration-label`}>Duration</Label>
-                  <SelectField
-                    aria-label="Duration"
-                    value={String(draftDuration)}
-                    onValueChange={(v) => setDraftDuration(Number(v))}
-                    className="mt-1 w-full rounded-sm focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
-                    options={durations.map((d) => ({ value: String(d), label: durationLabel(d) }))}
-                  />
-                </div>
-                {timeDirty && (
+                <ScheduleTimeFields
+                  className="mt-1"
+                  value={draftTime}
+                  onChange={setDraftTime}
+                />
+                {timeDirty && draftStart && draftDuration !== null && (
                   <div className="mt-2 flex justify-end">
                     <Button
                       size="sm"
                       variant="solid" tone="business"
-                      onClick={() => onSaveTime(draftStart, draftDuration)}
+                      onClick={() => onSaveTime(asWallClock(draftStart), draftDuration)}
                     >
                       Save time
                     </Button>

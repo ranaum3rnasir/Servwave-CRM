@@ -25,7 +25,7 @@
 --
 -- TARGETING: matched by the drifted SHAPE, not by organization id, so any org carrying the same
 --   drift is repaired. On the current staging DB only the demo org "Servwave Test" matches;
---   Alpha Doors & Security, Talon Septic and B&G Cabinet already hold the correct conditions.
+--   Northwind Services, Riverbend Septic and Lakeside Cabinets already hold the correct conditions.
 --
 -- JUDGMENT CALL on (b): narrowing a permission is the safe direction, but it is still a
 --   behavioural change for anyone who intended SALES to see org-wide invoices. The NULL rows are

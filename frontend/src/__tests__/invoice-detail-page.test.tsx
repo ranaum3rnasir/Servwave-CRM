@@ -102,6 +102,7 @@ const BASE_INVOICE = {
     paid_at: string;
     collector: null;
     reference_number: string | null;
+    voided_at?: string | null;
     stripe_fee_amount?: number | null;
     platform_fee_amount?: number | null;
     net_amount?: number | null;
@@ -943,5 +944,55 @@ describe('InvoiceDetailPage — tip visibility (Slice 8)', () => {
     // The column header is always present; only its cells go to '—'.
     expect(screen.getByRole('columnheader', { name: 'Tip' })).toBeInTheDocument();
     expect(screen.getAllByRole('cell', { name: '—' }).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// Editable record IDs (2026-08-19 plan) - RecordNumberEditor wired into the header's
+// invoice-number render, gated on ability.can('renumber', 'Invoice') && !invoice.sent_at.
+describe('InvoiceDetailPage - record number editor gating', () => {
+  it('shows the edit affordance for a user with the renumber grant on an unsent invoice', async () => {
+    mockInvoice({ sent_at: null });
+    renderWithProviders(<InvoiceDetailPage />, { ability: adminAbility });
+
+    expect(await screen.findByRole('button', { name: /edit id/i })).toBeInTheDocument();
+  });
+
+  it('hides the edit affordance for a user without the renumber grant', async () => {
+    mockInvoice({ sent_at: null });
+    renderWithProviders(<InvoiceDetailPage />, { ability: noPricingAbility });
+
+    await screen.findAllByText('I00001');
+    expect(screen.queryByRole('button', { name: /edit id/i })).toBeNull();
+  });
+
+  // The gate reads the same two things the backend does. It used to check sent_at alone, so an
+  // unsent invoice carrying a real payment offered a pencil that the backend then refused -
+  // the user got as far as typing a new number before being told no.
+  const LIVE_PAYMENT = {
+    id: 'pay-1',
+    amount: 1000,
+    method: 'CASH',
+    paid_at: '2026-07-05T00:00:00.000Z',
+    collector: null,
+    reference_number: null,
+    voided_at: null,
+  };
+
+  it('hides the edit affordance on an unsent invoice that carries a live payment', async () => {
+    mockInvoice({ sent_at: null, payments: [LIVE_PAYMENT] });
+    renderWithProviders(<InvoiceDetailPage />, { ability: adminAbility });
+
+    await screen.findAllByText('I00001');
+    expect(screen.queryByRole('button', { name: /edit id/i })).toBeNull();
+  });
+
+  it('keeps the edit affordance when the only payment against it was voided', async () => {
+    mockInvoice({
+      sent_at: null,
+      payments: [{ ...LIVE_PAYMENT, voided_at: '2026-07-06T00:00:00.000Z' }],
+    });
+    renderWithProviders(<InvoiceDetailPage />, { ability: adminAbility });
+
+    expect(await screen.findByRole('button', { name: /edit id/i })).toBeInTheDocument();
   });
 });

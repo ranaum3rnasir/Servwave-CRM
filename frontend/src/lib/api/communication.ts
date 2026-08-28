@@ -7,7 +7,7 @@ import { fmtPhone } from '@/lib/api/communication-shared';
 import type {
   CallSession, CallTranscriptTurn, PhoneCustomer, PhoneAgent, Message, MessageThread, TextTemplate,
   TextAutomation, BlockedNumber, BlockReason, CallFlow, CallGroup, WAChat, EmailGroup,
-  ForwardRule, TeamMember, TrainingScenario, TrainingSession, OwnedNumber, ComposeOrigin,
+  ForwardRule, TeamMember, TrainingScenario, TrainingSession, OwnedNumber, NumberStatus, ComposeOrigin,
   EmailAssignmentView, EmailThread, Email,
 } from '@/lib/api/communication-shared';
 
@@ -38,7 +38,7 @@ export {
   flowStructureLabel, groupTargetOptions, ringLabel, SCRIPT_ATTENTION_THRESHOLD,
   TRAINING_PASS_THRESHOLD, TRAINING_ROLES, TRAINING_OUTCOME_LABELS,
   BUSINESS_NUMBER, MASKING_NUMBER, NUMBER_PRICE,
-  PLAN_USAGE, ACCOUNTS, PRIMARY_ACCOUNT, NO_MAILBOX_LABEL, senderLabel,
+  ACCOUNTS, PRIMARY_ACCOUNT, NO_MAILBOX_LABEL, senderLabel, senderAddress,
 } from '@/lib/api/communication-shared';
 
 /** A customer's job for the center's right-rail "Jobs · navigation" list and
@@ -253,6 +253,27 @@ export function useCalls() {
   });
 }
 
+/** Current-cycle plan usage for the Phone header meters. Server-derived from
+ *  the org's own CallSession/Message rows (inbound + outbound), so `used` can
+ *  legitimately exceed `limit` — the meter clamps its bar, not this number. */
+export interface CommUsage {
+  cycleStart: string;
+  cycleLabel: string;
+  /** True when the org is exempt from the allowance; both limits are then null. */
+  uncapped: boolean;
+  calling: { used: number; limit: number | null; unit: string };
+  texting: { used: number; limit: number | null; unit: string };
+}
+
+export function useCommUsage() {
+  const { connected } = useCtmStatus();
+  return useQuery<CommUsage>({
+    queryKey: ['communication', 'usage'],
+    queryFn: () => api.get('/api/communication/usage').then((r) => r.data),
+    refetchInterval: connected ? LIVE_POLL_MS : false,
+  });
+}
+
 /** Fetch a single CallSession by id (GET /api/communication/calls/:id → { call }).
  *  Powers the entity-tab call detail drawer (EntityCallDrawer). */
 export function useCall(callId: string) {
@@ -354,9 +375,22 @@ export type PhoneNumberRow = {
   sms_enabled?: boolean;
   ctm_number_id?: string | null;
   call_flow_id?: string | null;
+  /** Where this number's calls ring (E.164), or null when it has no simple
+   *  forward set. This IS the routing - see `useUpdateNumberForwarding`. */
+  forward_to?: string | null;
   status?: string;
   created_at: string;
 };
+
+/** Statuses the UI knows how to render; anything else falls back to active so
+ *  a new server-side state can never blank a row out. */
+const NUMBER_STATUSES = new Set<NumberStatus>([
+  'active',
+  'paused',
+  'released',
+  'pending',
+  'failed',
+]);
 
 /** Map a wire row onto the UI's OwnedNumber shape (NumbersView contract). */
 export function mapOwnedNumber(row: PhoneNumberRow): OwnedNumber {
@@ -366,7 +400,10 @@ export function mapOwnedNumber(row: PhoneNumberRow): OwnedNumber {
     ...(row.label ? { tag: row.label } : {}),
     type: row.type === 'tollfree' ? 'Toll-free' : 'Local',
     flowId: row.call_flow_id ?? '',
-    status: row.status === 'paused' ? 'paused' : 'active',
+    forwardTo: row.forward_to ?? null,
+    status: NUMBER_STATUSES.has(row.status as NumberStatus)
+      ? (row.status as NumberStatus)
+      : 'active',
     createdAt: row.created_at,
     smsEnabled: row.sms_enabled ?? false,
   };
@@ -414,6 +451,57 @@ export function useReassignNumberFlow() {
   return useMutation({
     mutationFn: ({ id, callFlowId }: { id: string; callFlowId: string | null }) =>
       api.patch(`/api/communication/numbers/${id}`, { call_flow_id: callFlowId }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['communication', 'numbers'] }),
+  });
+}
+
+/** Re-read the provider's number list and make ours match (POST /numbers/refresh).
+ *
+ *  The local list is otherwise a connect-time snapshot: a number bought outside
+ *  ServWave, or one ServWave bought and failed to save, never shows up - and an
+ *  invisible number is still a billed number. Read-only against the provider,
+ *  so it is safe to press at any time. */
+export function useRefreshNumbers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api
+        .post('/api/communication/numbers/refresh')
+        .then((r) => r.data as { synced: number; numbers: PhoneNumberRow[] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['communication', 'numbers'] }),
+  });
+}
+
+/** Give a number back and stop its recurring charge (DELETE /numbers/:id).
+ *
+ *  IRREVERSIBLE at the provider - the number returns to the carrier pool and
+ *  cannot be reclaimed - so the caller must confirm first. The row survives as
+ *  `released` rather than being deleted, because calls and messages reference
+ *  the number and last month's calls should still show which one took them. */
+export function useReleaseNumber() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) =>
+      api
+        .delete(`/api/communication/numbers/${id}`)
+        .then((r) => r.data as { number: PhoneNumberRow }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['communication', 'numbers'] }),
+  });
+}
+
+/** Change where a number's calls ring (PATCH /numbers/:id).
+ *
+ *  Unlike the flow reassign above, this is not a label: it re-points the live
+ *  dial route, and the server fails the request rather than reporting success
+ *  if the phone system refuses - so an error here means calls still reach the
+ *  OLD destination, and the caller must say so. */
+export function useUpdateNumberForwarding() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, forwardToE164 }: { id: string; forwardToE164: string }) =>
+      api
+        .patch(`/api/communication/numbers/${id}`, { forward_to_e164: forwardToE164 })
+        .then((r) => r.data as { number: PhoneNumberRow }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['communication', 'numbers'] }),
   });
 }
@@ -500,12 +588,11 @@ export function useEmails(assignment: EmailAssignmentView = 'all') {
  *  Served by the same derivation the send path uses, never re-derived here: a
  *  compose header that could disagree with what the recipient sees would be a
  *  more convincing lie than the honest placeholder it replaces. Stays stale-
- *  tolerant (it changes only when an admin verifies a domain or renames the
- *  org), so the default cache behaviour is right and it needs no polling. */
+ *  tolerant (it changes only when an admin edits the sending address or renames
+ *  the org), so the default cache behaviour is right and it needs no polling. */
 export type SendingIdentity = {
   address: string;
   name: string | null;
-  customDomain: boolean;
   sendingEnabled: boolean;
   /** The string before the `@` this org actually sends from - its own choice
    *  when it has set one, else derived from the company name. */

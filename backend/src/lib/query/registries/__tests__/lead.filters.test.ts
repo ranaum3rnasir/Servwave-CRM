@@ -77,10 +77,11 @@ describe('leadFacets: ad_source (Customer relation)', () => {
 // Walkthrough-as-entity redesign, PR-B2: the bucket collapses to Walkthrough.status =
 // REQUESTED — no lead status default/involved at all.
 describe('leadFacets: walkthrough_status (synthetic/derived)', () => {
-  it("'needs_scheduling' expands to a walkthroughs relation filter on REQUESTED", async () => {
+  // Multi-visit D22a: the bucket is the ABSENCE of a live visit, not a REQUESTED placeholder.
+  it("'needs_scheduling' expands to a visits relation filter on having NO live visit", async () => {
     const where: any = {};
     await applyFilters(where, reqWith({ walkthrough_status: 'needs_scheduling' }), leadFacets({}));
-    expect(where.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(where.visits).toEqual({ none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
     expect(where.status).toBeUndefined();
   });
 
@@ -92,22 +93,26 @@ describe('leadFacets: walkthrough_status (synthetic/derived)', () => {
       leadFacets({}),
     );
     expect(where.status).toBe('CONTACTED');
-    expect(where.walkthroughs).toEqual({ some: { status: 'REQUESTED' } });
+    expect(where.visits).toEqual({ none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } } });
   });
 
   it('any value other than needs_scheduling is a no-op (only value in the system today)', async () => {
     const where: any = {};
     await applyFilters(where, reqWith({ walkthrough_status: 'bogus' }), leadFacets({}));
-    expect(where.walkthroughs).toBeUndefined();
+    expect(where.visits).toBeUndefined();
     expect(where.status).toBeUndefined();
   });
 
-  it('SECURITY: merges into an existing scopeWhere.walkthroughs (TECHNICIAN OWN_WALKTHROUGH) instead of clobbering it', async () => {
-    const scopeWhere = { walkthroughs: { some: { performers: { some: { user_id: 'the-tech' } } } } };
+  // SECURITY: the row-scope lives in `some`; the bucket condition is `none`. Prisma ANDs the two
+  // on the same relation, so the facet must ADD its key rather than replace `where.visits` -
+  // replacing it would drop a TECHNICIAN's OWN_WALKTHROUGH scope, an RBAC bypass.
+  it('SECURITY: keeps an existing scopeWhere.visits some-clause (TECHNICIAN OWN_WALKTHROUGH) alongside its own none-clause', async () => {
+    const scopeWhere = { visits: { some: { assignees: { some: { user_id: 'the-tech' } } } } };
     const where: any = { ...scopeWhere };
     await applyFilters(where, reqWith({ walkthrough_status: 'needs_scheduling' }), leadFacets(scopeWhere));
-    expect(where.walkthroughs).toEqual({
-      some: { performers: { some: { user_id: 'the-tech' } }, status: 'REQUESTED' },
+    expect(where.visits).toEqual({
+      some: { assignees: { some: { user_id: 'the-tech' } } },
+      none: { status: { in: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS'] } },
     });
   });
 });
@@ -142,10 +147,21 @@ describe('leadFacets: assigned_to (SECURITY: scope-guard)', () => {
 });
 
 describe('leadFacets: created dateRange', () => {
-  it('created_after/before -> gte/lte Date on created_at', async () => {
+  // Bare 'YYYY-MM-DD' bounds are ORG days, and the "to" day is INCLUSIVE - so the far edge is
+  // `lt` the start of the NEXT org day, not `lte` the start of its own (which dropped the last
+  // day of every range and made a single-day range empty). See lib/orgDayRange.ts.
+  it('created_after/before -> a half-open org-day window on created_at', async () => {
     const where: any = {};
     await applyFilters(where, reqWith({ created_after: '2026-01-01', created_before: '2026-02-01' }), leadFacets({}));
     expect(where.created_at.gte).toBeInstanceOf(Date);
-    expect(where.created_at.lte).toBeInstanceOf(Date);
+    expect(where.created_at.lt).toBeInstanceOf(Date);
+    expect(where.created_at.lte).toBeUndefined();
+  });
+
+  it('includes the whole of the "to" day', async () => {
+    const where: any = {};
+    await applyFilters(where, reqWith({ created_before: '2026-02-01' }), leadFacets({}));
+    // Default org zone America/New_York, UTC-5 in February.
+    expect(where.created_at.lt).toEqual(new Date('2026-02-02T05:00:00.000Z'));
   });
 });

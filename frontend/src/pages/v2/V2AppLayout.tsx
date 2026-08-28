@@ -1,17 +1,18 @@
-import { Fragment, useEffect, type MouseEvent } from 'react';
+import { Suspense, useEffect, type MouseEvent } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Bell, HelpCircle, Mail, MessageCircle, MessageSquare, Phone, Sparkles,
+  LogOut, Mail, MessageSquare, Settings as SettingsIcon, Sparkles,
 } from 'lucide-react';
 
 import { AppShell } from '@/ui-kit/components/layout/appShell';
 import {
-  Sidebar, SidebarGroupLabel, SidebarItem, SidebarNav,
+  Sidebar, SidebarFooter, SidebarHeader, SidebarItem,
 } from '@/ui-kit/components/layout/nav/sidebar';
 import {
   TopBar, TopBarAction, TopBarActions, TopBarBrand, TopBarDivider, TopBarPill,
-  TopBarSearch, TopBarUser,
+  TopBarUser, TopBarWorkspace,
 } from '@/ui-kit/components/layout/nav/topBar';
+import { Spinner } from '@/ui-kit/components/ui/spinner';
 import { TooltipProvider } from '@/ui-kit/components/ui/tooltip';
 import { initialsFor, tintFor } from '@/ui-kit/components/ui/avatar';
 
@@ -20,45 +21,88 @@ import { AiCenterModal } from '@/components/ai-center/AiCenterModal';
 import CopilotProvider from '@/components/copilot/CopilotProvider';
 import { OfficeSoftphoneWarmup } from '@/components/communication/phone/OfficeSoftphoneWarmup';
 
+// Legacy components with no kit counterpart. The kit ships chrome for these -
+// an inert search input, an icon that can carry a badge - but not the surfaces
+// behind them: no search backend or results list, no notification panel, no
+// dialer, no geofenced clock. Rendering the kit's chrome alone would have left
+// the v2 shell looking complete while doing nothing, so the working components
+// are reused as-is and recorded in UI_KIT_MISSING_COMPONENTS.md.
+import GlobalSearch from '@/components/layout/GlobalSearch';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
+import { GlobalDialer } from '@/components/communication/phone/Dialer';
+import { ClockInOutMenu } from '@/components/timeclock/ClockInOutMenu';
+
+// The KIT's menu, not the app's. ClockInOutMenu renders plain content rather
+// than menu items - it builds from Button alone - so nothing in this menu is
+// tied to the legacy dropdown, and the user menu can be kit throughout.
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/ui-kit/components/ui/dropdownMenu';
+
 import { useAppAbility } from '@/contexts/AbilityContext';
 import { useAuthStore } from '@/stores/auth.store';
 import { useSettingsGuard } from '@/stores/settingsGuard.store';
 import { useAiCenterStore } from '@/stores/aiCenterStore';
 import { useCopilotStore } from '@/stores/copilotStore';
-import { useIsDemoOrg } from '@/lib/useIsDemoOrg';
 import { useOrganization } from '@/lib/api/organization';
-import { useUnreadCount } from '@/lib/api/notifications';
+import { useUnreadCounts } from '@/lib/api/communication';
 import { setOrgFormattingPrefs } from '@/lib/org-format';
-import {
-  PLAN_LABELS, requiredPlanFor, useEntitlementsReady, useOrgFeatures,
-} from '@/lib/entitlements';
-import {
-  getDestination, hasNavFeature, isDemoDestUnlockedForOrg, resolveNavHref,
-  visibleNavChildren, type NavAccess, type NavDestination,
-} from '@/components/layout/nav-registry';
-import { useNavLayout } from '@/components/layout/useNavLayout';
+import { useFeature } from '@/lib/entitlements';
+
+import { fallbackLabelFor, useNavHistory } from './navHistory.store';
+import { V2Breadcrumbs } from './pageBreadcrumbs';
+import { SidebarCreateMenu } from './SidebarCreateMenu';
+import { V2SidebarNav } from './V2SidebarNav';
+import { preferV2Path } from './uiV2';
 
 /**
- * Sections for the v2 sidebar.
- *
- * The nav registry is a FLAT list - the legacy sidebar renders it as one column
- * of shortcuts - but the kit's shell groups destinations under headings, and the
- * first heading shares its row with the collapse control. So the grouping lives
- * here, keyed by registry key, rather than being invented in the registry (which
- * the legacy sidebar also reads and which this branch must not touch).
- *
- * Order inside a section still comes from the user's own layout, so a reorder
- * made in the legacy sidebar is honoured here. A key the user has pinned that no
- * section claims falls into the last one, so nothing can silently disappear.
+ * A comms count as the kit's badge wants it: absent at zero rather than a "0"
+ * bubble, and capped so a four-digit inbox cannot widen the action row.
  */
-const NAV_SECTIONS: { section: string; keys: readonly string[] }[] = [
-  { section: 'Workspace', keys: ['dashboard', 'schedule', 'tasks', 'leads', 'jobs', 'clients'] },
-  { section: 'Billing', keys: ['estimates', 'invoices', 'service-plans'] },
-  {
-    section: 'Operations',
-    keys: ['automations', 'pricebook', 'billing', 'reports', 'inventory', 'communication', 'marketing'],
-  },
-];
+function commBadge(count: number): string | undefined {
+  if (!count) return undefined;
+  return count > 99 ? '99+' : String(count);
+}
+
+/**
+ * The module a pathname belongs to - `/v2/leads/42` and `/v2/leads` are both
+ * `/v2/leads`. Used as the Suspense key below.
+ */
+function moduleKeyOf(pathname: string): string {
+  return pathname.split('/').slice(0, 3).join('/');
+}
+
+/**
+ * Does this route take the whole canvas - no gutter, no page chrome?
+ *
+ * Schedule, and so far only Schedule. The board IS the page there: it manages
+ * its own scrolling in two axes, so it wants every pixel and it wants the
+ * canvas not to scroll underneath it. That single fact decides two things at
+ * once, which is why they share one predicate rather than two that have to be
+ * kept in step:
+ *
+ *   - the canvas runs FLUSH (see AppShell's `flush`), and
+ *   - no breadcrumb row is drawn, since it would be the only chrome between
+ *     the top bar and the grid, costing a row of hours to say what the
+ *     highlighted sidebar entry already says.
+ *
+ * Schedule still RECORDS itself, so passing through it leaves a step in
+ * everyone else's trail; it just does not draw one of its own.
+ */
+function isFullCanvasPage(pathname: string): boolean {
+  return /^\/schedule(\/|$)/i.test(pathname);
+}
+
+/** Shown in the canvas while an incoming page's chunk loads. */
+function PageLoading() {
+  return (
+    <div role="status" aria-live="polite" className="flex items-center justify-center py-24">
+      <Spinner />
+      <span className="sr-only">Loading page</span>
+    </div>
+  );
+}
 
 /**
  * The v2 chrome: the CRM UI kit's shell, wired to the real app.
@@ -82,19 +126,41 @@ const NAV_SECTIONS: { section: string; keys: readonly string[] }[] = [
 export default function V2AppLayout() {
   const ability = useAppAbility();
   const navigate = useNavigate();
-  const location = useLocation();
+  const { pathname } = useLocation();
   const requestLeave = useSettingsGuard((s) => s.requestLeave);
 
   const user = useAuthStore((s) => s.user);
-  const orgId = user?.organization_id;
-  const orgFeatures = useOrgFeatures();
-  const entitlementsReady = useEntitlementsReady();
-  const isDemoOrg = useIsDemoOrg();
-  const { keys } = useNavLayout();
+  const logout = useAuthStore((s) => s.logout);
 
   const openAiCenter = useAiCenterStore((s) => s.openModal);
   const openCopilot = useCopilotStore((s) => s.setOpen);
-  const { data: unread } = useUnreadCount();
+
+  // Per-channel unread counts for the comms shortcuts, and the entitlement that
+  // decides whether those shortcuts exist at all. `phone` is the master switch
+  // for the entire Communication module, so an org without it must not be shown
+  // an inbox it cannot open - the legacy header hides them for the same reason.
+  const unread = useUnreadCounts();
+  const canAccessComm = useFeature('phone');
+
+  // Load THIS user's breadcrumb trail out of localStorage, and reload it if the
+  // signed-in user changes without a page load. Done here rather than at the
+  // store's module scope because that module is pulled in by page chunks that
+  // can evaluate before auth has a user, which would read no key and cache an
+  // empty trail for the session.
+  const hydrateNavHistory = useNavHistory((s) => s.hydrate);
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    hydrateNavHistory(userId);
+  }, [hydrateNavHistory, userId]);
+
+  // The safety net under the trail: any v2 page that did not record itself gets
+  // recorded here under a name derived from its path. A page's own effects run
+  // before this one, so a page that DID record keeps its better label and this
+  // is a no-op. See `visitFallback`.
+  const visitFallback = useNavHistory((s) => s.visitFallback);
+  useEffect(() => {
+    visitFallback(pathname, fallbackLabelFor(pathname));
+  }, [visitFallback, pathname]);
 
   // Hydrate org-aware currency/date formatting once the organization loads, so
   // the central formatters honour the org's configured currency + date_format.
@@ -117,86 +183,49 @@ export default function V2AppLayout() {
     requestLeave(() => navigate(href));
   };
 
-  const isActive = (href: string) =>
-    href === '/'
-      ? location.pathname === '/'
-      : location.pathname === href || location.pathname.startsWith(`${href}/`);
-
-  /** Locked on either axis: an entitlement the org lacks, or a demo-only
-      surface in a real org. Gated on entitlementsReady so a cold cache cannot
-      grey out every module on first paint - same reasoning as useFeature
-      failing open. */
-  const access: NavAccess = {
-    can: (action, subject) => ability.can(action, subject),
-    orgFeatures,
-    entitlementsReady,
-    isDemoOrg,
-  };
-
-  const lockOf = (dest: NavDestination) => {
-    const featureLocked = !hasNavFeature(dest.feature, access);
-    const demoLocked = !!dest.demoOnly && !isDemoOrg && !isDemoDestUnlockedForOrg(dest, orgId);
-    if (!featureLocked && !demoLocked) return null;
-    // Only a PLAN lock may name a plan. A demo-only row that the org is fully
-    // entitled to (WhatsApp on a Pro org) would otherwise be badged "Pro" and
-    // read as an upsell for something already paid for.
-    if (!featureLocked) return 'Soon';
-    return PLAN_LABELS[requiredPlanFor(dest.feature) ?? ''] ?? 'Soon';
-  };
-
-  // Resolve the user's pinned keys to destinations, CASL-filter, then bucket
-  // them by section keeping the user's order. Anything unclaimed lands in the
-  // last section rather than vanishing.
-  const visible = keys
-    .map((key) => ({ key, dest: getDestination(key) }))
-    .filter((x): x is { key: string; dest: NavDestination } =>
-      !!x.dest && ability.can(x.dest.action, x.dest.subject));
-
-  const claimed = new Set(NAV_SECTIONS.flatMap((s) => s.keys));
-  const sections = NAV_SECTIONS.map((section, index) => ({
-    section: section.section,
-    items: visible
-      .filter(({ key }) =>
-        section.keys.includes(key) ||
-        (index === NAV_SECTIONS.length - 1 && !claimed.has(key)))
-      // A destination with `children` (Inventory, Communication) is an
-      // expandable group in the legacy sidebar. The kit's nav has no
-      // disclosure control - it groups under headings and keeps every row
-      // flat - so the children are lifted to siblings rather than inventing
-      // an affordance the design does not have. The parent is itself a
-      // destination, so it stays and simply leads its own children.
-      //
-      // Each child is gated on its own ability AND its own entitlement, exactly
-      // as the parent is; lifting a row must not lift its gates with it.
-      // The parent also lands on its first REACHABLE child rather than its
-      // declared href, which is a dead link for an org entitled to only some of
-      // the group (email but not phone).
-      .flatMap(({ key, dest }) => [
-        { key, dest: { ...dest, href: resolveNavHref(dest, access) } },
-        ...visibleNavChildren(dest, access).map((child) => ({
-          key: child.key,
-          dest: { ...child, home: dest.home } as NavDestination,
-        })),
-      ])
-      // Deduplicate by destination. Some children repeat a row that already
-      // exists at the top level - Price Book is both its own entry and an
-      // Inventory child - and nesting hid that. Flattened, it renders twice.
-      .filter((item, i, all) => all.findIndex((x) => x.dest.href === item.dest.href) === i),
-  })).filter((section) => section.items.length > 0);
-
   const displayName = user ? `${user.first_name} ${user.last_name}`.trim() : 'Account';
-  const unreadCount = unread?.unseen ?? 0;
+
+  // The organisation's own identity, sourced and defaulted exactly as
+  // `components/layout/Header.tsx` does it:
+  //
+  //   const title = org?.name ?? '';
+  //   alt={org?.name ? `${org.name} logo` : 'Company logo'}
+  //
+  // so a shell with no organisation loaded shows no name (rather than a
+  // placeholder), and a logo with no name behind it is still announced.
+  const orgName = organization?.name ?? '';
+  const orgLogoAlt = orgName ? `${orgName} logo` : 'Company logo';
 
   return (
     <TooltipProvider delayDuration={200}>
       <AppShell
+        // Schedule takes the whole canvas: no gutter, no page scroll. Same
+        // route test the breadcrumb uses, and for the same reason - the board
+        // is the page there.
+        flush={isFullCanvasPage(pathname)}
         topbar={
           <TopBar>
             <TopBarBrand asChild mark={<ServWaveMark />} label="ServWave">
-              <Link to="/v2" aria-label="ServWave home" onClick={guardNavigation('/v2')} />
+              <Link to="/" aria-label="ServWave home" onClick={guardNavigation('/')} />
             </TopBarBrand>
 
-            <TopBarSearch placeholder="Search everything..." />
+            {/* Which organisation you are signed in to. The legacy header makes
+                this the bar's title; the kit's bar reserves the gap right of
+                the brand for it. Rendered only when there is a name, matching
+                the legacy `org?.name ?? ''` - an empty title there occupies no
+                space either. */}
+            {orgName && <TopBarWorkspace name={orgName} />}
+
+            {/* The kit's TopBarSearch is presentation only - an input, an icon
+                and a shortcut hint, wired to nothing. The app's search has a
+                debounce, a query, a grouped result list, keyboard navigation
+                and the settings-guard on select, none of which the kit ships.
+                Positioned with the same rule the kit's own field uses:
+                margin-left auto, capped at 320px. */}
+            <GlobalSearch
+              className="ml-auto w-full min-w-0 max-w-[320px]"
+              placeholder="Search everything..."
+            />
 
             <TopBarActions>
               <TopBarPill onClick={() => openCopilot(true)} aria-label="Open Servy, the AI copilot">
@@ -204,75 +233,169 @@ export default function V2AppLayout() {
                 Servy
               </TopBarPill>
               <TopBarDivider />
-              <TopBarAction label="Help and support"><HelpCircle /></TopBarAction>
-              <TopBarAction label="Text messages"><MessageSquare /></TopBarAction>
-              <TopBarAction label="WhatsApp"><MessageCircle /></TopBarAction>
-              <TopBarAction label="Inbox"><Mail /></TopBarAction>
-              <TopBarAction label="Open dialer"><Phone /></TopBarAction>
-              {ability.can('read', 'AiCenter') && (
-                <TopBarAction label="AI Agentic Farm" onClick={() => openAiCenter()}>
-                  <Sparkles />
-                </TopBarAction>
+
+              {/* Comms shortcuts. Gated on the `phone` entitlement, exactly as
+                  the legacy header gates them: `phone` is the master switch for
+                  the whole Communication module, so without it these two lead
+                  to routes the org cannot open. They previously rendered here
+                  unconditionally and inert, which showed every org an inbox it
+                  had no access to.
+
+                  Counts are per channel, not the notification count - an inbox
+                  badge that moved when an unrelated notification arrived would
+                  be actively misleading.
+
+                  WhatsApp is deliberately NOT one of them: the row is down to
+                  the two channels this bar shortcuts to, and WhatsApp is still
+                  reachable from the Communication section in the sidebar. */}
+              {canAccessComm && (
+                <>
+                  <TopBarAction
+                    label="Text messages"
+                    badge={commBadge(unread.sms)}
+                    onClick={() => requestLeave(() => navigate(preferV2Path('/communication/phone')))}
+                  >
+                    <MessageSquare />
+                  </TopBarAction>
+                  <TopBarAction
+                    label="Inbox"
+                    badge={commBadge(unread.email)}
+                    onClick={() => requestLeave(() => navigate(preferV2Path('/communication/inbox')))}
+                  >
+                    <Mail />
+                  </TopBarAction>
+
+                  {/* Click-to-call from any page. Renders its own trigger and
+                      call surface; the kit has no dialer to replace it with. */}
+                  <GlobalDialer />
+                </>
               )}
+
+              {/* The AI Agentic Farm launcher lives in the sidebar footer, and
+                  only there. Two entry points to one modal made the sparkle in
+                  this row read as a second, different feature. */}
               <TopBarDivider />
-              <TopBarAction
-                label="Notifications"
-                badge={unreadCount > 0 ? (unreadCount > 99 ? '99+' : unreadCount) : undefined}
-              >
-                <Bell />
-              </TopBarAction>
-              <TopBarUser
-                name={displayName}
-                role={user?.role}
-                initials={initialsFor(displayName)}
-                tint={tintFor(displayName)}
-              />
+
+              {/* Owns its own badge, realtime subscription, mark-seen-on-open
+                  and the panel itself, so it is mounted whole rather than
+                  reduced to the kit's icon-with-a-number. */}
+              <NotificationBell />
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  {/* `avatarSrc` puts the org's branding on the same chip the
+                      legacy header puts it on, falling back to the user's
+                      initials when there is no logo - which is what that
+                      header does too. */}
+                  <TopBarUser
+                    name={displayName}
+                    role={user?.role}
+                    initials={initialsFor(displayName)}
+                    tint={tintFor(displayName)}
+                    avatarSrc={organization?.logo_url ?? undefined}
+                    avatarAlt={orgLogoAlt}
+                  />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuLabel>
+                    <span className="block text-sm font-medium">{displayName}</span>
+                    <span className="block text-xs text-text-secondary">{user?.email}</span>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {/* Geofenced clock in/out - anchored to "me", as in the
+                      legacy header. No kit equivalent. */}
+                  <ClockInOutMenu />
+                  <DropdownMenuSeparator />
+                  {/* No "My Profile" row: Settings opens the same settings shell
+                      that carries the profile page in its own nav, so the menu
+                      offered two doors onto one destination. Settings is the
+                      one that reaches everything. */}
+                  <DropdownMenuItem
+                    onClick={() => requestLeave(() => navigate(preferV2Path('/settings/company')))}
+                  >
+                    <SettingsIcon />
+                    Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {/* `variant`, not a call-site colour class. The kit's item
+                      owns what destructive looks like; the legacy header sets
+                      text-danger here, and the layering guard counts every one
+                      of those as appearance that escaped its component. */}
+                  <DropdownMenuItem variant="destructive" onClick={() => logout()}>
+                    <LogOut />
+                    Sign Out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </TopBarActions>
           </TopBar>
         }
         sidebar={
           <Sidebar>
-            <SidebarNav>
-              {sections.map(({ section, items }, index) => (
-                <Fragment key={section}>
-                  {/* A fragment, not a wrapper element: the travelling rail
-                      measures each row's offsetTop against the nav's own box,
-                      so an extra positioned box between them would offset every
-                      measurement by the wrapper's origin. */}
-                  <SidebarGroupLabel withToggle={index === 0}>{section}</SidebarGroupLabel>
-                  {items.map(({ key, dest }) => {
-                    const lock = lockOf(dest);
-                    const Icon = dest.icon;
-                    if (lock) {
-                      return (
-                        <SidebarItem
-                          key={key}
-                          locked
-                          icon={<Icon />}
-                          label={dest.label}
-                          count={lock}
-                        />
-                      );
-                    }
-                    return (
-                      <SidebarItem
-                        key={key}
-                        asChild
-                        active={isActive(dest.href)}
-                        icon={<Icon />}
-                        label={dest.label}
-                      >
-                        <Link to={dest.href} onClick={guardNavigation(dest.href)} />
-                      </SidebarItem>
-                    );
-                  })}
-                </Fragment>
-              ))}
-            </SidebarNav>
+            {/* Create New - above the first group, so the action that makes a
+                record heads the navigation column. It is chrome, not page
+                furniture: it has to be reachable from every page, and it must
+                not sit next to the page header's own primary action or the two
+                read as duplicates of each other. */}
+            <SidebarHeader>
+              <SidebarCreateMenu />
+            </SidebarHeader>
+
+            {/* The destination list. Its own component because it resolves the
+                stored layout against the ability, the org's entitlements and
+                the section map before a single row exists - and because
+                `useNavLayout()` has to be a single instance, since the hook
+                seeds its own state from localStorage and two copies would
+                drift apart. */}
+            <V2SidebarNav />
+
+            {/* AI Agentic Farm - pinned at the bottom, exactly as the legacy
+                sidebar pins it, and behind the same `read AiCenter` grant.
+                Outside SidebarNav on purpose: the footer does not scroll with
+                the list, and the travelling rail only measures rows inside the
+                nav, so a launcher that is never a destination cannot be
+                mistaken for one. SidebarItem carries it through rail mode -
+                the label collapses and the tooltip takes over, like every
+                other row.
+
+                `emphasis="ai"` is the kit's version of the three signals the
+                legacy sidebar gives it: the footer's hairline above, the
+                lavender glyph, and a tinted surface of its own, so it does not
+                read as one more destination in a list of twenty-odd. */}
+            {ability.can('read', 'AiCenter') && (
+              <SidebarFooter>
+                <SidebarItem
+                  emphasis="ai"
+                  icon={<Sparkles />}
+                  label="AI Agentic Farm"
+                  onClick={() => openAiCenter()}
+                />
+              </SidebarFooter>
+            )}
           </Sidebar>
         }
       >
-        <Outlet />
+        {/* Every v2 page is `lazy`, and react-router runs navigation inside a
+            transition: while the incoming chunk loads, React keeps the OUTGOING
+            page on screen. The URL and the sidebar highlight have already moved
+            by then, so a chunk that takes a moment reads as "the route changed
+            but the page did not" - the single most common complaint about this
+            layer.
+
+            Keying the boundary per MODULE gives React a fresh boundary on a
+            cross-module navigation, which shows the fallback instead of the
+            stale page. It is deliberately not keyed on the full pathname: that
+            would also remount on `/leads/1` -> `/leads/2`, throwing away
+            detail-page state that survives today. */}
+        {/* The trail, drawn ONCE for every route, above whatever the route
+            renders. Outside the Suspense boundary on purpose: it is chrome, it
+            is already correct for the incoming URL, and re-mounting it with
+            each page chunk would blink it out on every cross-module move. */}
+        {!isFullCanvasPage(pathname) && <V2Breadcrumbs />}
+
+        <Suspense key={moduleKeyOf(pathname)} fallback={<PageLoading />}>
+          <Outlet />
+        </Suspense>
       </AppShell>
 
       {/* Global AI Agentic Farm modal - opened from the action bar above. */}

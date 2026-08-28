@@ -1,18 +1,20 @@
 import React, { useState } from 'react';
 import { format, isSameDay, setHours, setMinutes, addHours } from 'date-fns';
-import { AlertTriangle, MapPin, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { cn, getInitials } from '@/lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
-  isOnBoardFor, eventDangerState, isCompletedEvent, boardCardScheme, IN_FLIGHT_STATUSES,
+  isOnBoardFor, eventDangerState,
   type BoardEvent, type ScheduledBoardEvent, type EventDangerState,
 } from './scheduleModel';
+import {
+  ScheduleCardBody, scheduleCardVisual, scheduleCardPaintClass, scheduleCardOpacityStyle,
+} from './ScheduleCardBody';
 import {
   GRID_EVENT_ID, GRID_EVENT_TYPE, FROM_MEMBER,
   hasBoardDragPayload, resolveBoardDropId,
 } from './dragChannels';
-import { TagChips } from '@/components/data/TagChips';
 import { asWallClock, type WallClock } from '@/lib/schedule-tz';
 
 // ─── Types ───────────────────────────────────────────────
@@ -101,48 +103,19 @@ interface JobCardProps {
 }
 
 function JobCard({ event, fromMemberId, dangerState, onClick, onContextMenu, topPx, heightPx }: JobCardProps) {
-  const location   = event.raw.service_location as { address?: string; city?: string; state?: string } | null;
   const deviceImg  = event.raw.device_image as string | null;
   const deviceName = event.raw.device_name as string | null;
-  const status     = event.raw.status as string | undefined;
-  const isWalk     = event.type === 'walkthrough';
-  const isInProg   = IN_FLIGHT_STATUSES.has(status ?? '');
-  const isCompleted = isCompletedEvent(event);
-  // The two reds (precedence pre-resolved in eventDangerState; ghosts come back null).
-  const needsCrew    = dangerState === 'needs-crew';
-  const doubleBooked = dangerState === 'double-booked';
 
-  // Build address — for walkthroughs use lead fields, for jobs use service_location
-  let addressText = '';
-  if (isWalk) {
-    addressText = [event.raw.service_address_line1, event.raw.service_city, event.raw.service_state]
-      .filter(Boolean).join(', ');
-  } else if (location) {
-    addressText = location.address
-      ? `${location.address}, ${location.city ?? ''}`
-      : [location.city, location.state].filter(Boolean).join(', ');
-  }
-
-  // ── Color scheme ── a THREE-axis board treatment, not a status badge. Precedence is
-  // exception state first (needs crew / double booked, applied on the wrapper below and
-  // pre-resolved in eventDangerState), then completed / in-progress status, then the
-  // event-type accent. Red is reserved for the two exception states.
-  //
-  // Resolved by boardCardScheme in scheduleModel.ts, the one place this treatment is now
-  // spelled; this card previously inlined a copy byte-identical to the one in
-  // MemberWeekBoard's BoardCard, which now resolves through the same helper. See it for
-  // why this deliberately does NOT resolve through STATUS_REGISTRY: the board inverts the
-  // registry on completed and on the three in-flight statuses, and resolving per status
-  // would delete the event-type language the board legend advertises to the user.
-  const scheme = boardCardScheme(event.type, isCompleted, isInProg);
+  // Danger/status/scheme resolution and the whole inner column live in ScheduleCardBody, shared
+  // with MemberWeekBoard's BoardCard (multi-visit S0b). Only this card's wrapper and its
+  // rich-media device slot are local.
+  const visual = scheduleCardVisual(event, dangerState);
 
   const showDeviceMedia = !!deviceImg && heightPx > 140;
-  const showAddress     = !!addressText;
-  // SRVW-58 tag chips. This card - unlike the other two renderers - is absolutely
-  // positioned at a caller-supplied heightPx inside an overflow-hidden wrapper, and
-  // its inner column is flex with default flex-shrink, so unconditional extra content
-  // clips either the chips or the address above them. Same height-gating policy the
-  // showDeviceMedia line above already sets.
+  // SRVW-58 tag chips. This card - unlike the week board's - is absolutely positioned at a
+  // caller-supplied heightPx inside an overflow-hidden wrapper, and its inner column is flex
+  // with default flex-shrink, so unconditional extra content clips either the chips or the
+  // address above them. Same height-gating policy the showDeviceMedia line above already sets.
   //
   // The threshold is ROW_H - 2, not ROW_H, because durationToPixels subtracts the 2px
   // inter-card gap: a one-hour card is 94px, so `>= ROW_H` would hide chips on every
@@ -151,32 +124,27 @@ function JobCard({ event, fromMemberId, dangerState, onClick, onContextMenu, top
   // ROW_H * 0.5 - 2 = 46px.
   const showTags = (event.tags?.length ?? 0) > 0 && heightPx >= ROW_H - 2;
 
-  const isGhost = event.isGhost ?? false;
-
   return (
     <div
       className={cn(
         'absolute inset-x-1.5 rounded-lg overflow-hidden cursor-pointer',
         'transition-all duration-100',
         'hover:shadow-md hover:brightness-[0.97] active:scale-[0.99]',
-        needsCrew
-          ? 'bg-danger text-on-fill'                // red FILL — needs crew (state 4)
-          : doubleBooked
-          ? 'border-2 border-danger bg-surface-light'     // red OUTLINE — double-booked (D7)
-          : cn(scheme.bg, scheme.accent, isGhost ? 'border-l-4 border-dashed' : 'border-l-4'),
+        scheduleCardPaintClass(visual),
       )}
       style={{
         top:        topPx,
         height:     heightPx,
         zIndex:     5,
-        ...(isCompleted && { opacity: 0.5 }),
-        ...(isGhost && { opacity: 0.55 }),
+        ...scheduleCardOpacityStyle(visual),
       }}
+      // The card's identity on the board (multi-visit S6): one per VISIT, never per job.
+      data-board-id={event.boardId}
       draggable
       onDragStart={(e) => {
         // Same payload keys as MemberWeekBoard's BoardCard — incl. the from-member lane
         // marker so a cross-lane drop can swap (TG10). Codec constants only.
-        e.dataTransfer.setData(GRID_EVENT_ID, event.id);
+        e.dataTransfer.setData(GRID_EVENT_ID, event.boardId);
         e.dataTransfer.setData(GRID_EVENT_TYPE, event.type);
         e.dataTransfer.setData(FROM_MEMBER, fromMemberId);
         e.dataTransfer.effectAllowed = 'move';
@@ -187,96 +155,30 @@ function JobCard({ event, fromMemberId, dangerState, onClick, onContextMenu, top
     >
       <div className="px-2.5 py-2 h-full flex flex-col gap-1 overflow-hidden relative">
 
-        {/* Ghost draft label */}
-        {isGhost && (
-          <span className="absolute top-1 right-1.5 text-[8px] font-bold uppercase tracking-wider
-                           text-info-text/70 bg-info-surface px-1 py-0.5 rounded leading-none">
-            draft
-          </span>
-        )}
-
-        {/* Time range */}
-        <p className={cn(
-          'text-[10px] leading-none whitespace-nowrap font-medium',
-          needsCrew ? 'text-on-fill/85' : 'text-text-soft',
-        )}>
-          {format(event.start, 'h:mm a')} – {format(event.end, 'h:mm a')}
-        </p>
-
-        {/* Job number / label + badges */}
-        <div className="flex items-center gap-1 flex-wrap min-w-0">
-          <span className={cn('text-[11px] font-bold truncate leading-none', needsCrew ? 'text-on-fill' : scheme.text)}>
-            {isWalk ? 'Walkthrough' : (event.number || event.id)}
-          </span>
-          {isWalk && event.number && (
-            <span className="text-[9px] text-text-soft font-medium shrink-0 leading-none">{event.number}</span>
-          )}
-
-          {needsCrew && (
-            <span className="text-[9px] font-bold uppercase tracking-wider text-on-fill/90 shrink-0 leading-none">
-              needs crew
-            </span>
-          )}
-          {doubleBooked && (
-            <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5
-                             rounded-full bg-danger/10 text-danger shrink-0 leading-none">
-              <AlertTriangle className="h-2 w-2" /> double-booked
-            </span>
-          )}
-          {isInProg && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full
-                             bg-success-surface text-success-text shrink-0 leading-none">
-              In Progress
-            </span>
-          )}
-        </div>
-
-        {/* Title (scope-first for jobs; customer for walkthroughs — their title repeats the header) */}
-        <p className={cn(
-          'text-xs font-semibold truncate leading-tight',
-          needsCrew ? 'text-on-fill' : 'text-text-primary',
-        )}>
-          {isWalk ? event.customer : (event.title || event.customer)}
-        </p>
-        {!isWalk && event.customer && event.customer !== event.title && (
-          <p className="text-[11px] text-text-secondary truncate leading-tight">
-            {event.customer}
-          </p>
-        )}
-
-        {/* Address */}
-        {showAddress && (
-          <p className="text-[10px] text-text-secondary flex items-center gap-0.5 min-w-0 leading-none">
-            <MapPin className="h-2.5 w-2.5 shrink-0 text-text-soft" />
-            <span className="truncate">{addressText}</span>
-          </p>
-        )}
-
-        {/* Tag chips - hidden on sub-hour cards (see showTags above) */}
-        {showTags && <TagChips tags={event.tags} max={2} />}
-
-        {/* Rich-media device slot — visible when card is tall enough */}
-        {showDeviceMedia && (
-          <div className="mt-1 flex-1 flex gap-2 items-start overflow-hidden rounded-md
-                          border border-border bg-surface-light/70 px-2 py-1.5 min-h-0">
-            <img
-              src={deviceImg!}
-              alt={deviceName ?? 'Device'}
-              className="h-10 w-10 object-contain shrink-0 rounded"
-            />
-            <div className="flex flex-col justify-center min-w-0 gap-0.5">
-              {deviceName && (
-                <p className="text-[11px] font-semibold text-text-primary truncate leading-tight">
-                  {deviceName}
-                </p>
-              )}
-              <div className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-success-strong shrink-0 shadow-[0_0_4px_rgb(var(--success)/0.6)]" />
-                <span className="text-[10px] text-success-text font-medium">connected</span>
+        <ScheduleCardBody event={event} visual={visual} showTags={showTags}>
+          {/* Rich-media device slot — visible when card is tall enough */}
+          {showDeviceMedia && (
+            <div className="mt-1 flex-1 flex gap-2 items-start overflow-hidden rounded-md
+                            border border-border bg-surface-light/70 px-2 py-1.5 min-h-0">
+              <img
+                src={deviceImg!}
+                alt={deviceName ?? 'Device'}
+                className="h-10 w-10 object-contain shrink-0 rounded"
+              />
+              <div className="flex flex-col justify-center min-w-0 gap-0.5">
+                {deviceName && (
+                  <p className="text-[11px] font-semibold text-text-primary truncate leading-tight">
+                    {deviceName}
+                  </p>
+                )}
+                <div className="flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-success-strong shrink-0 shadow-[0_0_4px_rgb(var(--success)/0.6)]" />
+                  <span className="text-[10px] text-success-text font-medium">connected</span>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </ScheduleCardBody>
       </div>
     </div>
   );
@@ -395,7 +297,7 @@ function TechColumn({
       {/* Positioned job / walkthrough cards */}
       {events.map((ev) => (
         <JobCard
-          key={ev.id}
+          key={ev.boardId}
           event={ev}
           fromMemberId={tech.id}
           dangerState={eventDangerState(ev, conflictIds)}
@@ -403,7 +305,7 @@ function TechColumn({
             if (onEventClick) {
               onEventClick(ev, e.clientX, e.clientY);
             } else if (ev.type === 'job' && !ev.isGhost) {
-              onSelectJob(ev.id);
+              onSelectJob(ev.parentId);
             }
           }}
           onContextMenu={

@@ -6,6 +6,16 @@ import { tenantWhere } from '../lib/tenant';
 import { logAudit } from '../lib/audit';
 import { resolveRestrictedVan } from './inv-stock.controller';
 
+// A job stage that has reached `delivered` has had its parts collected by the
+// technician, so the location it names is a historical record and deleting that
+// location takes nothing away. Every other status - including one this build has
+// never heard of - still describes parts that are meant to be sitting there.
+// JobStage.status is a free-form String (validated only as z.string().max(50) in
+// inv-stages.controller.ts), never a Prisma enum, so this is deliberately a
+// terminal-status DENYLIST: an unrecognised status blocks the delete rather than
+// slipping past an allowlist that was written before it existed.
+const TERMINAL_STAGE_STATUSES = ['delivered'];
+
 // ─── Zod Schemas ───────────────────────────────────────
 
 export const createBranchSchema = z.object({
@@ -417,14 +427,83 @@ export async function updateLocation(req: Request, res: Response) {
 
 export async function deleteLocation(req: Request, res: Response) {
   try {
-    // deleteMany with id+org filter is atomic; only deletes within the requesting org.
-    const result = await prisma.inventoryLocation.deleteMany({
-      where: { id: req.params.id as string, ...tenantWhere(req) },
+    const id = req.params.id as string;
+    const orgId = req.user!.organization_id;
+
+    const existing = await prisma.inventoryLocation.findFirst({
+      where: { id, ...tenantWhere(req) },
     });
-    if (result.count === 0) {
+    if (!existing) {
       res.status(404).json({ error: 'Location not found' });
       return;
     }
+
+    // `stock_balances.location_id` is ON DELETE RESTRICT, so without this check a
+    // location that ever held stock raises P2003 and falls into the generic catch
+    // as an opaque 500. Only non-zero balances are real stock - zero rows are
+    // bookkeeping left behind by past movements and are cleared below.
+    const stocked = await prisma.stockBalance.count({
+      where: {
+        location_id: id,
+        ...tenantWhere(req),
+        OR: [{ on_hand: { not: 0 } }, { reserved: { not: 0 } }],
+      },
+    });
+    if (stocked > 0) {
+      res.status(409).json({
+        error: `Cannot delete: this location still holds stock for ${stocked} item(s). Transfer or zero out the stock first.`,
+      });
+      return;
+    }
+
+    // organizations.default_inventory_location_id is ON DELETE SET NULL, so the
+    // delete would silently strip the org default rather than fail. Block instead.
+    const isDefault = await prisma.organization.count({
+      where: { id: orgId, default_inventory_location_id: id },
+    });
+    if (isDefault > 0) {
+      res.status(409).json({
+        error: 'Cannot delete: this is the default inventory location for the organization. Choose a different default first.',
+      });
+      return;
+    }
+
+    // `job_stages.staged_location_id` is a bare `String? @db.Uuid` with NO Prisma
+    // relation and therefore NO foreign key, so - unlike the two checks above -
+    // nothing in the database stops this delete or even notices it. The column is
+    // read as the DESTINATION of a stock receive (inv-stages.controller.ts
+    // receiveStageLine), and the stock_balances / stock_movements location FKs
+    // ARE real, so a stage left pointing at a deleted location cannot be received
+    // against again: the write is rejected and the operator gets an opaque 500.
+    // Refuse the delete while any stage still expects its parts to be here.
+    const stagedAtLocation = await prisma.jobStage.count({
+      where: {
+        staged_location_id: id,
+        ...tenantWhere(req),
+        status: { notIn: TERMINAL_STAGE_STATUSES },
+      },
+    });
+    if (stagedAtLocation > 0) {
+      res.status(409).json({
+        error: `Cannot delete: ${stagedAtLocation} active job stage(s) still have parts staged at this location. Move them to another location first.`,
+      });
+      return;
+    }
+
+    // Clearing the zero-quantity balances in the same transaction keeps the
+    // RESTRICT constraint satisfied without leaving orphans if the delete fails.
+    // Movement history survives: its location FKs are ON DELETE SET NULL.
+    //
+    // MUST be the interactive form. Under DB_TENANT_GUARD (lib/tenant-guard.ts)
+    // `prisma` is a Proxy whose model delegates run each op in its own
+    // transaction and return a plain Promise, not a PrismaPromise. Building a
+    // batch `$transaction([...])` out of those fires both deletes eagerly and
+    // un-atomically, then throws when Prisma is handed non-PrismaPromises - the
+    // rows are gone and the caller still gets a 500.
+    await prisma.$transaction(async (tx) => {
+      await tx.stockBalance.deleteMany({ where: { location_id: id, ...tenantWhere(req) } });
+      await tx.inventoryLocation.deleteMany({ where: { id, ...tenantWhere(req) } });
+    });
 
     void logAudit({
       req,

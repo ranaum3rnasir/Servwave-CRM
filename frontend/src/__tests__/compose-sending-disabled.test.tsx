@@ -46,7 +46,7 @@ function renderCompose(sendingEnabled?: boolean) {
       onClose={noop}
       onDiscard={noop}
       onToast={noop}
-      fromAddress="alphadoors@mail.servwave.com"
+      fromAddress="northwind@mail.servwave.com"
       {...(sendingEnabled === undefined ? {} : { sendingEnabled })}
     />,
   );
@@ -113,7 +113,7 @@ describe('ComposeWindow - sending disabled', () => {
   it('still shows the real From address, which is not what the switch turns off', () => {
     renderCompose(false);
 
-    expect(screen.getByText('alphadoors@mail.servwave.com')).toBeInTheDocument();
+    expect(screen.getByText('northwind@mail.servwave.com')).toBeInTheDocument();
   });
 });
 

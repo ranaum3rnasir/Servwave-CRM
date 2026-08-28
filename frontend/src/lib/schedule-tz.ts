@@ -189,3 +189,38 @@ export function orgDayDiff(iso: string, tz: string, nowIso?: string): number {
   const today = isoToOrgDay(nowIso ?? new Date().toISOString(), tz);
   return Math.round((Date.parse(`${target}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
 }
+
+// ─── The FILTER boundary ─────────────────────────────────────────────────────
+// Rendering is not the only place a zone leaks in. A "Today" or "Last 7 days"
+// filter is a pair of instants, and `new Date().setHours(0,0,0,0)` builds them on
+// the VIEWER's clock - so the same preset selects a different set of rows for the
+// New York owner than for the Manila dispatcher, and the counts they quote each
+// other disagree. The boundaries below are the org's midnights.
+
+/** Shift an org-zone 'YYYY-MM-DD' by whole calendar days. */
+export function addOrgDays(day: string, n: number): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** The org-zone calendar day containing `at` (default now), as 'YYYY-MM-DD'. */
+export function orgToday(tz: string, at: Date = new Date()): string {
+  return isoToOrgDay(at.toISOString(), tz);
+}
+
+/**
+ * The instant an org-zone calendar day begins. Note this is NOT always midnight
+ * local: on a spring-forward day in a zone that skips 00:00 (e.g. America/Santiago)
+ * the day starts at 01:00, and date-fns-tz resolves that for us.
+ */
+export function orgDayStart(day: string, tz: string): Date {
+  return new Date(pickerValueToIso(day, tz) as string);
+}
+
+/**
+ * The last representable instant of an org-zone calendar day - the start of the NEXT
+ * day, minus a millisecond. Derived rather than hardcoded to 23:59:59.999 because a
+ * DST day is 23 or 25 hours long, so "start + 24h - 1ms" would over- or under-shoot.
+ */
+export function orgDayEnd(day: string, tz: string): Date {
+  return new Date(orgDayStart(addOrgDays(day, 1), tz).getTime() - 1);
+}

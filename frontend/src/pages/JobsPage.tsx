@@ -34,6 +34,7 @@ import { useAppAbility } from '@/contexts/AbilityContext';
 import { canOnJob } from '@/lib/ability';
 import { toCSV, downloadCSV } from '@/lib/inventory/csv';
 import { startOfMonthDay, endOfMonthDay } from '@/lib/date-range';
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 import { toast } from '@/components/ui/use-toast';
 import { useAssignableUsers } from '@/lib/api/users';
 import { useJobSubStatuses } from '@/lib/api/jobSubStatuses';
@@ -58,6 +59,9 @@ interface JobListItem {
   status: string;
   // SRVW-112 - rendered inside the existing Status cell, not as a new column.
   sub_status?: { id: string; label: string } | null;
+  // S8 (RATIFIED, A5): DERIVED - the backend computes this off `job.visits[]` (next upcoming
+  // live visit, falling back to the earliest non-cancelled one) rather than storing it. New code
+  // should read `job.visits[]` directly; kept here for this list's existing Scheduled column.
   scheduled_start: string | null;
   created_at: string;
   customer: { id: string; first_name: string; last_name: string; company_name: string | null; customer_number?: string | null };
@@ -210,7 +214,7 @@ export default function JobsPage() {
   // Generalized filter registry (Task 11, extended): status, assigned_to,
   // department_id, scheduled (dateRange), created (dateRange), needs_invoice
   // (1-option multi) — all URL-driven via `jobsRegistry`. Deep links like
-  // `?status=UNASSIGNED&status=SCHEDULED` or `?needs_invoice=true` (e.g. the
+  // `?status=UNSCHEDULED&status=SCHEDULED` or `?needs_invoice=true` (e.g. the
   // Customers "Active Jobs" KPI, or the Invoices "To Be Invoiced" KPI —
   // bug #21) are decoded automatically on mount by `useFilterState`,
   // replacing the old page's manual `searchParams.get` seeding.
@@ -224,9 +228,14 @@ export default function JobsPage() {
   const queryClient = useQueryClient();
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
-  // Current-month bounds for the monthly Completed/Cancelled tiles.
-  const monthStart = useMemo(() => startOfMonthDay(), []);
-  const monthEnd = useMemo(() => endOfMonthDay(), []);
+  // Current-month bounds for the monthly Completed/Cancelled tiles. These feed
+  // the "scheduled" facet (job.controller's scheduled_after/scheduled_before) -
+  // a scheduling fact, not a "when was this row made" one - so #1634 puts them
+  // on the ORG's month, matching the Filter popover's "scheduled" preset (see
+  // filterPopover.tsx's DateFacet) rather than the browser's.
+  const scheduleTz = useScheduleTimezone();
+  const monthStart = useMemo(() => startOfMonthDay(scheduleTz), [scheduleTz]);
+  const monthEnd = useMemo(() => endOfMonthDay(scheduleTz), [scheduleTz]);
 
   // Roster for the "Assigned To" filter — assignable-role users unioned with anyone
   // actually referenced on a job, so a genuinely-assigned non-technician isn't dropped.
@@ -251,7 +260,7 @@ export default function JobsPage() {
   // Resolved option lists for the registry's dynamic `optionSource` facets.
   // Memoized on the underlying query data (stable react-query reference, not
   // re-derived into a fresh array identity every render) per the registry-
-  // stability contract. NO `{value:'UNASSIGNED', label:'Unassigned'}`
+  // stability contract. NO `{value:'UNSCHEDULED', label:'Unassigned'}`
   // sentinel here — see jobsRegistry.ts's Correction-C comment.
   const assignedToOptions = useMemo<FacetOption[]>(
     () => techs.map((t) => ({ value: t.id, label: `${t.first_name} ${t.last_name}`.trim() })),
@@ -571,7 +580,7 @@ export default function JobsPage() {
       <KpiStrip
         loading={isLoading}
         items={[
-          { icon: AlertCircle, label: 'Unscheduled', value: stats?.unassigned ?? 0, tone: 'warning', emphasize: (stats?.unassigned ?? 0) > 0, active: activeStatusKpi === 'UNASSIGNED', onClick: () => handleStatusKpi('UNASSIGNED') },
+          { icon: AlertCircle, label: 'Unscheduled', value: stats?.unassigned ?? 0, tone: 'warning', emphasize: (stats?.unassigned ?? 0) > 0, active: activeStatusKpi === 'UNSCHEDULED', onClick: () => handleStatusKpi('UNSCHEDULED') },
           { icon: CalendarDays, label: 'Scheduled', value: stats?.scheduled ?? 0, tone: 'primary', active: activeStatusKpi === 'SCHEDULED', onClick: () => handleStatusKpi('SCHEDULED') },
           { icon: Play, label: 'In Progress', value: stats?.in_progress ?? 0, tone: 'success', active: activeStatusKpi === 'IN_PROGRESS', onClick: () => handleStatusKpi('IN_PROGRESS') },
           { icon: CheckCircle2, label: 'Completed', value: stats?.completed ?? 0, sub: 'This month', tone: 'success', active: activeStatusKpi === 'COMPLETED', onClick: () => handleStatusKpi('COMPLETED') },

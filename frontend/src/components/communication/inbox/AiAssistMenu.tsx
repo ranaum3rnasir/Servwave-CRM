@@ -53,9 +53,9 @@ const REFINE_OPTIONS: { tone: RefineTone; label: string }[] = [
  *
  *  Nullable because a bare-address sender (a personal Gmail reply) carries no
  *  name at all - this was typed `string` and threw on `null.trim()`. The
- *  address is deliberately NOT a fallback here: "Hi info@servwave.com," is a
+ *  address is deliberately NOT a fallback here: "Hi art.nakamura@example.com," is a
  *  worse greeting than none, so the caller says "there" instead. */
-function firstNameOf(name: string | null): string {
+function firstNameOf(name: string | null | undefined): string {
   const trimmed = (name ?? "").trim();
   return trimmed.split(/\s+/)[0] || trimmed;
 }

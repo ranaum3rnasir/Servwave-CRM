@@ -14,6 +14,7 @@ export interface UseScheduleDataReturn {
   walkthroughLeads: Record<string, unknown>[] | undefined;
   unassignedJobs: Record<string, unknown>[] | undefined;
   unscheduledWalkthroughs: Record<string, unknown>[] | undefined;
+  calendarEntries: Record<string, unknown>[] | undefined;
   jobsLoading: boolean;
   walkthroughsLoading: boolean;
   unassignedError: boolean;
@@ -41,7 +42,10 @@ export function useScheduleData({ dateRange, departmentFilter, tz }: ScheduleDat
     queryFn: async () => {
       const { data } = await api.get('/api/jobs', {
         params: {
-          status: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS', 'COMPLETED'],
+          // Multi-visit S4 (D17): EN_ROUTE and ON_SITE retired from JobStatus - they describe a
+          // TRIP. A job whose crew is on the way or on site now reads SCHEDULED or IN_PROGRESS,
+          // so the same work is still in this window.
+          status: ['SCHEDULED', 'IN_PROGRESS', 'COMPLETED'],
           scheduled_after: scheduledAfter,
           scheduled_before: scheduledBefore,
           ...(departmentFilter !== 'all' ? { department_id: departmentFilter } : {}),
@@ -71,7 +75,7 @@ export function useScheduleData({ dateRange, departmentFilter, tz }: ScheduleDat
     queryKey: ['schedule-unassigned'],
     queryFn: async () => {
       const { data } = await api.get('/api/jobs', {
-        params: { status: 'UNASSIGNED', limit: 100 },
+        params: { status: 'UNSCHEDULED', limit: 100 },
       });
       return data.jobs as Record<string, unknown>[];
     },
@@ -91,11 +95,30 @@ export function useScheduleData({ dateRange, departmentFilter, tz }: ScheduleDat
     enabled: hasLeads,
   });
 
+  // Calendar entries (slice 03) — deliberately NOT gated by useFeature: spec §4 says core
+  // scheduler for every plan tier, unlike the two lead queries above. `start_after`/
+  // `start_before` match the controller's overlap filter (calendar-entry.controller.ts list()):
+  // an entry included when `start <= start_before AND end >= start_after`, so a multi-day entry
+  // appears in every window it spans.
+  const { data: calendarEntries } = useQuery({
+    queryKey: ['schedule-calendar-entries', dateRange],
+    queryFn: async () => {
+      const { data } = await api.get('/api/calendar-entries', {
+        params: {
+          start_after: scheduledAfter,
+          start_before: scheduledBefore,
+        },
+      });
+      return data.calendar_entries as Record<string, unknown>[];
+    },
+  });
+
   return {
     scheduledJobs,
     walkthroughLeads,
     unassignedJobs,
     unscheduledWalkthroughs,
+    calendarEntries,
     jobsLoading,
     walkthroughsLoading,
     unassignedError,

@@ -1,5 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { applyFilters, equalsOrIn, relationSome } from '../filterEngine';
+
+
+// The org zone is resolved by the REAL `getOrgTimezone`, reading a stubbed `organization`
+// row - mocking the timezone module's export would not intercept `getRequestOrgTimezone`'s
+// own intra-module call to it, and would test less. `findUnique` doubles as the probe for
+// "was a database lookup made at all".
+const { findUnique } = vi.hoisted(() => ({
+  findUnique: vi.fn(async ({ where }: any) => ({
+    timezone: where.id === 'org-manila' ? 'Asia/Manila' : 'America/New_York',
+  })),
+}));
+vi.mock('../../prisma', () => ({ prisma: { organization: { findUnique } } }));
 
 function reqWith(query: Record<string, unknown>) {
   return { query } as any;
@@ -65,10 +77,75 @@ describe('filterEngine: dateRange', () => {
     await applyFilters(where, reqWith({ created_after: '2026-01-01' }), [createdFacet]);
     expect((where.created_at as any).gte).toBeInstanceOf(Date);
   });
-  it('only sets the bound that is present', async () => {
+
+  // The wire contract sends BARE org-zone days ('YYYY-MM-DD'). `new Date(day)` read those as
+  // midnight UTC, which made the inclusive "to" day an EXCLUSIVE bound at that day's START:
+  // a single-day range ("Today") was zero-width and could never match, and every longer
+  // range silently dropped its last day. The bound is now `lt` on the start of the NEXT org
+  // day, so the "to" day is genuinely included. See lib/orgDayRange.ts.
+  it('a bare "to" DAY is inclusive: lt the NEXT org day, not lte its own start', async () => {
     const where: any = {};
     await applyFilters(where, reqWith({ created_before: '2026-02-01' }), [createdFacet]);
-    expect(where.created_at).toEqual({ lte: new Date('2026-02-01') });
+    // Default org zone is America/New_York (UTC-5 in February).
+    expect(where.created_at).toEqual({ lt: new Date('2026-02-02T05:00:00.000Z') });
+  });
+
+  it('a single-day range is a full org day, so a "Today" filter can actually match', async () => {
+    const where: any = {};
+    await applyFilters(
+      where,
+      reqWith({ created_after: '2026-08-24', created_before: '2026-08-24' }),
+      [createdFacet],
+    );
+    expect(where.created_at).toEqual({
+      gte: new Date('2026-08-24T04:00:00.000Z'),
+      lt: new Date('2026-08-25T04:00:00.000Z'),
+    });
+  });
+
+  it('anchors bare days on the ORG zone, not UTC and not the server clock', async () => {
+    const where: any = {};
+    await applyFilters(
+      where,
+      { query: { created_after: '2026-08-24' }, user: { organization_id: 'org-manila' } } as any,
+      [createdFacet],
+    );
+    // Manila is UTC+8, so the org day begins on the PREVIOUS UTC day.
+    expect(where.created_at).toEqual({ gte: new Date('2026-08-23T16:00:00.000Z') });
+  });
+
+  it('leaves a full ISO instant on the OLD gte/lte semantics — the schedule board path', async () => {
+    const where: any = {};
+    const after = '2026-08-24T04:00:00.000Z';
+    const before = '2026-08-25T03:59:59.999Z';
+    await applyFilters(where, reqWith({ created_after: after, created_before: before }), [createdFacet]);
+    expect(where.created_at).toEqual({ gte: new Date(after), lte: new Date(before) });
+  });
+
+  it('does not hit the database to resolve a zone it cannot use', async () => {
+    findUnique.mockClear();
+    const where: any = {};
+    await applyFilters(
+      where,
+      { query: { created_after: '2026-08-24T04:00:00.000Z' }, user: { organization_id: 'org-manila' } } as any,
+      [createdFacet],
+    );
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('resolves the org zone ONCE for several dateRange facets on one request', async () => {
+    findUnique.mockClear();
+    const dueFacet = {
+      key: 'due', kind: 'dateRange' as const,
+      afterParam: 'due_after', beforeParam: 'due_before', column: 'due_date',
+    };
+    const where: any = {};
+    await applyFilters(
+      where,
+      { query: { created_after: '2026-08-24', due_before: '2026-08-31' }, user: { organization_id: 'org-manila' } } as any,
+      [createdFacet, dueFacet],
+    );
+    expect(findUnique).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { customerSchema } from '@/pages/CustomerFormPage';
+import { customerSchema } from '@/lib/customers/customerSchema';
 
 // Minimal valid base: a person with a first name and a phone.
 // account_type defaults to 'individual' via the schema itself.

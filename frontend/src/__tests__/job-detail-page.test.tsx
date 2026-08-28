@@ -3,7 +3,7 @@ import { screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { buildAbility } from '@/lib/ability';
 
 // Capture the entity prop passed to JobLeadTasksTab to assert UUID correctness
@@ -50,7 +50,7 @@ const mockApi = vi.mocked(api);
 const BASE_JOB = {
   id: 'j0000000-0000-0000-0000-000000000001',
   job_number: 'J00001',
-  status: 'UNASSIGNED',
+  status: 'UNSCHEDULED',
   scope_notes: null,
   estimated_duration: null,
   completion_notes: null,
@@ -103,45 +103,24 @@ beforeEach(() => {
 // className handed straight to `TabsContent` itself - see this page's own
 // comment above its `TabStrip` call for why that distinction is load-bearing
 // for `layering-guard.test.ts`).
-describe('JobDetailPage tab strip - TabStrip rendered contract', () => {
-  const cls = (el: Element | null) => el?.getAttribute('class') ?? '';
-
-  it('renders the outer card, TabsList, underline triggers and the content-tint wrapper', async () => {
-    mockJob({ status: 'UNASSIGNED' });
-    renderWithProviders(<JobDetailPage />, { ability: adminAbility });
-
-    const list = await screen.findByRole('tablist');
-    expect(cls(list)).toBe('flex items-center gap-[26px] border-b border-border');
-
-    // TabStrip's own Tabs root is a direct child of the outer card div, carrying no className.
-    const tabsRoot = list.parentElement as HTMLElement;
-    expect(cls(tabsRoot)).toBe('');
-    const cardWrapper = tabsRoot.parentElement as HTMLElement;
-    expect(cls(cardWrapper)).toBe('rounded-card border border-border bg-surface-light shadow-card');
-
-    const overviewTab = screen.getByRole('tab', { name: 'Overview' });
-    expect(cls(overviewTab)).toBe(
-      'inline-flex items-center justify-center whitespace-nowrap transition-colors ' +
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ' +
-        'focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 relative ' +
-        'border-b-[3px] border-transparent text-sm font-medium text-text-secondary ' +
-        'hover:text-text-primary data-[state=active]:border-primary data-[state=active]:text-primary ' +
-        'data-[state=active]:font-semibold px-5 py-3'
-    );
-
-    // The content-tint wrapper is the Tabs root's other direct child (TabsList's sibling),
-    // and the visible panel is nested inside it.
-    const overviewPanel = await screen.findByText('Details');
-    const contentWrapper = overviewPanel.closest('.rounded-b-card') as HTMLElement;
-    expect(contentWrapper).not.toBeNull();
-    expect(cls(contentWrapper)).toBe('rounded-b-card bg-primary-subtle/50');
-    expect(contentWrapper.parentElement).toBe(tabsRoot);
-  });
-});
+/*
+ * The "TabStrip rendered contract" case that stood here pinned the exact class
+ * string of every node in the strip - `gap-[26px]`, `border-border`,
+ * `bg-surface-light`, `data-[state=active]:border-primary`, and the
+ * `rounded-b-card bg-primary-subtle/50` tint wrapper. Every one of those is a
+ * token of the Charcoal/Inter design system, and the routed page's strip is
+ * `pages/v2/_shared/tabs.tsx` under Calm Intelligence 2.0: a different
+ * component, different tokens, and native `aria-selected` in place of Radix's
+ * `data-[state]`. Rewriting the literals would just re-pin the new system's
+ * classes from a job-page test, which is where the pin should never have lived.
+ * The strip's own selection contract is covered by
+ * `pages/v2/_shared/__tests__/tabs.test.tsx`, and the job page's use of it is
+ * covered by every case below that finds a tab by role and clicks it.
+ */
 
 describe('JobDetailPage — schedule action (bug #44, #583 consolidated menu)', () => {
-  it('surfaces "Schedule Job" as an Actions menu item for an UNASSIGNED job', async () => {
-    mockJob({ status: 'UNASSIGNED', scheduled_start: null });
+  it('surfaces "Schedule Job" as an Actions menu item for an UNSCHEDULED job', async () => {
+    mockJob({ status: 'UNSCHEDULED', scheduled_start: null });
 
     // Task 8 (Spec A): getAvailableActions is ability-driven now, not role-string-driven —
     // an explicit ability is required or every action-gated control disappears.
@@ -192,14 +171,17 @@ describe('JobDetailPage — schedule action (bug #44, #583 consolidated menu)', 
     // TZ=Asia/Manila. The org here is unmocked, so the dialog falls back to
     // DEFAULT_SCHEDULE_TIMEZONE (America/New_York), where 09:00Z in February (EST) is 4:00 AM.
     // Hard-coded rather than computed: a literal cannot drift back into the viewer's zone.
+    // Start date / start time / end date / end time - the same four fields the
+    // scheduler board now asks for, with no Duration control on either surface.
     const dateFields = await screen.findAllByPlaceholderText('MM/DD/YYYY');
     expect(dateFields.map((f) => (f as HTMLInputElement).value)).toEqual(['02/10/2026', '02/10/2026']);
     const timeFields = screen.getAllByPlaceholderText('Time');
     expect(timeFields.map((f) => (f as HTMLInputElement).value)).toEqual(['4:00 AM', '6:00 AM']);
+    expect(screen.queryByLabelText('Duration')).not.toBeInTheDocument();
   });
 
   it('opens the assign/reschedule dialog when the Schedule KPI card is clicked (#583 AC4)', async () => {
-    mockJob({ status: 'UNASSIGNED', scheduled_start: null });
+    mockJob({ status: 'UNSCHEDULED', scheduled_start: null });
 
     renderWithProviders(<JobDetailPage />, { ability: adminAbility });
 
@@ -363,7 +345,7 @@ describe('JobDetailPage — Items tab: Scope of Work + Internal Costs (Batch 3)'
     });
 
     it('offers neither on a job the technician is only assigned to - the API would refuse', async () => {
-      await openItemsTab('99555555-0224-9999-9999-995555550224');
+      await openItemsTab('99999999-9999-9999-9999-999999999999');
       // Absent, not disabled - house convention.
       expect(screen.queryByRole('button', { name: /add item/i })).toBeNull();
       expect(screen.queryByRole('button', { name: /remove compressor swap/i })).toBeNull();
@@ -448,53 +430,35 @@ describe('JobDetailPage — Items tab: editable tax + discount (job-owns-tax-dis
     mockApi.patch.mockResolvedValue({ data: { job } });
   }
 
-  it('sends tax_rate when a jurisdiction is picked from the Items tab', async () => {
+  /*
+   * The two cases that stood here drove an editable jurisdiction select and an
+   * editable discount field on the Items tab and asserted the PATCH each one
+   * sent. Neither control exists on the routed page: it wires ReceiptCard
+   * WITHOUT `onTaxRateChange` or `onDiscountChange`, under a comment recording
+   * the D1/D2 decision that a job's tax and discount follow its linked estimate
+   * rather than being independently editable. So this is a deliberate change of
+   * contract, not a lost wire-up, and the cases are replaced by one that pins the
+   * new contract from the side that can actually go wrong - an ADMIN, who would
+   * have had the controls under the old rule.
+   *
+   * Worth keeping in view: the third case here, "renders the tax rate read-only
+   * when the requester cannot update the job", still passes - but only because
+   * the control is now absent for everybody. It no longer distinguishes a
+   * permitted user from a refused one, so it is folded into the case below
+   * rather than left standing as coverage it no longer provides.
+   */
+  it('offers no editable tax or discount control on the Items tab, even to an admin', async () => {
     mockEditableJob();
     renderWithProviders(<JobDetailPage />, { ability: adminAbility });
-
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole('tab', { name: /Items/i }));
-    await screen.findByText('Compressor swap');
-
-    const trigger = await screen.findByRole('combobox', { name: 'Tax jurisdiction' });
-    await user.click(trigger);
-    await user.click(await screen.findByRole('option', { name: /Texas/ }));
-
-    await waitFor(() => expect(mockApi.patch).toHaveBeenCalledWith(
-      `/api/jobs/${BASE_JOB.id}`,
-      expect.objectContaining({ tax_rate: 0.0825 }),
-    ));
-  });
-
-  it('sends discount_type/discount_value when the discount row is edited', async () => {
-    mockEditableJob();
-    renderWithProviders(<JobDetailPage />, { ability: adminAbility });
-
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole('tab', { name: /Items/i }));
-    await screen.findByText('Compressor swap');
-
-    const discountInput = await screen.findByRole('spinbutton', { name: 'Discount amount' });
-    await user.clear(discountInput);
-    await user.type(discountInput, '50');
-    await user.tab();
-
-    await waitFor(() => expect(mockApi.patch).toHaveBeenCalledWith(
-      `/api/jobs/${BASE_JOB.id}`,
-      expect.objectContaining({ discount_type: 'FIXED_AMOUNT', discount_value: 50 }),
-    ));
-  });
-
-  it('renders the tax rate read-only when the requester cannot update the job', async () => {
-    mockEditableJob();
-    const restrictedAbility = buildAbility([{ action: 'read', subject: 'Job' }, { action: 'read', subject: 'Pricing' }]);
-    renderWithProviders(<JobDetailPage />, { ability: restrictedAbility });
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('tab', { name: /Items/i }));
     await screen.findByText('Compressor swap');
 
     expect(screen.queryByRole('combobox', { name: 'Tax jurisdiction' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('spinbutton', { name: 'Discount amount' })).not.toBeInTheDocument();
+    // And nothing on the tab PATCHes the job's tax or discount.
+    expect(mockApi.patch).not.toHaveBeenCalled();
   });
 });
 
@@ -553,9 +517,9 @@ describe('JobDetailPage — inventory stock semantics (Inventory P1)', () => {
     renderWithProviders(<JobDetailPage />, { ability: adminAbility });
 
     const user = userEvent.setup();
-    // #718 consolidated the header actions — Mark Complete now lives inside the Actions menu.
-    await user.click(await screen.findByRole('button', { name: 'Actions' }));
-    await user.click(await screen.findByRole('menuitem', { name: /Mark Complete/ }));
+    // #718 consolidated the header actions into the Actions menu; Mark Complete was pulled
+    // back out to the header afterwards - the field could not find it inside the menu.
+    await user.click(await screen.findByRole('button', { name: /Mark Complete/ }));
 
     // Never a gate: the completion POST fires regardless of any line's stock state.
     await waitFor(() => {
@@ -570,7 +534,7 @@ describe('JobDetailPage — inventory stock semantics (Inventory P1)', () => {
   });
 
   it('CancelJobDialog announces how many synced lines will be returned to stock (QA-413 copy)', async () => {
-    mockJobWithStockLines([SYNCED_LINE, SYNCED_LINE_B, UNSYNCED_LINE], { status: 'UNASSIGNED' });
+    mockJobWithStockLines([SYNCED_LINE, SYNCED_LINE_B, UNSYNCED_LINE], { status: 'UNSCHEDULED' });
 
     renderWithProviders(<JobDetailPage />, { ability: adminAbility });
 
@@ -585,7 +549,7 @@ describe('JobDetailPage — inventory stock semantics (Inventory P1)', () => {
   });
 
   it('job delete confirm gains the return sentence only when synced lines exist', async () => {
-    mockJobWithStockLines([SYNCED_LINE], { status: 'UNASSIGNED' });
+    mockJobWithStockLines([SYNCED_LINE], { status: 'UNSCHEDULED' });
 
     const first = renderWithProviders(<JobDetailPage />, { ability: adminAbility });
     const user = userEvent.setup();
@@ -593,8 +557,11 @@ describe('JobDetailPage — inventory stock semantics (Inventory P1)', () => {
     await user.click(await first.findByRole('button', { name: 'Actions' }));
     await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
 
+    // Substring, not exact: the routed page composes the stock sentence into the
+    // SAME text node as the job number ("J00042 will be permanently removed.
+    // Synced inventory items..."), where the old page rendered it alone.
     expect(
-      await screen.findByText('Synced inventory items on this job will be returned to stock.'),
+      await screen.findByText(/Synced inventory items on this job will be returned to stock\./),
     ).toBeInTheDocument();
     // Cancel — the delete never fired.
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -602,14 +569,14 @@ describe('JobDetailPage — inventory stock semantics (Inventory P1)', () => {
     first.unmount();
 
     // Control: no synced lines ⇒ no stock sentence in the confirm dialog.
-    mockJobWithStockLines([UNSYNCED_LINE], { status: 'UNASSIGNED' });
+    mockJobWithStockLines([UNSYNCED_LINE], { status: 'UNSCHEDULED' });
     renderWithProviders(<JobDetailPage />, { ability: adminAbility });
     await user.click(await screen.findByRole('button', { name: 'Actions' }));
     await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
 
     expect(await screen.findByText('Delete this job?')).toBeInTheDocument();
     expect(
-      screen.queryByText('Synced inventory items on this job will be returned to stock.'),
+      screen.queryByText(/Synced inventory items on this job will be returned to stock\./),
     ).not.toBeInTheDocument();
   });
 });
@@ -761,5 +728,24 @@ describe('JobDetailPage - masthead absorbs a linked estimate deposit exactly onc
     expect(await screen.findByText('Deposit $600.00')).toBeInTheDocument();
     expect(await screen.findByText('$400.00')).toBeInTheDocument();
     expect(await screen.findByText('60% collected')).toBeInTheDocument();
+  });
+});
+
+// Editable record IDs (2026-08-19 plan) - RecordNumberEditor wired into the header's
+// job-number render, gated on ability.can('renumber', 'Job').
+describe('JobDetailPage - record number editor gating', () => {
+  it('shows the edit affordance for a user with the renumber grant', async () => {
+    mockJob({ status: 'UNSCHEDULED' });
+    renderWithProviders(<JobDetailPage />, { ability: adminAbility });
+
+    expect(await screen.findByRole('button', { name: /edit id/i })).toBeInTheDocument();
+  });
+
+  it('hides the edit affordance for a user without the renumber grant', async () => {
+    mockJob({ status: 'UNSCHEDULED' });
+    renderWithProviders(<JobDetailPage />);
+
+    await screen.findAllByText('J00001');
+    expect(screen.queryByRole('button', { name: /edit id/i })).toBeNull();
   });
 });

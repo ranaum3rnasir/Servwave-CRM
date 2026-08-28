@@ -55,6 +55,29 @@ function KanbanBoard({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  /** The column track - the one element here that may scroll sideways. */
+  const trackRef = React.useRef<HTMLDivElement>(null);
+
+  /**
+   * Confines drag auto-scroll to the track.
+   *
+   * dnd-kit resolves scroll containers OUTERMOST FIRST (`TraversalOrder.
+   * TreeOrder`) and appends `document.scrollingElement` to that list without
+   * ever checking whether it scrolls, so a card held near the viewport edge
+   * reaches for the document and the page's own scroll container before it
+   * reaches for this track. On a shell that clips (ours does) the result is
+   * merely that nothing scrolls; on one that does not, the whole layout slides
+   * sideways under the drag. Either way the board should be the thing that
+   * decides, so it says so here.
+   *
+   * `contains` keeps each column's own vertical scroll working - the columns
+   * live inside the track.
+   */
+  const canScroll = React.useCallback(
+    (element: Element) => trackRef.current?.contains(element) ?? false,
+    [],
+  );
+
   const activeItem = items.find((item) => item.id === activeId) ?? null;
   const byColumn = React.useMemo(() => {
     const map = new Map<string, KanbanItem[]>();
@@ -107,12 +130,14 @@ function KanbanBoard({
     <DndContext
       sensors={sensors}
       collisionDetection={closestCorners}
+      autoScroll={{ canScroll }}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
       onDragCancel={() => { setActiveId(null); setOverColumn(null); }}
     >
       <div
+        ref={trackRef}
         data-slot="kanban-board"
         className={cn("flex items-start gap-2.5 overflow-x-auto pb-2.5", className)}
       >

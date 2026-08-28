@@ -30,7 +30,8 @@ import {
 // checkEntityAccess is reused too (attach-source, below) so a role's
 // visibility into a job/estimate/invoice/customer can never drift between the
 // generic Attachment surface and this one.
-import { ALLOWED_MIME_TYPES, checkEntityAccess } from './attachment.controller';
+import { ALLOWED_MIME_TYPES, ALLOWED_TYPES_LABEL, checkEntityAccess } from './attachment.controller';
+import { recordLeadOutboundContact } from '../services/lead-contact.service';
 
 // Guards a caller-supplied id before it reaches a `@db.Uuid` column. Prisma
 // raises P2023 on a malformed UUID instead of matching nothing, so a lookup
@@ -92,6 +93,13 @@ export const sendEmailSchema = z.object({
   job_id: z.string().uuid('job_id must be a valid id').optional(),
   // Attach-by-origin: a send composed from a customer page stamps that customer.
   customer_id: z.string().uuid('customer_id must be a valid id').optional(),
+  // Attach-by-origin: a send composed from a LEAD page stamps that lead. Added by spec #1751 D5
+  // for the same reason the other two exist, and because without it the email channel of the
+  // contact clock is unreachable: `Email.lead_id` had exactly two writers - the transactional
+  // mirror and the manual re-link door - so a salesperson emailing a lead by hand left a row that
+  // named no lead, and there was nothing for the clock to key on. Mirrors sendWhatsAppChatSchema's
+  // own lead_id, and is org-validated in the handler like every other attach-by-origin id.
+  lead_id: z.string().uuid('lead_id must be a valid id').optional(),
   // Traffic Cop (email slice 8b, Help Scout's pattern): the client's own
   // "I started composing at this instant" timestamp. Only meaningful on a
   // REPLY (thread_id also present) - the compose window stamps it when the
@@ -878,6 +886,34 @@ export async function sendEmail(req: Request, res: Response) {
       }
     }
 
+    // Attach-by-origin: a send composed from a lead page stamps that lead (spec #1751 D5).
+    // Resolved before anything is dispatched, so a bad id 404s having sent nothing - the same
+    // order the job and customer resolves above keep.
+    //
+    // Under the caller's OWN Lead row-scope as well as the tenant predicate, matching the SMS
+    // composer (comm-threads.controller.ts sendMessage) and the job resolve directly above: a
+    // sender must not be able to attach a message to a lead they cannot see. Unconditional-read
+    // roles get `{}` here, so dispatcher/admin are unaffected.
+    //
+    // The tenant predicate alone was not enough, and the consequence was not merely cosmetic. The
+    // attach ALSO stamps `leads.contacted_at`, which is first-touch-wins and therefore permanent,
+    // so a SALES user whose Lead grants are conditioned on OWN_LEAD could credit a colleague's
+    // lead with outreach that never happened - and no later, real outreach could correct it.
+    // A lead out of scope is indistinguishable from one that does not exist (404, never 403), the
+    // same no-existence-oracle rule the job resolve keeps.
+    let leadStamp: string | null = null;
+    if (req.body.lead_id) {
+      const lead = await prisma.lead.findUnique({
+        where: { id: req.body.lead_id, ...tenantWhere(req), ...(await scopeWhereForReq(req, 'Lead')) },
+        select: { id: true },
+      });
+      if (!lead) {
+        res.status(404).json({ error: 'Lead not found' });
+        return;
+      }
+      leadStamp = lead.id;
+    }
+
     // Multipart attachments (multer.array('files', ...), comm-email.routes.ts).
     // Sniffed BEFORE the send so a bad file 400s without ever calling Resend or
     // creating any row - a rejected attachment must leave no trace at all.
@@ -888,7 +924,7 @@ export async function sendEmail(req: Request, res: Response) {
         !sniffMatchesDeclared(file.buffer, file.mimetype, ALLOWED_MIME_TYPES)
       ) {
         res.status(400).json({
-          error: `File type not allowed: ${file.originalname}. Accepted: JPG, PNG, HEIC, MP4, PDF`,
+          error: `File type not allowed: ${file.originalname}. Accepted: ${ALLOWED_TYPES_LABEL}`,
         });
         return;
       }
@@ -1048,10 +1084,31 @@ export async function sendEmail(req: Request, res: Response) {
         // caller - never trusted from the request body.
         sent_by_user_id: req.user!.id,
         has_attachment: files.length > 0,
+        // Spec #1751 D5 - PROVENANCE. A person opened a compose window and typed this, which is
+        // precisely what the lead contact clock is meant to count. Stated outright rather than
+        // left to the column default, so the two email writers each declare what they are and
+        // neither can be read by accident of which one happened to run.
+        automated: false,
         ...(jobStamp != null && { job_id: jobStamp.job_id, job_label: jobStamp.job_label }),
         ...(req.body.customer_id != null && { customer_id: req.body.customer_id }),
+        ...(leadStamp != null && { lead_id: leadStamp }),
         organization_id: orgId,
       },
+    });
+
+    // Spec #1751 D5: a human-written outbound email to a lead marks it contacted. Read off the
+    // ROW, so the filter tests what was persisted rather than re-deriving it from the request.
+    //
+    // Awaited and unable to throw (lead-contact.service.ts). The message has already reached the
+    // customer by this point, exactly like the attachment uploads below, so failing the request
+    // over the bookkeeping would report a send that plainly happened as a failure.
+    await recordLeadOutboundContact(prisma, {
+      leadId: email.lead_id,
+      orgId: email.organization_id,
+      channel: 'email',
+      direction: email.direction,
+      automated: email.automated,
+      at: now,
     });
 
     // Email slice 8c: the sender has, by definition, already read their own

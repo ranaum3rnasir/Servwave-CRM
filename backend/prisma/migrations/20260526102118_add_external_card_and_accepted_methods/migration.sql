@@ -8,7 +8,7 @@
 -- After this migration applies, the schema accepts EXTERNAL_CARD as a
 -- PaymentMethod and every organization has an accepted_payment_methods array
 -- (defaulting to []). The next migration seeds per-org defaults and rewrites
--- B&G's existing CARD rows.
+-- Lakeside's existing CARD rows.
 
 -- AlterEnum
 ALTER TYPE "PaymentMethod" ADD VALUE 'EXTERNAL_CARD';

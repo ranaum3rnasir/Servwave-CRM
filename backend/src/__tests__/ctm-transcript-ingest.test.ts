@@ -6,12 +6,12 @@
  * (speaker-labelled text) — but ingest never captured it, so the drawer showed
  * "Transcript is still being generated." forever. The `transcription` key is a
  * URL PATH (/api/v1/…/transcription.json), never text. Completed inbound calls
- * answered on an external forwarded phone (Alpha Doors' real routing) carry no
+ * answered on an external forwarded phone (Northwind Services' real routing) carry no
  * `agent` object and used to ingest as answered_by kind 'none' → rendered
  * "No answer" for calls that were answered.
  *
  * The insight half of the same card: ingest read `a.notes` into the `summary`
- * column, but `notes` is empty on all 51 stored Alpha Doors payloads while
+ * column, but `notes` is empty on all 51 stored Northwind Services payloads while
  * CTM's own `summary` string (a real AI call summary) is populated on 6 of 34
  * `end` events - so the Calls "Insights" column could never be anything but
  * "—". CTM derives the summary from the transcript, so it arrives on the same
@@ -38,9 +38,9 @@ const p = prisma as any;
 const ORG_ID = 'org-1';
 const CALL_END = {
   sid: 'CA9001',
-  account_id: 596375,
-  caller_number: '+15555550212',
-  tracking_number: '+15555550203',
+  account_id: 500001,
+  caller_number: '+15555550199',
+  tracking_number: '+12395395911',
   direction: 'inbound',
   dial_status: 'answered',
   talk_time: 28,
@@ -69,7 +69,7 @@ describe('transcriptOf', () => {
 
   it('never treats the transcription URL path as text', () => {
     expect(
-      transcriptOf({ transcription: '/api/v1/accounts/596375/calls/4347062651/transcription.json' }),
+      transcriptOf({ transcription: '/api/v1/accounts/500001/calls/4347062651/transcription.json' }),
     ).toBeNull();
     expect(transcriptOf({ transcript: 'https://example.com/t.json' })).toBeNull();
   });
@@ -190,7 +190,7 @@ describe('summaryOf', () => {
     expect(summaryOf({ summary: 'ai summary', notes: 'manual note' })).toBe('ai summary');
   });
 
-  // Every one of the 51 real Alpha Doors payloads carries notes as "" - the
+  // Every one of the 51 real Northwind Services payloads carries notes as "" - the
   // reason the old `summary: a.notes` read could never populate the column.
   it('treats an empty notes string as absent', () => {
     expect(summaryOf({ notes: '' })).toBeNull();
@@ -298,7 +298,7 @@ describe('ingestCall — answered_by attribution', () => {
     await ingestCall(
       prisma,
       ORG_ID,
-      { ...CALL_END, direction: 'outbound', called_number: '+15555550212' },
+      { ...CALL_END, direction: 'outbound', called_number: '+15555550199' },
       'end',
     );
     expect(p.callSession.upsert.mock.calls[0][0].create.answered_by.kind).toBe('none');
@@ -354,7 +354,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       transcript_preview: 'stored text',
       summary: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({ summary: 'late insight' });
     p.callSession.updateMany.mockResolvedValue({ count: 1 });
 
@@ -364,7 +364,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ transcript: 'stored text', summary: 'late insight', turns: null });
-    expect(getCall).toHaveBeenCalledWith('596375', 'CA9001');
+    expect(getCall).toHaveBeenCalledWith('500001', 'CA9001');
     // Only the newly-found field is written; the stored transcript is not rewritten.
     const update = p.callSession.updateMany.mock.calls[0][0];
     expect(update.data).toEqual({ summary: 'late insight' });
@@ -381,7 +381,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       transcript_preview: null,
       summary: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({
       transcription_text: 'A: hi',
       summary: 'Caller asked about a shower install.',
@@ -412,7 +412,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       ctm_call_id: 'CA9001',
       transcript_preview: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({ transcription_text: 'fresh text' });
     p.callSession.updateMany.mockResolvedValue({ count: 1 });
 
@@ -422,7 +422,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ transcript: 'fresh text', summary: null, turns: null });
-    expect(getCall).toHaveBeenCalledWith('596375', 'CA9001');
+    expect(getCall).toHaveBeenCalledWith('500001', 'CA9001');
     const update = p.callSession.updateMany.mock.calls[0][0];
     expect(update.data.transcript_preview).toBe('fresh text');
     expect(update.where.id).toBe(CALL_ID);
@@ -437,9 +437,9 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       ctm_call_id: 'CA9001',
       transcript_preview: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({
-      transcription: '/api/v1/accounts/596375/calls/4347062651/transcription.json',
+      transcription: '/api/v1/accounts/500001/calls/4347062651/transcription.json',
     });
     (getCallTranscription as any).mockResolvedValue({ transcript_text: 'from the json resource' });
     p.callSession.updateMany.mockResolvedValue({ count: 1 });
@@ -451,7 +451,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ transcript: 'from the json resource', summary: null, turns: null });
     expect(getCallTranscription).toHaveBeenCalledWith(
-      '/api/v1/accounts/596375/calls/4347062651/transcription.json',
+      '/api/v1/accounts/500001/calls/4347062651/transcription.json',
     );
     const update = p.callSession.updateMany.mock.calls[0][0];
     expect(update.data.transcript_preview).toBe('from the json resource');
@@ -466,9 +466,9 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       ctm_call_id: 'CA9001',
       transcript_preview: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({
-      transcription: '/api/v1/accounts/596375/calls/4347062651/transcription.json',
+      transcription: '/api/v1/accounts/500001/calls/4347062651/transcription.json',
     });
     (getCallTranscription as any).mockResolvedValue({
       transcript_text: 'from the json resource',
@@ -496,10 +496,10 @@ describe('GET /api/communication/calls/:id/transcript', () => {
       ctm_call_id: 'CA9001',
       transcript_preview: null,
     });
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockResolvedValue({
       transcription_text: 'inline text wins',
-      transcription: '/api/v1/accounts/596375/calls/4347062651/transcription.json',
+      transcription: '/api/v1/accounts/500001/calls/4347062651/transcription.json',
     });
     // The doc has not diarized this call yet — no outline — so turns stays null.
     (getCallTranscription as any).mockResolvedValue({ transcript_text: 'ignored, flat text already won' });
@@ -512,7 +512,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ transcript: 'inline text wins', summary: null, turns: null });
     expect(getCallTranscription).toHaveBeenCalledWith(
-      '/api/v1/accounts/596375/calls/4347062651/transcription.json',
+      '/api/v1/accounts/500001/calls/4347062651/transcription.json',
     );
     expect(p.callSession.updateMany.mock.calls[0][0].data).toEqual({
       transcript_preview: 'inline text wins',
@@ -535,7 +535,7 @@ describe('GET /api/communication/calls/:id/transcript', () => {
     expect(getCall).not.toHaveBeenCalled();
 
     (isCtmConfigured as any).mockReturnValue(true);
-    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '596375' });
+    p.organization.findUnique.mockResolvedValue({ ctm_account_id: '500001' });
     (getCall as any).mockRejectedValue(new Error('ctm down'));
     res = await request(app)
       .get(`/api/communication/calls/${CALL_ID}/transcript`)

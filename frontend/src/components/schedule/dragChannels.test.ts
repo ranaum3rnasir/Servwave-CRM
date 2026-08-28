@@ -15,6 +15,12 @@ describe('parseBoardDragId (board-id → kind + entity id)', () => {
     expect(parseBoardDragId('wt-lead-1')).toEqual({ kind: 'walkthrough', entityId: 'lead-1' }));
   it('pv- prefix → plan-visit with the plan id stripped', () =>
     expect(parseBoardDragId('pv-plan-9')).toEqual({ kind: 'plan-visit', entityId: 'plan-9' }));
+  // Slice 08 - the other half of turning drag on for calendar entries (dragChannels.ts's own
+  // module comment). Before this case existed, a `ce-<uuid>` board id fell through to the bare
+  // `{ kind: 'job' }` case above, which is exactly how a dragged entry would have misrouted into
+  // PATCH /api/jobs/<uuid>/assign — draggableAccessor refused the drag instead (isDragInert).
+  it('ce- prefix → calendar-entry with the entry id stripped', () =>
+    expect(parseBoardDragId('ce-entry-42')).toEqual({ kind: 'calendar-entry', entityId: 'entry-42' }));
 });
 
 describe('resolveBoardDropId (every channel normalized to a BOARD id)', () => {

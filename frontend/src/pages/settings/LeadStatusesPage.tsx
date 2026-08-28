@@ -3,6 +3,7 @@ import { arrayMove } from '@dnd-kit/sortable';
 import { GripVertical, Star, EyeOff, Eye } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Heading } from '@/components/ui/heading';
 import { Input } from '@/components/ui/input';
 import { StatusBadge } from '@/components/data/status-badge';
 import { STATUS_REGISTRY } from '@/design-system/status-registry';
@@ -41,7 +42,10 @@ export default function LeadStatusesPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-text-primary">Lead Statuses</h2>
+        {/* `scale="lg"` because level 2 defaults to `sm`; the pair renders
+            `text-lg font-semibold text-text-primary`, byte for byte the class
+            string this h2 carried. */}
+        <Heading level={2} scale="lg">Lead Statuses</Heading>
         <p className="mt-0.5 text-sm text-text-secondary">
           Rename, reorder, or hide a lead status, and pick which one a new lead starts at. The
           underlying pipeline stages stay the same - this only changes how they're labeled and

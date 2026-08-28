@@ -61,7 +61,7 @@ export interface NavDestination {
   demoOnly?: boolean;
   /**
    * Org ids that unlock a `demoOnly` destination even though they're not demo
-   * orgs. Used by Communication to admit the Phase-0 CTM pilot (Alpha Doors)
+   * orgs. Used by Communication to admit the Phase-0 phone pilot org
    * while keeping the module locked for every other real org.
    */
   demoOnlyUnlockOrgIds?: string[];
@@ -86,7 +86,7 @@ export interface NavDestination {
  * picker so both compute the demo lock identically.
  *
  * Comm access moved to the `phone` entitlement, so `marketing` is the only
- * remaining `demoOnly` entry; its allowlist admits Alpha Doors & Security to
+ * remaining `demoOnly` entry; its allowlist admits one real org (by id) to
  * the mock Marketing Analytics screen. Also called by DemoOnlyRoute, so the
  * nav lock and the route guard always agree - an org unlocked in one but not
  * the other would click a live row straight into a redirect.
@@ -221,12 +221,12 @@ export const NAV_REGISTRY: NavDestination[] = [
       { key: 'comm-email',    label: 'Email',    icon: Mail,          href: '/communication/inbox',         action: 'read', subject: 'Communication', comingSoon: true,  feature: 'email' },
       { key: 'comm-text',     label: 'Text',     icon: MessageSquare, href: '/communication/text',          action: 'read', subject: 'Communication', comingSoon: false, feature: 'phone' },
     ] },
-  // Marketing is a mock-only screen (no /api/marketing). Alpha Doors & Security is
-  // allowlisted so the screen can be presented to them; every other real org keeps
+  // Marketing is a mock-only screen (no /api/marketing). One real org is
+  // allowlisted by id so the screen can be presented to them; every other org keeps
   // the row locked. Same org id in staging and prod. Remove the allowlist once a
   // real backend lands and the `demoOnly` flag comes off.
   { key: 'marketing',     label: 'Marketing',      icon: Megaphone,       href: '/marketing',            action: 'read',   subject: 'Report',        home: 'Page', demoOnly: true,
-    demoOnlyUnlockOrgIds: ['d40afcec-0ddf-471f-b99d-8e5f23cbdadf'] },
+    demoOnlyUnlockOrgIds: ['11111111-2222-4333-8444-555555555555'] },
   // Extra reports — pinnable via Add-shortcut, not in the default sidebar:
   { key: 'rpt-job-profit', label: 'Job Profitability',       icon: PieChart,   href: '/reports/job-profitability', action: 'read', subject: 'Report',  home: 'Reports · Finance' },
   { key: 'rpt-rep-board',  label: 'Salesperson Leaderboard', icon: Trophy,     href: '/reports/rep-leaderboard',   action: 'read', subject: 'Report',  home: 'Reports · Sales' },

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { vi } from 'vitest';
 import api from '@/lib/axios';
-import { AttachmentsTabBody } from '@/pages/JobDetailPage';
+import { AttachmentsTabBody } from '@/components/jobs/AttachmentsTabBody';
 import { JobFilesCard } from '@/components/jobs/overview/JobFilesCard';
 
 // @/lib/axios is globally mocked in src/__tests__/setup.ts

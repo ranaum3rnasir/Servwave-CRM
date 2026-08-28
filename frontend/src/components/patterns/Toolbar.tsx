@@ -23,10 +23,20 @@ import { Inline, type InlineGap } from '@/components/ui/inline';
      /><input value=... onChange=... className="rounded-md border ..." /></div>`
    inside a row also carrying assorted filter controls (a Select, a
    segmented toggle, a popover trigger) and sometimes a trailing count.
-   Real sites: `pages/inventory/InventoryPage.tsx`,
+   Sites AS MEASURED THEN, not a list of live call sites now:
+   `pages/inventory/InventoryPage.tsx`,
    `pages/inventory/PurchaseOrdersPage.tsx`,
    `pages/inventory/VendorsPage.tsx`, `pages/inventory/PriceBookPage.tsx`
-   (groups tab). The 5 `ListPageShell`-delegating pages (Customers/Estimates/
+   (groups tab). None of those four is reachable today. `App.tsx` builds its
+   whole route table from `v2Routes()`, and inventory routes to the
+   `pages/v2/inventory/` fork, so the `pages/inventory/` originals went dead
+   at that cutover. `pages/inventory/InventoryPage.tsx` has since been
+   deleted outright, once the routed page reached parity with it; the other
+   three still exist only because test files import them directly. The list
+   is kept because it records the SHAPE this component was measured against,
+   annotated rather than left stale in the same spirit as
+   switch.stories.tsx's own removed call site.
+   The 5 `ListPageShell`-delegating pages (Customers/Estimates/
    Invoices/Jobs/Leads) and `pages/reports/_shared.tsx`'s own `ReportToolbar`
    already have an equivalent path and are not this component's job.
 

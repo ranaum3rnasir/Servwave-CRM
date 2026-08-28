@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
+import { logger } from './logger';
 
 type Entity =
   | 'lead'
@@ -42,19 +43,39 @@ type EntityFields = {
    * is spliced with `Prisma.raw` — never caller input.
    */
   selfHealFilter?: string;
+  /**
+   * Gate for the entire custom-number skip/fallback path in `allocateNumber` (see the
+   * "Custom numbers" section of that function's doc comment). Only `lead` / `estimate` /
+   * `job` / `invoice` / `customer` carry the `number_is_custom` column — set `true` ONLY
+   * on those five. Every other entity leaves this absent (falsy), which keeps its
+   * `allocateNumber` behavior byte-identical to before this property existed: no new
+   * query, no reference to a column that table doesn't have. Like `selfHealFilter`, this
+   * is a literal in this closed constant, never caller input — never widen it to a
+   * request-derived boolean.
+   */
+  supportsCustomNumbers?: boolean;
 };
 
 const FIELDS: Record<Entity, EntityFields> = {
-  lead:           { next: 'lead_next_number',           prefix: 'lead_prefix',           firstIssued: 'lead_first_issued_at',           table: 'leads',           numberCol: 'lead_number' },
-  estimate:       { next: 'estimate_next_number',       prefix: 'estimate_prefix',       firstIssued: 'estimate_first_issued_at',       table: 'estimates',       numberCol: 'estimate_number' },
-  job:            { next: 'job_next_number',            prefix: 'job_prefix',            firstIssued: 'job_first_issued_at',            table: 'jobs',            numberCol: 'job_number' },
-  invoice:        { next: 'invoice_next_number',        prefix: 'invoice_prefix',        firstIssued: 'invoice_first_issued_at',        table: 'invoices',        numberCol: 'invoice_number' },
-  customer:       { next: 'customer_next_number',       prefix: 'customer_prefix',       firstIssued: 'customer_first_issued_at',       table: 'customers',       numberCol: 'customer_number' },
+  lead:           { next: 'lead_next_number',           prefix: 'lead_prefix',           firstIssued: 'lead_first_issued_at',           table: 'leads',           numberCol: 'lead_number',    supportsCustomNumbers: true },
+  estimate:       { next: 'estimate_next_number',       prefix: 'estimate_prefix',       firstIssued: 'estimate_first_issued_at',       table: 'estimates',       numberCol: 'estimate_number', supportsCustomNumbers: true },
+  job:            { next: 'job_next_number',            prefix: 'job_prefix',            firstIssued: 'job_first_issued_at',            table: 'jobs',            numberCol: 'job_number',      supportsCustomNumbers: true },
+  invoice:        { next: 'invoice_next_number',        prefix: 'invoice_prefix',        firstIssued: 'invoice_first_issued_at',        table: 'invoices',        numberCol: 'invoice_number',  supportsCustomNumbers: true },
+  customer:       { next: 'customer_next_number',       prefix: 'customer_prefix',       firstIssued: 'customer_first_issued_at',       table: 'customers',       numberCol: 'customer_number', supportsCustomNumbers: true },
   service_plan:   { next: 'service_plan_next_number',   prefix: 'service_plan_prefix',   firstIssued: 'service_plan_first_issued_at',   table: 'service_plans',   numberCol: 'service_plan_number' },
   task:           { next: 'task_next_number',           prefix: 'task_prefix',           firstIssued: 'task_first_issued_at',           table: 'tasks',           numberCol: 'task_number' },
   purchase_order: { next: 'purchase_order_next_number', prefix: 'purchase_order_prefix', firstIssued: 'purchase_order_first_issued_at', table: 'purchase_orders', numberCol: 'po_number' },
   logistic_order: { next: 'logistic_order_next_number', prefix: 'logistic_order_prefix', firstIssued: 'logistic_order_first_issued_at', table: 'logistic_orders', numberCol: 'number', selfHealFilter: 't.seq IS NULL' },
 };
+
+/**
+ * Window size for the fast-path skip query in `allocateNumber` — bounded so a single
+ * `generate_series` scan stays a fast, single-statement check, NOT because exceeding it
+ * is an error condition: when every candidate in the window is taken, the fallback tier
+ * (COALESCE(MAX(...))+1, scanning the whole table) engages instead and always succeeds.
+ * 1000 consecutive custom-number collisions in one org is already an extreme edge case.
+ */
+const SKIP_WINDOW = 1000;
 
 /**
  * Atomically allocate the next number for `entity` in `orgId`.
@@ -75,6 +96,41 @@ const FIELDS: Record<Entity, EntityFields> = {
  * stored value, so behaviour is unchanged (the max-suffix subquery is a small per-org scan;
  * fine at current scale — revisit if an entity table grows very large).
  *
+ * For `supportsCustomNumbers` entities, the self-heal ALSO excludes rows where
+ * `number_is_custom` is true: a single hand-typed number (e.g. a Workiz-imported "698637")
+ * must never drag the whole org's automatic series up into that range — the counter should
+ * only ever self-heal off numbers the allocator itself issued. This exclusion is also what
+ * keeps the self-heal's `::int` cast safe from a Postgres 22003 integer-overflow error: both
+ * this cast and the fallback tier below cast a row's trailing digit-run to `int` (max
+ * 2147483647), and an unbounded custom id (e.g. an 11+ digit hand-typed number) would raise
+ * 22003 and 500 every create in the org if such a row were included here. The real
+ * defense-in-depth — a 9-digit cap on custom numeric ids enforced at the API validation layer
+ * — ships in a later PR; excluding custom rows from THIS cast is what makes today's allocator
+ * immune regardless of when that cap lands.
+ *
+ * Custom numbers (`supportsCustomNumbers` entities only): after the counter-derived candidate
+ * is computed, a hand-typed number elsewhere in the org may already occupy it. Three tiers,
+ * cheapest first:
+ *   1. Fast path — one `generate_series` + `NOT EXISTS` query over a bounded window
+ *      (`SKIP_WINDOW`) finds the lowest free candidate at or above the counter value. This
+ *      is unconditional (not gated on "did the counter value collide") because when nothing
+ *      collides, `generate_series`'s first row IS the counter value, so it's not wasted work
+ *      in the common case.
+ *   2. Fallback — engages only if the whole window was taken (`free_n IS NULL`, an extreme
+ *      edge case). Scans the WHOLE table, custom rows included, for
+ *      `MAX(trailing digits) + 1` — a value strictly greater than every existing row's
+ *      trailing digits, so it cannot collide with anything, "free by construction". This
+ *      does NOT write back to the org's `*_next_number` counter: the resulting gap in the
+ *      raw-number series is a property of which numbers get handed out over time, not a
+ *      persisted counter jump, and the counter continues to reflect only non-custom rows via
+ *      the self-heal above on every future call. Logged at `warn` so the jump is
+ *      visible/greppable in prod.
+ *   3. Loud failure — only if the fallback derivation itself collided, which cannot happen
+ *      structurally (see above); there is deliberately no pre-check guarding this, per tier 2's
+ *      own reasoning.
+ * Entities without `supportsCustomNumbers` skip all of this and return exactly as before —
+ * same number of queries, same SQL shape.
+ *
  * Returns the formatted number string, e.g. "L00001" or "BG-0042".
  */
 export async function allocateNumber(
@@ -83,8 +139,14 @@ export async function allocateNumber(
   orgId: string,
 ): Promise<string> {
   const f = FIELDS[entity];
-  // Literal from the closed FIELDS constant, never caller input (see EntityFields.selfHealFilter).
-  const selfHealFilter = f.selfHealFilter ? Prisma.raw(`AND (${f.selfHealFilter})`) : Prisma.empty;
+  // Literal from the closed FIELDS constant, never caller input (see EntityFields.selfHealFilter
+  // and EntityFields.supportsCustomNumbers).
+  const filters: string[] = [];
+  if (f.selfHealFilter) filters.push(f.selfHealFilter);
+  if (f.supportsCustomNumbers) filters.push('NOT t.number_is_custom');
+  const selfHealFilter = filters.length
+    ? Prisma.raw(`AND (${filters.join(') AND (')})`)
+    : Prisma.empty;
   const rows = await tx.$queryRaw<Array<{ next_value: number; prefix: string; padding: number }>>`
     UPDATE organizations
     SET ${Prisma.raw(f.next)} = GREATEST(
@@ -107,7 +169,49 @@ export async function allocateNumber(
   const { next_value, prefix, padding } = rows[0];
   // next_value is post-increment; the allocated number is next_value - 1.
   const allocated = Number(next_value) - 1;
-  return `${prefix}${String(allocated).padStart(Number(padding), '0')}`;
+
+  if (!f.supportsCustomNumbers) {
+    return `${prefix}${String(allocated).padStart(Number(padding), '0')}`;
+  }
+
+  // Tier 1 — fast path. Bounded, single-statement, unconditional (see doc comment above).
+  //
+  // The `::int` on the padding parameter is load-bearing, not cosmetic: Prisma binds a plain
+  // JS number as int8, and Postgres has no `lpad(text, bigint, text)` overload, so without the
+  // cast this statement fails to plan with 42883 (`function lpad(text, bigint, unknown) does
+  // not exist`) — on EVERY allocation, for every entity that reaches this path. A mocked
+  // `$queryRaw` cannot catch that; only the real-DB test in numbering.integration.test.ts can,
+  // which is why the two custom-number cases there are not optional extras.
+  const fastRows = await tx.$queryRaw<Array<{ free_n: number | null }>>`
+    SELECT MIN(n) AS free_n
+    FROM generate_series(${allocated}::int, ${allocated + SKIP_WINDOW}::int) AS s(n)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM ${Prisma.raw(f.table)} t
+      WHERE t.organization_id = ${orgId}::uuid
+        AND t.${Prisma.raw(f.numberCol)} = ${prefix} || lpad(n::text, ${padding}::int, '0')
+    )
+  `;
+  const freeN = fastRows[0]?.free_n ?? null;
+  if (freeN !== null) {
+    return `${prefix}${String(Number(freeN)).padStart(Number(padding), '0')}`;
+  }
+
+  // Tier 2 — fallback. The whole SKIP_WINDOW was taken (extreme edge case); never a failure.
+  // Scans ALL rows (custom included, no exclusion) so the result is strictly greater than
+  // every existing row's trailing digits — free by construction. Deliberately does NOT write
+  // back to organizations.<next_col>; see doc comment above.
+  const fallbackRows = await tx.$queryRaw<Array<{ next_free: number }>>`
+    SELECT COALESCE(MAX((substring(${Prisma.raw(f.numberCol)} FROM '[0-9]+$'))::int), 0) + 1 AS next_free
+    FROM ${Prisma.raw(f.table)}
+    WHERE organization_id = ${orgId}::uuid
+  `;
+  const nextFree = Number(fallbackRows[0]?.next_free ?? allocated);
+  logger.warn('allocateNumber: fast-path skip window exhausted, fell back to full-table scan', {
+    orgId,
+    entity,
+    jumpedTo: nextFree,
+  });
+  return `${prefix}${String(nextFree).padStart(Number(padding), '0')}`;
 }
 
 // ============================================================================

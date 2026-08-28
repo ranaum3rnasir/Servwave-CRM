@@ -3,7 +3,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import JobDetailPage from '@/pages/JobDetailPage';
+import JobDetailPage from '@/pages/v2/jobs/JobDetailPage';
 import { buildAbility } from '@/lib/ability';
 
 // Task 10 (Spec A): the Payments tab trigger is now gated on ability.can('read', 'Invoice').
@@ -296,7 +296,7 @@ describe('JobDetailPage — Payments tab', () => {
 
 // The estimate-anchored job shape: the R6 conversion sets Estimate.job_id and leaves
 // jobs.estimate_id null, so the job has a paid DEPOSIT invoice and no STANDARD one. Reproduces
-// staging job 698630 (Alpha Doors & Security), which showed a paid $3,467.67 deposit in Payment
+// staging job 698630 (Northwind Services), which showed a paid $3,467.67 deposit in Payment
 // history while the Invoice card read "No invoice yet" and the masthead read "No contract yet".
 describe('JobDetailPage - job linked to its estimate via EstimateJobLink', () => {
   const LINKED_ESTIMATE = {

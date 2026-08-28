@@ -1,26 +1,44 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import { Camera, Eye, EyeOff, ImagePlus, Plus, Sparkles, Upload, X } from "lucide-react";
+import { Camera, ImagePlus, Sparkles, Upload, X } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { UploadedImage } from "@/components/ui/uploaded-image";
 import { ImageUploadError, dataUrlBytes, prepareImageUpload } from "@/lib/image-upload";
 import { FormField } from "@/components/patterns/FormField";
 import { SelectField } from "@/components/form/SelectField";
+import { CatalogSelect } from "@/components/inventory/CatalogSelect";
+import { UNITS_OF_MEASURE, UOM_SELECT_OPTIONS } from "@/components/inventory/unitsOfMeasure";
 import {
   adoptServerId,
   defaultVisibilityForKind,
+  useBranches,
+  useDeleteBrand,
+  useDeleteCategory,
+  useDeleteFinish,
+  useFinishes,
   useLocations,
+  useUpsertBranch,
+  useUpsertBrand,
+  useUpsertFinish,
+  useUpsertLocation,
+  type Branch,
   type Brand,
   type Category,
+  type Finish,
   type Item,
   type ItemKind,
   type ItemVisibility,
+  type Location,
   type Vendor,
 } from "@/lib/api/inventory";
 import { useOrganization } from "@/lib/api/organization";
 import { extractApiError } from "@/lib/utils";
 import { AddVendorDialog } from "@/components/inventory/AddVendorDialog";
 import { AddCategoryDialog } from "@/components/inventory/AddCategoryDialog";
+import { AddBrandDialog } from "@/components/inventory/AddBrandDialog";
+import { AddFinishDialog } from "@/components/inventory/AddFinishDialog";
+import { AddLocationDialog } from "@/components/inventory/AddLocationDialog";
+import { ManageCatalogDialog, type ManageEntry } from "@/components/inventory/ManageCatalogDialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -53,9 +71,13 @@ type Props = {
 
 export type NewItem = {
   sku: string;
-  /** Manufacturer part number - the UI calls it "Part Number". */
-  mpn?: string;
-  modelNumber?: string;
+  /** Manufacturer part number - the UI calls it "Part Number". `null` where
+   *  an EDIT emptied the field: the price-book PATCH copies only the keys it
+   *  receives, so an omitted key reads as "leave unchanged" and the cleared
+   *  value would come straight back. Undefined on create, where there is
+   *  nothing to clear. */
+  mpn?: string | null;
+  modelNumber?: string | null;
   name: string;
   category: string;
   /** FK id of the picked category (when it matches a known category) — lets
@@ -75,11 +97,16 @@ export type NewItem = {
    *  keeps its own `?? true` default for those. */
   taxable?: boolean;
   vendor: string;
-  /** FK id of the picked vendor (display name stays in `vendor`). */
-  vendorId?: string;
+  /** FK id of the picked vendor (display name stays in `vendor`). Same
+   *  clear-versus-omit contract as `mpn` above, except the null only travels
+   *  for a vendor the operator actually re-picked - see `form.vendorTouched`. */
+  vendorId?: string | null;
   photoUrl?: string;
   // Price Book Phase A
-  brandId?: string;
+  /** Same clear-versus-omit contract as `mpn` above. */
+  brandId?: string | null;
+  /** Same clear-versus-omit contract as `mpn` above. */
+  finishId?: string | null;
   visibility?: ItemVisibility;
   startingStock: {
     locationId: string;
@@ -89,8 +116,19 @@ export type NewItem = {
   }[];
 };
 
-const kindOpts = ["material", "service", "labor", "bundle", "fee"];
-const uomOpts = ["EA", "FT", "HR", "ROLL", "KIT", "CYL", "BX"];
+// Item Kind is two values, and unlike Brand/Finish/Unit/Location it stays a
+// fixed list on purpose: `kind === "material"` is what picks the
+// MATERIAL/SERVICE projection that estimates, jobs and invoices key on, so a
+// third kind would gain no behaviour anywhere downstream.
+//
+// `labor`, `bundle` and `fee` used to be here. All three already billed as
+// SERVICE, and the Stock > Items grid filtered bundle and fee out entirely, so
+// choosing either saved an item that then appeared nowhere. The server folds
+// the retired tokens into `service` on write (normalizeKind).
+const kindOpts: { value: ItemKind; label: string }[] = [
+  { value: "material", label: "Material" },
+  { value: "service", label: "Service" },
+];
 
 export function AddItemDialog({
   open,
@@ -110,7 +148,26 @@ export function AddItemDialog({
   // Dialog adapter manages stacking itself, so it is intentionally not wired.
   void zIndex;
   const { data: locations = [] } = useLocations();
+  const { data: branches = [] } = useBranches();
+  const { data: finishes = [] } = useFinishes();
+  const upsertFinish = useUpsertFinish();
+  const upsertBrand = useUpsertBrand();
+  const upsertLocation = useUpsertLocation();
+  const upsertBranch = useUpsertBranch();
+  // Deleting a catalog row. Only the four entities that HAVE a delete endpoint
+  // get a "Manage …" entry - vendors and locations have none, so offering it
+  // there would open a dialog that could only refuse.
+  const deleteFinish = useDeleteFinish();
+  const deleteBrand = useDeleteBrand();
+  const deleteCategory = useDeleteCategory();
   const { data: org } = useOrganization();
+  // NO local mirror of rows created from inside this dialog. An earlier version
+  // kept one so a new row would appear before the refetch landed - and that is
+  // the same duplicate-writer defect the Items grid had. Every upsert hook
+  // invalidates ['inventory'], so the refetched list ALREADY contains the row;
+  // the extra copy rendered a second identical option, and Radix then painted
+  // BOTH matching labels into the trigger. That is where the live "BOXBOX" and
+  // "Satin ChromeSatin Chrome" came from. The query is the single source.
   // SRVW-91: the starting location used to default to the fabricated "loc_wh_main",
   // which matches no real location and would 400 the thresholds endpoint's uuid check.
   const defaultLocId = org?.default_inventory_location_id ?? locations[0]?.id ?? "";
@@ -131,8 +188,20 @@ export function AddItemDialog({
     trackInventory: false,
     taxable: true,
     vendorId: "",
+    // Whether the operator has used the Vendor select in THIS opening. Vendor
+    // is the one identifier the dialog cannot seed from an id: the items API
+    // serializes only `vendor` (a NAME) on an item, never `vendor_id`, so edit
+    // recovers the id by matching that name against the vendor list. If the
+    // list has not landed yet - and the pre-fill effect does not re-run when it
+    // does - the match misses and the field seeds empty though the item does
+    // have a vendor. Nulling THAT would wipe a vendor nobody touched, so the
+    // clear only travels once the operator has actually used the select. Kept
+    // in `form` rather than beside it so the existing seed/reset writes carry
+    // it, instead of adding another setState to the pre-fill effect.
+    vendorTouched: false,
     // Price Book Phase A
     brandId: "",
+    finishId: "",
     visibility: "catalog" as ItemVisibility,
     startingLocId: "",
     startingQty: "",
@@ -141,6 +210,11 @@ export function AddItemDialog({
   });
   const [showAddVendor, setShowAddVendor] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
+  const [showAddBrand, setShowAddBrand] = useState(false);
+  const [showAddFinish, setShowAddFinish] = useState(false);
+  const [showAddLocation, setShowAddLocation] = useState(false);
+  // Which catalog the "Manage …" dialog is currently showing, or null.
+  const [managing, setManaging] = useState<null | "finish" | "brand" | "category">(null);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [photoMeta, setPhotoMeta] = useState<{ name: string; sizeKb: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -170,7 +244,9 @@ export function AddItemDialog({
         trackInventory: editItem.trackInventory ?? false,
         taxable: editItem.taxable ?? true,
         vendorId: matchedVendor?.id ?? "",
+        vendorTouched: false,
         brandId: editItem.brandId ?? "",
+        finishId: editItem.finishId ?? "",
         visibility: editItem.visibility ?? defaultVisibilityForKind(editItem.kind),
         startingLocId: "",
         startingQty: "",
@@ -260,7 +336,9 @@ export function AddItemDialog({
       trackInventory: false,
       taxable: true,
       vendorId: "",
+      vendorTouched: false,
       brandId: "",
+      finishId: "",
       visibility: "catalog",
       startingLocId: "",
       startingQty: "",
@@ -297,24 +375,16 @@ export function AddItemDialog({
   }
 
   function handleVendorChange(value: string) {
-    if (value === "__add_new__") {
-      setShowAddVendor(true);
-      return;
-    }
-    set("vendorId", value);
+    setForm((f) => ({ ...f, vendorId: value, vendorTouched: true }));
   }
 
   async function handleVendorCreated(v: Vendor) {
     const saved = adoptServerId(v, await onAddVendor(v));
-    set("vendorId", saved.id);
+    setForm((f) => ({ ...f, vendorId: saved.id, vendorTouched: true }));
     return saved;
   }
 
   function handleCategoryChange(value: string) {
-    if (value === "__add_new__") {
-      setShowAddCategory(true);
-      return;
-    }
     set("category", value);
   }
 
@@ -324,23 +394,70 @@ export function AddItemDialog({
     return saved;
   }
 
+  // ─── "+ Add new …" on the remaining entity-backed dropdowns ────────────────
+  // Each follows the vendor/category shape above: the sentinel opens a creator,
+  // and the created row's SERVER id is adopted before it is selected. Adopting
+  // matters - a locally synthesized `fin_new_*` id would reach the API and 400
+  // on its uuid check, and toPriceBookBody throws on one deliberately rather
+  // than silently dropping it (assertServerFk).
+
+  async function handleBrandCreated(b: Brand) {
+    const saved = adoptServerId(b, await upsertBrand.mutateAsync(b));
+    handleBrandChange(saved.id);
+    return saved;
+  }
+
+  async function handleFinishCreated(f: Finish) {
+    const saved = adoptServerId(f, await upsertFinish.mutateAsync(f));
+    set("finishId", saved.id);
+    return saved;
+  }
+
+
+  async function handleLocationCreated(l: Location) {
+    const saved = adoptServerId(l, await upsertLocation.mutateAsync(l));
+    set("startingLocId", saved.id);
+    return saved;
+  }
+
   async function submit() {
-    if (!form.name.trim()) return setError("Name is required.");
+    if (!form.name.trim()) return setError("Item name is required.");
+    // SKU is required now rather than silently auto-filled. The old behaviour
+    // minted one from the name on save, which meant an item could acquire a SKU
+    // nobody chose and nobody saw until it turned up on a PO. Generate is still
+    // one click away; it just has to be a click.
+    if (!form.sku.trim()) return setError("SKU is required - type one or press Generate.");
     // SRVW-91: reserve levels are stored per (item, location), so a min or max with no
     // location cannot be written at all - say so instead of dropping it silently.
     if ((form.startingMin || form.startingMax) && !startingLocId)
       return setError("Pick a location for the reserve levels.");
     const vendorName =
       vendors.find((v) => v.id === form.vendorId)?.name || "—";
-    const finalSku = form.sku.trim() || buildSuggestedSku();
+    // An emptied identifier must reach the server as an explicit null on EDIT.
+    // Omitting the key is what the PATCH handler reads as "leave unchanged", so
+    // an operator deleting a wrong part number saw it reappear on the next
+    // refetch. On CREATE there is nothing to clear, so a blank field still
+    // sends nothing rather than starting to write nulls.
+    //
+    // Keyed on isEdit rather than on "did the operator change this field", so
+    // an edit also sends null for an identifier that was ALREADY empty. That is
+    // deliberate: every one of these fields is seeded straight from the item
+    // (`editItem.mpn ?? ""`, `editItem.brandId ?? ""`, …), so an empty field on
+    // edit means the column really is empty and the null is a no-op write over
+    // a null. updateItem does no field diff and writes no audit entry, so there
+    // is nothing to be gained by tracking per-field dirtiness here, and a dirty
+    // map is one more thing to keep in sync with the form. Vendor is the single
+    // exception, and only because it is NOT seeded from an id - see below.
+    const cleared = (v: string) => v || (isEdit ? null : undefined);
+    const finalSku = form.sku.trim();
     const categoryName = form.category.trim() || "Uncategorized";
     setSaving(true);
     try {
       await onSave(
         {
           sku: finalSku,
-          mpn: form.mpn.trim() || undefined,
-          modelNumber: form.modelNumber.trim() || undefined,
+          mpn: cleared(form.mpn.trim()),
+          modelNumber: cleared(form.modelNumber.trim()),
           name: form.name.trim(),
           category: categoryName,
           categoryId: categories.find((c) => c.name === categoryName)?.id,
@@ -354,9 +471,13 @@ export function AddItemDialog({
           trackInventory: form.trackInventory,
           taxable: form.taxable,
           vendor: vendorName,
-          vendorId: form.vendorId || undefined,
+          // Unsetting the vendor clears `vendor_id` the same way, but only for
+          // an operator who actually used the select: an empty vendorId can
+          // also mean the name-match seed missed (see `form.vendorTouched`).
+          vendorId: form.vendorTouched ? cleared(form.vendorId) : form.vendorId || undefined,
           photoUrl: photoUrl ?? undefined,
-          brandId: form.brandId || undefined,
+          brandId: cleared(form.brandId),
+          finishId: cleared(form.finishId),
           visibility: form.visibility,
           startingStock:
             form.startingQty || form.startingMin || form.startingMax
@@ -390,6 +511,48 @@ export function AddItemDialog({
         )
       : null;
 
+  // One ManageCatalogDialog serves all four deletable catalogs; this picks what
+  // it is currently showing. `managing === null` still resolves to a shape so
+  // the dialog's props stay non-optional - it is closed, so the values are
+  // never read.
+  const manageConfig: {
+    title: string;
+    nounPlural: string;
+    entries: ManageEntry[];
+    onDelete: (id: string) => Promise<unknown>;
+  } = (() => {
+    switch (managing) {
+      case "finish":
+        return {
+          title: "Manage Finishes",
+          nounPlural: "finishes",
+          entries: finishes.map((f) => ({ id: f.id, label: f.name, hint: f.code })),
+          onDelete: (id: string) => deleteFinish.mutateAsync({ id }),
+        };
+      case "brand":
+        return {
+          title: "Manage Brands",
+          nounPlural: "brands",
+          entries: brands.map((b) => ({ id: b.id, label: b.name })),
+          onDelete: (id: string) => deleteBrand.mutateAsync({ id }),
+        };
+      case "category":
+        return {
+          title: "Manage Categories",
+          nounPlural: "categories",
+          entries: categories.map((c) => ({ id: c.id, label: c.name })),
+          onDelete: (id: string) => deleteCategory.mutateAsync({ id }),
+        };
+      default:
+        return {
+          title: "",
+          nounPlural: "",
+          entries: [],
+          onDelete: () => Promise.resolve(),
+        };
+    }
+  })();
+
   return (
     <Modal
       open={open}
@@ -397,7 +560,15 @@ export function AddItemDialog({
         reset();
         onClose();
       }}
-      lockEscape={showAddVendor || showAddCategory}
+      // Esc must close the nested dialog, not this one underneath it.
+      lockEscape={
+        showAddVendor ||
+        showAddCategory ||
+        showAddBrand ||
+        showAddFinish ||
+        showAddLocation ||
+        managing !== null
+      }
       title={isEdit ? `Edit Item · ${editItem!.sku}` : "Add Item to Stock"}
       subtitle={
         isEdit
@@ -427,611 +598,588 @@ export function AddItemDialog({
         </div>
       )}
 
-      <div className="grid grid-cols-12 gap-3">
-        {/* Photo upload — compact, side-by-side with first fields */}
-        <div className="col-span-3 flex flex-col gap-1">
-          {/* Caption is a bare span, not a label, and the label below it is a
-              drag/drop drop-zone (the whole zone IS the control, no visible
-              input box) - a file-drop zone, the shape FormField's own header
-              comment names as not covered by this pattern. Left raw. */}
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-secondary">
-            Photo
-          </span>
-          <label
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragOver(false);
-              void handleFiles(e.dataTransfer.files);
-            }}
-            className={[
-              "relative flex aspect-square w-full cursor-pointer items-center justify-center overflow-hidden rounded-lg border-2 border-dashed text-center transition",
-              dragOver
-                ? "border-primary bg-primary-subtle"
-                : photoUrl
-                  ? "border-success/20 bg-surface-light"
-                  : "border-border bg-background-light hover:border-primary hover:bg-primary-subtle/50",
-            ].join(" ")}
-          >
-            {photoUrl ? (
-              <>
-                <UploadedImage
-                  src={photoUrl}
-                  alt="Item preview"
-                  backdrop
-                  className="h-full w-full"
+      {/* ONE wrapper, not a fragment of bands. DialogContent is a grid with
+          `gap-4` between its direct children, so sibling bands would each be
+          pushed 16px apart and none of them could sit flush. `-mx-6` cancels
+          DialogContent's `p-6` so the bands reach the dialog edges; each band
+          puts the padding back with its own `px-6`. */}
+      <div className="-mx-6">
+        {/* ── Name band ────────────────────────────────────────────────────
+            Item Name gets the full dialog width and is the first thing on
+            screen. At the old rail width a 40-character part description
+            wrapped to two lines, which is harder to scan than one long line. */}
+        <div className="border-b border-border px-6 pb-4">
+          <div className="grid grid-cols-12 gap-3">
+            <div className="col-span-12 sm:col-span-8">
+              <FormField label="Item Name" required>
+                <Input
+                  value={form.name}
+                  onChange={(e) => set("name", e.target.value)}
+                  placeholder="e.g. Dual Run Capacitor 45/5 MFD 440V"
+                  className="h-10 px-3 text-[14.5px]"
                 />
-                {/* Raw by design: a close-X affordance overlaid on a photo
-                    thumbnail, not Button-shaped. */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    clearPhoto();
-                  }}
-                  className="absolute right-1 top-1 rounded-full bg-text-primary/70 p-1 text-on-fill hover:bg-text-primary"
-                  aria-label="Remove photo"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </>
-            ) : (
-              <div className="flex flex-col items-center gap-1 px-2 text-text-secondary">
-                <ImagePlus className="h-5 w-5 text-text-secondary" />
-                <p className="text-[10px] leading-tight">
-                  Drop image
-                  <br />
-                  or click
-                </p>
-              </div>
-            )}
-            <Input
-              ref={uploadRef}
-              type="file"
-              accept="image/*"
-              className="sr-only"
-              onChange={(e) => void handleFiles(e.target.files)}
-            />
-          </label>
-          <div className="flex gap-1">
-            {/* Raw by design (both buttons below): outline/neutral sets no
-                idle text colour and nothing in this row's ambient wrapper
-                supplies one, so converting would silently render this muted
-                text-secondary label near-black. */}
-            <button
-              type="button"
-              onClick={() => uploadRef.current?.click()}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-light px-1.5 py-1 text-[11px] font-medium text-text-secondary hover:bg-background-light"
-              title="Upload photo"
-            >
-              <Upload className="h-3 w-3 text-text-secondary" />
-              Upload
-            </button>
-            <button
-              type="button"
-              onClick={() => cameraRef.current?.click()}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-light px-1.5 py-1 text-[11px] font-medium text-text-secondary hover:bg-background-light"
-              title="Take photo (camera on mobile)"
-            >
-              <Camera className="h-3 w-3 text-primary" />
-              Camera
-            </button>
-            <Input
-              ref={cameraRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              className="sr-only"
-              onChange={(e) => void handleFiles(e.target.files)}
-            />
+              </FormField>
+            </div>
+            <div className="col-span-12 sm:col-span-4">
+              <FormField label="SKU" required>
+                {/* Render-prop: Input + the Generate button, a compound pair
+                    cloneElement can't target - fieldProps lands on the Input. */}
+                {(fieldProps) => (
+                  <div className="flex gap-1.5">
+                    <Input
+                      {...fieldProps}
+                      value={form.sku}
+                      onChange={(e) => set("sku", e.target.value.toUpperCase())}
+                      className="h-10 flex-1 px-3"
+                    />
+                    <Button variant="outline" tone="neutral" onClick={suggestSku}>
+                      Generate
+                    </Button>
+                  </div>
+                )}
+              </FormField>
+            </div>
           </div>
-          {photoMeta && (
-            <p className="truncate text-[10px] text-text-secondary">
-              ✓ {photoMeta.name}
-              <span className="ml-1 text-text-secondary">· {photoMeta.sizeKb} KB</span>
-            </p>
-          )}
         </div>
 
-        {/* Right column — compact 4-column grid for the rest */}
-        <div className="col-span-9 grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {/* SKU + Vendor */}
-          <div className="col-span-2">
-            <FormField label="SKU">
-              {/* Render-prop: Input + "Suggest" button, a compound pair
-                  cloneElement can't target - fieldProps lands on the Input. */}
-              {(fieldProps) => (
-                <div className="flex gap-1">
-                  <Input
-                    {...fieldProps}
-                    value={form.sku}
-                    onChange={(e) => set("sku", e.target.value.toUpperCase())}
-                    placeholder="Auto-generated if blank"
-                    className="flex-1 px-2.5 py-1.5"
+        {/* ── Photo rail + working fields ──────────────────────────────────
+            The rail holds what you copy off the physical part: the photo, the
+            model number and the part number. Stacks above the fields below the
+            sm breakpoint rather than squeezing to an unusable column. */}
+        <div className="grid grid-cols-1 sm:grid-cols-[248px_1fr]">
+          <aside className="flex flex-col gap-3 border-b border-border bg-background-light p-4 sm:border-b-0 sm:border-r">
+            {/* The label below is a drag/drop drop-zone - the whole zone IS the
+                control, with no visible input box. FormField's own header
+                comment names a file-drop zone as outside its pattern. */}
+            <label
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                void handleFiles(e.dataTransfer.files);
+              }}
+              className={[
+                "relative flex h-[190px] w-full cursor-pointer items-center justify-center overflow-hidden rounded-lg border border-dashed text-center transition",
+                dragOver
+                  ? "border-primary bg-primary-subtle"
+                  : photoUrl
+                    ? "border-success/20 bg-surface-light"
+                    : "border-border bg-surface-light hover:border-primary hover:bg-primary-subtle/50",
+              ].join(" ")}
+            >
+              {photoUrl ? (
+                <>
+                  <UploadedImage
+                    src={photoUrl}
+                    alt="Item preview"
+                    backdrop
+                    className="h-full w-full"
                   />
-                  {/* Raw by design: bg-background-light with a no-op hover (idle
-                      and hover states are identical) - no minted outline cell
-                      matches (outline/neutral carries bg-surface-light), and the
-                      visible "Suggest" label's idle text-secondary would also go
-                      unset under outline/neutral. */}
+                  {/* Raw by design: a close-X affordance overlaid on a photo
+                      thumbnail, not Button-shaped. */}
                   <button
                     type="button"
-                    onClick={suggestSku}
-                    title="Suggest SKU from name"
-                    className="flex items-center gap-1 rounded-md border border-border bg-background-light px-2 text-xs text-text-secondary hover:bg-background-light"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      clearPhoto();
+                    }}
+                    className="absolute right-1 top-1 rounded-full bg-text-primary/70 p-1 text-on-fill hover:bg-text-primary"
+                    aria-label="Remove photo"
                   >
-                    <Sparkles className="h-3 w-3 text-primary" />
-                    Suggest
+                    <X className="h-3 w-3" />
                   </button>
+                </>
+              ) : (
+                <div className="flex flex-col items-center gap-1.5 px-2 text-text-secondary">
+                  <ImagePlus className="h-5 w-5 text-text-secondary" />
+                  <p className="text-[11px] leading-tight">Drop image or click</p>
                 </div>
               )}
-            </FormField>
-          </div>
-          {/* SelectField's Radix Select ROOT forwards no id to its trigger -
-              a known gap (FormField.tsx's header comment). Kept as
-              SelectField, not a raw Select/SelectTrigger: the layering guard
-              resolves literal/local-const classNames, and this control's
-              hard/soft classes would redden the ratchet if handed straight
-              to SelectTrigger (a components/ui export) instead of through
-              SelectField, which the guard does not govern. render-prop is
-              still needed here (not cloneElement) for the "add vendor"
-              button + conditional preview block sitting alongside the
-              Select - fieldProps go unused since SelectField has nowhere to
-              receive them. */}
-          <div className="col-span-2">
-            <FormField label="Vendor / Source">
-              {() => (
-                <>
-                  <div className="flex min-w-0 gap-1">
-                    <SelectField
-                      aria-label="Vendor / Source"
-                      value={form.vendorId || "NONE"}
-                      onValueChange={(v) => handleVendorChange(v === "NONE" ? "" : v)}
-                      className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-                      options={[
-                        { value: "NONE", label: "Select vendor…" },
-                        ...vendors.map((v) => ({
-                          value: v.id,
-                          label: `${v.name}${v.category ? ` · ${v.category}` : ""}`,
-                        })),
-                        { value: "__separator__", label: "──────────", disabled: true },
-                        { value: "__add_new__", label: "+ Add new vendor…" },
-                      ]}
-                    />
-                    {/* Raw by design: bg-background-light with a no-op hover (idle
-                        and hover states are identical) - no minted outline cell
-                        matches (outline/neutral carries bg-surface-light). */}
-                    <button
-                      type="button"
-                      onClick={() => setShowAddVendor(true)}
-                      title="Add a new vendor"
-                      aria-label="Add new vendor"
-                      className="flex flex-shrink-0 items-center justify-center rounded-md border border-border bg-background-light px-2 text-text-secondary hover:bg-background-light"
-                    >
-                      <Plus className="h-3.5 w-3.5 text-primary" />
-                    </button>
-                  </div>
-                  {form.vendorId && form.vendorId !== "__add_new__" && (
-                    <VendorPreview
-                      vendor={vendors.find((v) => v.id === form.vendorId)}
-                    />
-                  )}
-                </>
-              )}
-            </FormField>
-          </div>
-
-        <div className="col-span-4">
-          <FormField label="Item Name" required>
-            <Input
-              value={form.name}
-              onChange={(e) => set("name", e.target.value)}
-              placeholder="e.g. Dual Run Capacitor 45/5 MFD 440V"
-              className="px-2.5 py-1.5"
-            />
-          </FormField>
-        </div>
-
-        {/* Manufacturer identifiers - what a tech reads off the box. `mpn` is
-            the existing column (CSV import, Items search and the barcode
-            scanner already match on it); it just had no form field until now.
-            Model number is its own column: a part number and a model number
-            differ routinely and both get quoted back to vendors on a PO. */}
-        <div className="col-span-2">
-          <FormField label="Model Number">
-            <Input
-              value={form.modelNumber}
-              onChange={(e) => set("modelNumber", e.target.value)}
-              placeholder="e.g. MT5+"
-              className="px-2.5 py-1.5"
-            />
-          </FormField>
-        </div>
-        <div className="col-span-2">
-          <FormField label="Part Number" hint="Manufacturer part number (MPN).">
-            <Input
-              value={form.mpn}
-              onChange={(e) => set("mpn", e.target.value)}
-              placeholder="e.g. 114"
-              className="px-2.5 py-1.5"
-            />
-          </FormField>
-        </div>
-
-        {/* SelectField's Radix Select ROOT forwards no id to its trigger - a
-            known gap (FormField.tsx's header comment). Kept as SelectField
-            rather than a raw Select/SelectTrigger: the layering guard
-            resolves literal/local-const classNames, and this control's
-            hard/soft classes would redden the ratchet if handed straight to
-            SelectTrigger (a components/ui export) instead of through
-            SelectField, which the guard does not govern. The wrapping div
-            (Select + "add category" button) is a single element, so it still
-            goes through cloneElement - the generated id lands on the div,
-            unused, same as the SelectField case above it. */}
-        <div className="col-span-2">
-          <FormField label="Category">
-            <div className="flex min-w-0 gap-1">
-              <SelectField
-                aria-label="Category"
-                value={form.category || "NONE"}
-                onValueChange={(v) => handleCategoryChange(v === "NONE" ? "" : v)}
-                className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-                options={[
-                  { value: "NONE", label: "Select category…" },
-                  ...categories.map((c) => ({ value: c.name, label: c.name })),
-                  { value: "__separator__", label: "──────────", disabled: true },
-                  { value: "__add_new__", label: "+ Add new category…" },
-                ]}
+              <Input
+                ref={uploadRef}
+                type="file"
+                accept="image/*"
+                className="sr-only w-px"
+                onChange={(e) => void handleFiles(e.target.files)}
               />
-              {/* Raw by design: bg-background-light with a no-op hover (idle
-                  and hover states are identical) - no minted outline cell
-                  matches (outline/neutral carries bg-surface-light). */}
+            </label>
+            <div className="flex gap-1.5">
+              {/* Raw by design (both buttons below): outline/neutral sets no
+                  idle text colour and nothing in this row's ambient wrapper
+                  supplies one, so converting would silently render this muted
+                  text-secondary label near-black. */}
               <button
                 type="button"
-                onClick={() => setShowAddCategory(true)}
-                title="Add a new category"
-                aria-label="Add new category"
-                className="flex flex-shrink-0 items-center justify-center rounded-md border border-border bg-background-light px-2 text-text-secondary hover:bg-background-light"
+                onClick={() => uploadRef.current?.click()}
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-light px-1.5 py-1 text-[11px] font-medium text-text-secondary hover:bg-background-light"
+                title="Upload photo"
               >
-                <Plus className="h-3.5 w-3.5 text-primary" />
+                <Upload className="h-3 w-3 text-text-secondary" />
+                Upload
               </button>
+              <button
+                type="button"
+                onClick={() => cameraRef.current?.click()}
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-light px-1.5 py-1 text-[11px] font-medium text-text-secondary hover:bg-background-light"
+                title="Take photo (camera on mobile)"
+              >
+                <Camera className="h-3 w-3 text-primary" />
+                Camera
+              </button>
+              <Input
+                ref={cameraRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="sr-only w-px"
+                onChange={(e) => void handleFiles(e.target.files)}
+              />
             </div>
-          </FormField>
-        </div>
+            {photoMeta && (
+              <p className="truncate text-[10px] text-text-secondary">
+                ✓ {photoMeta.name}
+                <span className="ml-1 text-text-secondary">· {photoMeta.sizeKb} KB</span>
+              </p>
+            )}
 
-        {/* SelectField's Radix Select ROOT forwards no id to its trigger - a
-            known gap (FormField.tsx's header comment). Kept as SelectField,
-            not a raw Select/SelectTrigger: the layering guard resolves
-            literal classNames, and this control's hard/soft classes would
-            redden the ratchet if handed straight to SelectTrigger (a
-            components/ui export) instead of through SelectField, which the
-            guard does not govern. */}
-        {/* SRVW-90: `type` (SERVICE|MATERIAL) is a server-side projection of
-            this control, surfaced read-only so there is no second control the
-            two columns can contradict each other through. */}
-        <FormField
-          label="Item Kind"
-          hint={`Bills as ${form.kind === "material" ? "Material" : "Service"} on estimates, jobs and invoices.`}
-        >
-          <SelectField
-            aria-label="Item kind"
-            value={form.kind}
-            onValueChange={handleKindChange}
-            className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-            options={kindOpts.map((k) => ({ value: k, label: k }))}
-          />
-        </FormField>
-        <FormField label="Unit of Measure">
-          <SelectField
-            aria-label="Unit of measure"
-            value={form.uom}
-            onValueChange={(v) => set("uom", v)}
-            className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-            options={uomOpts.map((u) => ({ value: u, label: u }))}
-          />
-        </FormField>
+            <span className="h-px bg-border" />
 
-        {/* Price Book Phase A — Brand · Visibility (PRD §6.A.7 rev 2026-05-28).
-            Group was removed in the 2026-05-28 Item Groups redesign — Groups
-            now mean preset bundles, not product families, so items don't
-            reference them anymore. */}
-        <div className="col-span-4 rounded-card border border-primary/20 bg-primary-subtle/30 p-3">
-          <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-primary">
-            <ImagePlus className="h-3 w-3" />
-            Price Book — Brand · Visibility
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* SelectField's Radix Select ROOT forwards no id to its
-                trigger - a known gap (FormField.tsx's header comment). Kept
-                as SelectField, not a raw Select/SelectTrigger: the layering
-                guard resolves literal classNames, and this control's
-                hard/soft classes would redden the ratchet if handed straight
-                to SelectTrigger (a components/ui export) instead of through
-                SelectField, which the guard does not govern. */}
-            <FormField label="Brand">
-              <SelectField
-                aria-label="Brand"
-                value={form.brandId || "NONE"}
-                onValueChange={(v) => handleBrandChange(v === "NONE" ? "" : v)}
-                className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-                options={[
-                  { value: "NONE", label: "— none —" },
-                  ...brands
-                    .filter((b) => b.isActive !== false)
-                    .map((b) => ({ value: b.id, label: b.name })),
-                ]}
+            {/* Manufacturer identifiers sit with the photo because that is
+                where you read them from - off the box in your hand. `mpn` is
+                the existing column (CSV import, Items search and the barcode
+                scanner already match on it). Model number is its own column: a
+                part number and a model number differ routinely and both get
+                quoted back to vendors on a PO. */}
+            <FormField label="Model Number">
+              <Input
+                value={form.modelNumber}
+                onChange={(e) => set("modelNumber", e.target.value)}
+                placeholder="e.g. MT5+"
+                className="px-2.5 py-1.5"
               />
             </FormField>
-            {/* Segmented button toggle, not an input/select control -
-                FormField's own header comment names this shape (a RadioRow-
-                like group) as outside this pass's coverage. Left raw. */}
-            <Field label="Visibility">
-              <div className="flex gap-1 rounded-md border border-border bg-surface-light p-0.5">
-                {/* Raw by design (both buttons below): a segmented toggle
-                    control, not Button-shaped. */}
-                <button
-                  type="button"
-                  onClick={() => set("visibility", "catalog")}
-                  className={[
-                    "flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-xs font-medium transition",
-                    form.visibility === "catalog"
-                      ? "bg-primary text-on-fill shadow-sm"
-                      : "text-text-secondary hover:bg-background-light",
-                  ].join(" ")}
-                  title="Show in customer-facing catalog"
-                >
-                  <Eye className="h-3 w-3" />
-                  Catalog
-                </button>
-                <button
-                  type="button"
-                  onClick={() => set("visibility", "internal_only")}
-                  className={[
-                    "flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-xs font-medium transition",
-                    form.visibility === "internal_only"
-                      ? "bg-text-primary text-on-fill shadow-sm"
-                      : "text-text-secondary hover:bg-background-light",
-                  ].join(" ")}
-                  title="Hide from customer-facing surfaces (labor, fees, internal SKUs)"
-                >
-                  <EyeOff className="h-3 w-3" />
-                  Internal
-                </button>
-              </div>
-            </Field>
-          </div>
-          <div className="mt-2 text-[10px] leading-snug text-text-secondary">
-            <span className="font-medium">Photo upload + customer-facing copy</span> (marketing name, description, key features) ship in Phase B.
-          </div>
-        </div>
+            <FormField label="Part Number">
+              <Input
+                value={form.mpn}
+                onChange={(e) => set("mpn", e.target.value)}
+                placeholder="e.g. 114"
+                title="Manufacturer part number (MPN)"
+                className="px-2.5 py-1.5"
+              />
+            </FormField>
+          </aside>
 
-        <div className="col-span-2">
-          <FormField label="Unit Cost ($)">
-            <Input
-              value={form.unitCost}
-              onChange={(e) => set("unitCost", e.target.value)}
-              type="number"
-              step="0.01"
-              placeholder="0.00"
-              className="px-2.5 py-1.5"
-            />
-          </FormField>
-        </div>
-        <div className="col-span-2">
-          <FormField label="Sell Price ($)">
-            {/* Render-prop: Input + a conditional margin badge, a compound
-                pair cloneElement can't target - fieldProps lands on the Input. */}
-            {(fieldProps) => (
-              <div className="flex items-center gap-2">
-                <Input
-                  {...fieldProps}
-                  value={form.sellPrice}
-                  onChange={(e) => set("sellPrice", e.target.value)}
-                  type="number"
-                  step="0.01"
-                  placeholder="0.00"
-                  className="flex-1 px-2.5 py-1.5"
+          <div className="px-6 py-4">
+            {/* ── Classification ───────────────────────────────────────────
+                Brand and Finish are ordinary fields here, not a tinted "Price
+                Book" card with its own heading. The card implied brand and
+                visibility were a separate subsystem; they are two attributes
+                of the item like any other, and Finish was stranded above it
+                belonging to neither. */}
+            <SectionRule label="Classification" first />
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-12 sm:col-span-4">
+                <FormField label="Category">
+                  <CatalogSelect
+                    label="Category"
+                    noun="category"
+                    noneLabel="Select category…"
+                    value={form.category}
+                    onChange={handleCategoryChange}
+                    onAddNew={() => setShowAddCategory(true)}
+                    onManage={() => setManaging("category")}
+                    managePlural="categories"
+                    options={categories.map((c) => ({ value: c.name, label: c.name }))}
+                  />
+                </FormField>
+              </div>
+              <div className="col-span-6 sm:col-span-4">
+                {/* SRVW-90: `type` (SERVICE|MATERIAL) is a server-side
+                    projection of this control, so there is no second control
+                    the two columns can contradict each other through. */}
+                <FormField label="Item Kind">
+                  <SelectField
+                    aria-label="Item kind"
+                    value={form.kind}
+                    onValueChange={handleKindChange}
+                    className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
+                    options={kindOpts}
+                  />
+                </FormField>
+              </div>
+              <div className="col-span-6 sm:col-span-4">
+                {/* Unit of Measure is a FIXED list - the only catalog dropdown
+                    here that is not extendable. A unit is not per-business
+                    vocabulary the way a brand or a finish is, and letting each
+                    org invent its own is how the demo org ended up with both BX
+                    and BOX. Plain SelectField, not CatalogSelect: there is no
+                    add-new and no manage entry to offer. */}
+                <FormField label="Unit of Measure">
+                  <SelectField
+                    aria-label="Unit of measure"
+                    value={form.uom}
+                    onValueChange={(v) => set("uom", v)}
+                    className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
+                    // A code stored before this list was frozen must still show
+                    // rather than blanking the trigger - the item stores the
+                    // CODE STRING, not a foreign key.
+                    options={
+                      form.uom && !UNITS_OF_MEASURE.some((u) => u.code === form.uom)
+                        ? [...UOM_SELECT_OPTIONS, { value: form.uom, label: form.uom }]
+                        : UOM_SELECT_OPTIONS
+                    }
+                  />
+                </FormField>
+              </div>
+
+              <div className="col-span-6 sm:col-span-4">
+                <FormField label="Brand">
+                  <CatalogSelect
+                    label="Brand"
+                    noun="brand"
+                    noneLabel="— none —"
+                    value={form.brandId}
+                    onChange={handleBrandChange}
+                    onAddNew={() => setShowAddBrand(true)}
+                    onManage={() => setManaging("brand")}
+                    options={brands
+                      .filter((b) => b.isActive !== false)
+                      .map((b) => ({ value: b.id, label: b.name }))}
+                  />
+                </FormField>
+              </div>
+              <div className="col-span-6 sm:col-span-4">
+                <FormField label="Finish">
+                  <CatalogSelect
+                    label="Finish"
+                    noun="finish"
+                    managePlural="finishes"
+                    noneLabel="— none —"
+                    value={form.finishId}
+                    onChange={(v) => set("finishId", v)}
+                    onAddNew={() => setShowAddFinish(true)}
+                    onManage={() => setManaging("finish")}
+                    options={finishes
+                      .filter((f) => f.isActive !== false)
+                      .map((f) => ({ value: f.id, label: f.name }))}
+                  />
+                </FormField>
+              </div>
+              <div className="col-span-12 sm:col-span-4">
+                <FormField label="Vendor / Source">
+                  {/* No onManage - vendors have no delete endpoint, so the
+                      entry would open a dialog that could only refuse. */}
+                  <CatalogSelect
+                    label="Vendor / Source"
+                    noun="vendor"
+                    noneLabel="Select vendor…"
+                    value={form.vendorId}
+                    onChange={handleVendorChange}
+                    onAddNew={() => setShowAddVendor(true)}
+                    options={vendors.map((v) => ({
+                      value: v.id,
+                      label: `${v.name}${v.category ? ` · ${v.category}` : ""}`,
+                    }))}
+                  />
+                </FormField>
+              </div>
+              {form.vendorId && (
+                <div className="col-span-12">
+                  <VendorPreview vendor={vendors.find((v) => v.id === form.vendorId)} />
+                </div>
+              )}
+            </div>
+
+            {/* ── Pricing ──────────────────────────────────────────────────
+                Money fields are sized to money (w-32, tabular figures) rather
+                than stretched across half the dialog. */}
+            <SectionRule label="Pricing" />
+            <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+              <FormField label="Unit Cost">
+                <MoneyInput
+                  value={form.unitCost}
+                  onChange={(v) => set("unitCost", v)}
+                  ariaLabel="Unit cost"
                 />
-                {margin !== null && (
-                  <span
-                    className={[
-                      "rounded-md px-2 py-1 font-mono text-xs font-semibold",
-                      margin > 30
-                        ? "bg-success/10 text-success"
-                        : margin > 0
-                          ? "bg-warning/10 text-warning"
-                          : "bg-danger/10 text-danger",
-                    ].join(" ")}
-                    title="Gross margin"
-                  >
-                    {margin}% GM
-                  </span>
+              </FormField>
+              <FormField label="Sell Price">
+                {/* Render-prop: MoneyInput + a conditional margin badge, a
+                    compound pair cloneElement can't target. */}
+                {() => (
+                  <div className="flex items-center gap-2">
+                    <MoneyInput
+                      value={form.sellPrice}
+                      onChange={(v) => set("sellPrice", v)}
+                      ariaLabel="Sell price"
+                    />
+                    {margin !== null && (
+                      <span
+                        className={[
+                          "rounded-md px-2 py-1 font-mono text-xs font-semibold tabular-nums",
+                          margin > 30
+                            ? "bg-success/10 text-success"
+                            : margin > 0
+                              ? "bg-warning/10 text-warning"
+                              : "bg-danger/10 text-danger",
+                        ].join(" ")}
+                        title="Gross margin"
+                      >
+                        {margin}% GM
+                      </span>
+                    )}
+                  </div>
                 )}
-              </div>
+              </FormField>
+            </div>
+
+            {/* ── Starting stock ───────────────────────────────────────────
+                Hidden in edit mode (stock changes go through
+                movements/transfers), and at any mount whose onSave never
+                persists the item (showStartingStock={false}, SRVW-91). */}
+            {isEdit || !showStartingStock ? null : (
+              <>
+                <SectionRule label="Starting Stock" />
+                <div className="grid grid-cols-12 gap-3">
+                  <div className="col-span-12 sm:col-span-6">
+                    <FormField label="Location">
+                      <CatalogSelect
+                        label="Starting stock location"
+                        noun="location"
+                        value={startingLocId}
+                        onChange={(v) => set("startingLocId", v)}
+                        onAddNew={() => setShowAddLocation(true)}
+                        options={locations.map((l) => ({ value: l.id, label: l.name }))}
+                      />
+                    </FormField>
+                  </div>
+                  <div className="col-span-4 sm:col-span-2">
+                    <FormField label="On Hand">
+                      <Input
+                        value={form.startingQty}
+                        onChange={(e) => set("startingQty", e.target.value)}
+                        type="number"
+                        step="1"
+                        min="0"
+                        placeholder="0"
+                        className="px-2.5 py-1.5"
+                      />
+                    </FormField>
+                  </div>
+                  <div className="col-span-4 sm:col-span-2">
+                    <FormField label="Min">
+                      <Input
+                        value={form.startingMin}
+                        onChange={(e) => set("startingMin", e.target.value)}
+                        type="number"
+                        step="1"
+                        min="0"
+                        placeholder="0"
+                        title="Reserve level - flags low stock when on-hand falls below this"
+                        className="px-2.5 py-1.5"
+                      />
+                    </FormField>
+                  </div>
+                  <div className="col-span-4 sm:col-span-2">
+                    <FormField label="Max">
+                      <Input
+                        value={form.startingMax}
+                        onChange={(e) => set("startingMax", e.target.value)}
+                        type="number"
+                        step="1"
+                        min="0"
+                        placeholder="—"
+                        title="Reorder cap - stops auto-replenish suggestions at this number"
+                        className="px-2.5 py-1.5"
+                      />
+                    </FormField>
+                  </div>
+                </div>
+              </>
             )}
-          </FormField>
-        </div>
-
-          {/* Checkbox-leads-its-own-label rows: FormField always renders its
-              label ABOVE the control, which would flip these to a stacked
-              layout - a real visual change, not a wrapping move. Left raw. */}
-          <div className="col-span-4 flex flex-wrap items-center gap-4 rounded-md bg-background-light px-3 py-2">
-            <label className="flex items-center gap-2 text-xs font-medium text-text-secondary">
-              <input
-                type="checkbox"
-                checked={form.serialized}
-                onChange={(e) => set("serialized", e.target.checked)}
-                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
-              />
-              Serialized (force serial capture at install)
-            </label>
-            <label className="flex items-center gap-2 text-xs font-medium text-text-secondary">
-              <input
-                type="checkbox"
-                checked={form.hazmat}
-                onChange={(e) => set("hazmat", e.target.checked)}
-                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
-              />
-              Hazmat (link SDS, restrict transport)
-            </label>
-            <label className="flex items-center gap-2 text-xs font-medium text-text-secondary">
-              <input
-                type="checkbox"
-                checked={form.trackInventory}
-                onChange={(e) => set("trackInventory", e.target.checked)}
-                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
-              />
-              Track inventory
-            </label>
-            {/* SRVW-90. Rendered through the Checkbox + Label primitives rather
-                than the raw label/input pair its three siblings use: the
-                component-api guard's raw-tag ratchet for `label` and `input` is
-                at floor, so a fourth raw pair would redden CI. The label is
-                styled through Label's own prop vocabulary (a literal className
-                on a components/ui export would redden the layering guard, which
-                is also at floor) - `weight` mints no `medium`, so this row is
-                font-semibold where the siblings are font-medium. */}
-            <div className="flex items-center gap-2 text-xs font-medium text-text-secondary">
-              <Checkbox
-                id="item-taxable"
-                checked={form.taxable}
-                onCheckedChange={(v) => set("taxable", v === true)}
-              />
-              <Label htmlFor="item-taxable" size="xs" tone="subtle" weight="semibold">
-                Taxable (apply sales tax on estimates and invoices)
-              </Label>
-            </div>
-            <p className="w-full text-[10px] leading-snug text-text-secondary">
-              Track inventory: deducts stock when added to jobs/invoices.
-            </p>
           </div>
         </div>
-        {/* /col-span-9 right column */}
 
-        {/* Nested AddVendor + AddCategory dialogs */}
-        <AddVendorDialog
-          open={showAddVendor}
-          onClose={() => setShowAddVendor(false)}
-          onCreate={handleVendorCreated}
-        />
-        <AddCategoryDialog
-          open={showAddCategory}
-          onClose={() => setShowAddCategory(false)}
-          onCreate={handleCategoryCreated}
-        />
-
-        {/* Starting stock + reserve levels - hidden in edit mode (stock changes go through
-            movements/transfers), and at any mount whose onSave never persists the item
-            (showStartingStock={false}, SRVW-91). */}
-        {isEdit || !showStartingStock ? null : (
-        <div className="col-span-12 rounded-md border border-border bg-background-light/50 p-3">
-          <div className="mb-2 flex items-baseline justify-between gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-              Optional · Starting Stock + Reserve Levels
-            </span>
-            <span className="text-[10px] text-text-secondary">
-              Reserve = the amount you want to keep on hand at all times
-            </span>
-          </div>
-          <div className="grid grid-cols-12 gap-2">
-            {/* SelectField's Radix Select ROOT forwards no id to its
-                trigger - a known gap (FormField.tsx's header comment). Kept
-                as SelectField, not a raw Select/SelectTrigger: the layering
-                guard resolves literal classNames, and this control's
-                hard/soft classes would redden the ratchet if handed straight
-                to SelectTrigger (a components/ui export) instead of through
-                SelectField, which the guard does not govern. */}
-            <div className="col-span-4">
-              <FormField label="Location">
-                <SelectField
-                  aria-label="Starting stock location"
-                  value={startingLocId}
-                  onValueChange={(v) => set("startingLocId", v)}
-                  className="w-full rounded-md border border-border bg-surface-light px-2.5 py-1.5 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10"
-                  options={locations.map((l) => ({ value: l.id, label: l.name }))}
-                />
-              </FormField>
-            </div>
-            <div className="col-span-2">
-              <FormField label="Starting Qty">
-                <Input
-                  value={form.startingQty}
-                  onChange={(e) => set("startingQty", e.target.value)}
-                  type="number"
-                  step="1"
-                  min="0"
-                  placeholder="0"
-                  className="px-2.5 py-1.5"
-                />
-              </FormField>
-            </div>
-            <div className="col-span-2">
-              <FormField label="Min · Reserve">
-                <Input
-                  value={form.startingMin}
-                  onChange={(e) => set("startingMin", e.target.value)}
-                  type="number"
-                  step="1"
-                  min="0"
-                  placeholder="0"
-                  title="Alert when on-hand falls below this number"
-                  className="px-2.5 py-1.5"
-                />
-              </FormField>
-            </div>
-            <div className="col-span-2">
-              <FormField label="Max · Reorder Cap">
-                <Input
-                  value={form.startingMax}
-                  onChange={(e) => set("startingMax", e.target.value)}
-                  type="number"
-                  step="1"
-                  min="0"
-                  placeholder="—"
-                  title="Stop replenishing when this number is reached"
-                  className="px-2.5 py-1.5"
-                />
-              </FormField>
-            </div>
-            <div className="col-span-2 flex items-end">
-              <p className="text-[10px] leading-tight text-text-secondary">
-                <code>min</code> drives the low-stock badge.
-                <br />
-                <code>max</code> caps auto-replenish suggestions.
-              </p>
-            </div>
-          </div>
+        {/* ── Flags ──────────────────────────────────────────────────────────
+            All five in one band above the footer. Visibility is a checkbox
+            here rather than a two-button segmented control in a box of its
+            own: it is one boolean and it was costing a third of a row. */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-border bg-background-light px-6 py-3">
+          <CheckRow
+            id="item-visibility"
+            checked={form.visibility === "catalog"}
+            onChange={(v) => set("visibility", v ? "catalog" : "internal_only")}
+            label="Show in customer catalog"
+            title="Uncheck to hide this item from customer-facing surfaces"
+          />
+          <CheckRow
+            id="item-serialized"
+            checked={form.serialized}
+            onChange={(v) => set("serialized", v)}
+            label="Serialized"
+            title="Force serial capture at install"
+          />
+          <CheckRow
+            id="item-hazmat"
+            checked={form.hazmat}
+            onChange={(v) => set("hazmat", v)}
+            label="Hazmat"
+            title="Link SDS, restrict transport"
+          />
+          <CheckRow
+            id="item-track-inventory"
+            checked={form.trackInventory}
+            onChange={(v) => set("trackInventory", v)}
+            label="Track inventory"
+            title="Deducts stock when this item is added to a job or invoice"
+          />
+          <CheckRow
+            id="item-taxable"
+            checked={form.taxable}
+            onChange={(v) => set("taxable", v)}
+            label="Taxable"
+            title="Apply sales tax on estimates and invoices"
+          />
         </div>
-        )}
       </div>
+
+      {/* Nested creator dialogs */}
+      <AddVendorDialog
+        open={showAddVendor}
+        onClose={() => setShowAddVendor(false)}
+        onCreate={handleVendorCreated}
+      />
+      <AddCategoryDialog
+        open={showAddCategory}
+        onClose={() => setShowAddCategory(false)}
+        onCreate={handleCategoryCreated}
+      />
+      <AddBrandDialog
+        open={showAddBrand}
+        onClose={() => setShowAddBrand(false)}
+        onCreate={handleBrandCreated}
+        vendors={vendors}
+      />
+      <AddFinishDialog
+        open={showAddFinish}
+        onClose={() => setShowAddFinish(false)}
+        onCreate={handleFinishCreated}
+        existingNames={finishes.map((f) => f.name)}
+      />
+      <AddLocationDialog
+        open={showAddLocation}
+        onClose={() => setShowAddLocation(false)}
+        onCreate={handleLocationCreated}
+        branches={branches}
+        onAddBranch={async (b: Branch) => adoptServerId(b, await upsertBranch.mutateAsync(b))}
+      />
+
+      {/* One manage dialog, told which catalog it is showing. Four separate
+          mounts would be four copies of the same list-with-delete. */}
+      <ManageCatalogDialog
+        open={managing !== null}
+        onClose={() => setManaging(null)}
+        title={manageConfig.title}
+        nounPlural={manageConfig.nounPlural}
+        entries={manageConfig.entries}
+        onDelete={manageConfig.onDelete}
+      />
     </Modal>
   );
 }
 
-function Field({
+/**
+ * A band heading: small caps label, then a hairline running to the edge.
+ *
+ * This replaced four different grouping devices that had accumulated in this
+ * one dialog - a tinted bordered card for Price Book, a grey rounded strip for
+ * the flags, another for starting stock, and nothing at all for the fields in
+ * between. A rule costs one line and never nests.
+ */
+function SectionRule({ label, first = false }: { label: string; first?: boolean }) {
+  return (
+    <div className={`flex items-center gap-3 ${first ? "mb-3" : "mb-3 mt-5"}`}>
+      <span className="flex-none text-[10.5px] font-bold uppercase tracking-[0.1em] text-text-secondary">
+        {label}
+      </span>
+      <span className="h-px flex-1 bg-border" />
+    </div>
+  );
+}
+
+/**
+ * Checkbox with its label beside it, which is the one shape FormField cannot
+ * produce (it always renders the label above the control).
+ *
+ * Built on the Checkbox + Label primitives rather than a raw label/input pair:
+ * the component-api guard's raw-tag ratchet for `label` and `input` is at
+ * floor, and this dialog previously carried three raw pairs plus one primitive
+ * pair. Routing all of them through here removes the raw pairs entirely and
+ * ends the font-medium / font-semibold split between the two styles.
+ */
+function CheckRow({
+  id,
+  checked,
+  onChange,
   label,
-  required,
-  className,
-  children,
+  title,
 }: {
+  id: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
   label: string;
-  required?: boolean;
-  className?: string;
-  children: React.ReactNode;
+  /** The explanation that used to sit in the label's parenthetical. */
+  title: string;
 }) {
   return (
-    <label className={`flex flex-col gap-1 ${className ?? ""}`}>
-      <span className="text-[11px] font-medium uppercase tracking-wide text-text-secondary">
+    <span className="flex items-center gap-2" title={title}>
+      <Checkbox id={id} checked={checked} onCheckedChange={(v) => onChange(v === true)} />
+      <Label htmlFor={id} size="xs" tone="subtle" weight="semibold">
         {label}
-        {required && <span className="ml-0.5 text-danger">*</span>}
+      </Label>
+    </span>
+  );
+}
+
+/**
+ * A money field sized to money: 8rem wide with the currency symbol inside and
+ * tabular figures, instead of a full-width text box that reads as if it wants a
+ * sentence. The symbol is decorative - `aria-hidden`, with the unit carried in
+ * the accessible name - so a screen reader does not announce "dollar" as part
+ * of the value.
+ */
+function MoneyInput({
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="relative w-32">
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-text-secondary"
+      >
+        $
       </span>
-      {children}
-    </label>
+      <Input
+        aria-label={`${ariaLabel} in dollars`}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        type="number"
+        step="0.01"
+        min="0"
+        placeholder="0.00"
+        className="py-1.5 pl-6 pr-2.5 tabular-nums"
+      />
+    </div>
   );
 }
 

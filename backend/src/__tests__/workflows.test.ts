@@ -737,10 +737,27 @@ describe('GET /api/workflows/catalog', () => {
     mockAuthAs('admin');
     const res = await request(app).get('/api/workflows/catalog').set(authHeader('admin'));
     expect(res.status).toBe(200);
-    expect(res.body.anchors.invoice).toEqual([{ key: 'invoice.due_date', label: 'the invoice due date' }]);
-    expect(res.body.anchors.job).toEqual([{ key: 'job.scheduled_start', label: 'the appointment' }]);
-    expect(res.body.anchors.lead).toEqual([{ key: 'lead.walkthrough_scheduled_at', label: 'the walkthrough' }]);
-    expect(res.body.anchors.estimate).toEqual([{ key: 'estimate.valid_until', label: 'the estimate expiration' }]);
+    const both = ['before', 'after'];
+    expect(res.body.anchors.invoice).toEqual([
+      { key: 'invoice.due_date', label: 'the invoice due date', directions: both },
+    ]);
+    expect(res.body.anchors.job).toEqual([{ key: 'job.scheduled_start', label: 'the appointment', directions: both }]);
+    // Spec #1751 D8 ADDED three lead anchors alongside the walkthrough one (it is never
+    // substituted), in the order ANCHORS_FOR_ENTITY lists them — which is the order the builder's
+    // dropdown shows them in, so the list is asserted whole rather than by membership.
+    //
+    // `directions` rides on the wire because the builder reads it to decide which offsets to
+    // OFFER: a stage clock records a moment as it happens, so counting BEFORE one can never fire
+    // and the validator refuses to save it.
+    expect(res.body.anchors.lead).toEqual([
+      { key: 'lead.walkthrough_scheduled_at', label: 'the walkthrough', directions: both },
+      { key: 'lead.created_at', label: 'the lead arriving', directions: ['after'] },
+      { key: 'lead.contacted_at', label: 'first contact', directions: ['after'] },
+      { key: 'lead.last_visit_completed_at', label: 'the completed walkthrough', directions: ['after'] },
+    ]);
+    expect(res.body.anchors.estimate).toEqual([
+      { key: 'estimate.valid_until', label: 'the estimate expiration', directions: both },
+    ]);
   });
 
   // SERV10X-70: the "Send text" step unlocks per-org, not via a global flag —
@@ -748,7 +765,7 @@ describe('GET /api/workflows/catalog', () => {
   describe('capabilities.sms_available', () => {
     function orgRow(overrides: Record<string, unknown> = {}) {
       return {
-        ctm_account_id: '596375',
+        ctm_account_id: '500001',
         ctm_sms_ready: true,
         sms_sending_enabled: true,
         plan: 'PRO',

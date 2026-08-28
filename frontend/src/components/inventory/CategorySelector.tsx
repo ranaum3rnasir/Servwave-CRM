@@ -87,12 +87,17 @@ export function CategorySelector({
 
       <PopoverContent
         align="start"
+        // Always BELOW the trigger - see LocationSelector, which sits beside
+        // this control and had the same flip. The panel clamps to the room
+        // actually below rather than jumping above the button.
+        side="bottom"
+        avoidCollisions={false}
         sideOffset={4}
         role="listbox"
         // `border` dropped: PopoverContent's own base string already emits
         // an unconditional `border border-border` - this was a byte-for-byte
         // redundant restatement, not an override.
-        className="flex max-h-[420px] w-72 flex-col overflow-hidden p-0"
+        className="flex max-h-[min(420px,var(--radix-popover-content-available-height))] w-72 flex-col overflow-hidden p-0"
       >
         {/* Sticky header — "All Categories" reset row. Raw by design: a
             role="listbox" row / list-row click target, not Button-shaped. */}

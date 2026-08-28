@@ -44,20 +44,45 @@ const ID_C = 'a0000000-0000-0000-0000-00000000000c';
 const FOREIGN_ID = 'a0000000-0000-0000-0000-0000000000ff';
 const MISSING_ID = 'a0000000-0000-0000-0000-0000000000ee';
 
+/** S8: the one trip a job-level crew statement lands on in these fixtures. */
+const FIXTURE_VISIT = {
+  id: 'v0000000-0000-0000-0000-0000000000f1',
+  job_id: null as string | null,
+  lead_id: null,
+  visit_seq: 1,
+  status: 'SCHEDULED',
+  scheduled_at: new Date('2026-10-01T09:00:00.000Z'),
+  scheduled_end: new Date('2026-10-01T11:00:00.000Z'),
+  is_all_day: false,
+  created_at: new Date('2026-09-01T00:00:00.000Z'),
+  en_route_at: null, on_site_at: null, started_at: null, completed_at: null,
+  assignees: [] as { user_id: string }[],
+};
+
 function jobRow(id: string, overrides: Record<string, unknown> = {}) {
   return {
     ...JOB_FIXTURE,
     id,
     job_number: `J-${id.slice(-4)}`,
     assignees: [],
+    // S8 (D6): crew lives on the trips; the payload key is derived from them.
+    visits: [FIXTURE_VISIT],
     invoices: [],
     source_plan_id: null,
     ...overrides,
   };
 }
 
-/** Wire the $transaction mock used by setAssignees(). */
+/**
+ * Wire the $transaction mock used by setAssignees().
+ *
+ * `visitAssignee.findMany` is listed because replaceJobCrew reads the job's per-visit crew
+ * inside the transaction to build the union. It is a fixture concern only: the production
+ * route was never broken, the fake had simply stopped modelling the tx client the route uses.
+ * The spy is returned so a caller can assert on the union read.
+ */
 function wireSetAssigneesTx() {
+  const visitAssigneeFindMany = vi.fn().mockResolvedValue([]);
   mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
     fn({
       jobAssignee: {
@@ -65,10 +90,19 @@ function wireSetAssigneesTx() {
         createMany: mockPrisma.jobAssignee.createMany,
         deleteMany: mockPrisma.jobAssignee.deleteMany,
       },
+      visitAssignee: {
+        findMany: visitAssigneeFindMany,
+        // S8 (D6): the crew statement lands on the trip, so the WRITE delegates are needed too.
+        createMany: mockPrisma.visitAssignee.createMany,
+        deleteMany: mockPrisma.visitAssignee.deleteMany,
+      },
+      // S8 (D6): resolveCurrentJobVisit reads the job's trips on the tx client.
+      visit: { findMany: vi.fn().mockResolvedValue([FIXTURE_VISIT]) },
       timelineEvent: { create: mockPrisma.timelineEvent.create },
       job: { findUnique: mockPrisma.job.findUnique },
     }),
   );
+  return { visitAssigneeFindMany };
 }
 
 /** Wire the $transaction mock used by cancel(). */
@@ -77,6 +111,8 @@ function wireCancelTx() {
     fn({
       invoice: { update: mockPrisma.invoice.update },
       invoiceLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+      // S4 (D19): job cancel cascades onto its live visits inside this same transaction.
+      visit: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
       jobLineItem: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
       timelineEvent: { create: mockPrisma.timelineEvent.create },
       job: { update: mockPrisma.job.update },
@@ -186,7 +222,7 @@ describe('POST /api/jobs/bulk-status', () => {
       .mockResolvedValueOnce(null) // ID_A: not assigned to this technician
       .mockResolvedValueOnce({ id: ID_B }); // ID_B: assigned
     mockPrisma.job.findUnique.mockResolvedValueOnce(
-      jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }] }),
+      jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ ...FIXTURE_VISIT, assignees: [{ user_id: TEST_USERS.technician.id }] }] }),
     );
     mockPrisma.job.update.mockResolvedValue(jobRow(ID_B));
 
@@ -358,9 +394,9 @@ describe('POST /api/jobs/bulk-assign', () => {
     wireSetAssigneesTx();
     mockPrisma.job.findUnique
       .mockResolvedValueOnce(jobRow(ID_A)) // existing lookup, no crew
-      .mockResolvedValueOnce(jobRow(ID_A, { assignees: [{ user_id: TEST_USERS.technician.id }] })) // tx re-read
+      .mockResolvedValueOnce(jobRow(ID_A, { assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ ...FIXTURE_VISIT, assignees: [{ user_id: TEST_USERS.technician.id }] }] })) // tx re-read
       .mockResolvedValueOnce(jobRow(ID_B))
-      .mockResolvedValueOnce(jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }] }));
+      .mockResolvedValueOnce(jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ ...FIXTURE_VISIT, assignees: [{ user_id: TEST_USERS.technician.id }] }] }));
     mockPrisma.user.findUnique.mockResolvedValue({
       id: TEST_USERS.technician.id, role: 'TECHNICIAN', is_active: true,
       email: TEST_USERS.technician.email, first_name: TEST_USERS.technician.first_name, last_name: TEST_USERS.technician.last_name,
@@ -373,7 +409,9 @@ describe('POST /api/jobs/bulk-assign', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.updated).toEqual([ID_A, ID_B]);
-    expect(mockPrisma.jobAssignee.createMany).toHaveBeenCalledTimes(2);
+    // S8 (D6): the crew write lands on the trip - visit_assignees, not the dropped table.
+    expect(mockPrisma.visitAssignee.createMany).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.jobAssignee.createMany).not.toHaveBeenCalled();
     const addedEvents = mockPrisma.timelineEvent.create.mock.calls.filter(
       (c: any[]) => c[0].data.event_type === 'CREW_MEMBER_ADDED',
     );
@@ -389,9 +427,9 @@ describe('POST /api/jobs/bulk-assign', () => {
     wireSetAssigneesTx();
     mockPrisma.job.findUnique
       .mockResolvedValueOnce(jobRow(ID_A))
-      .mockResolvedValueOnce(jobRow(ID_A, { assignees: [{ user_id: TEST_USERS.technician.id }] }))
+      .mockResolvedValueOnce(jobRow(ID_A, { assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ ...FIXTURE_VISIT, assignees: [{ user_id: TEST_USERS.technician.id }] }] }))
       .mockResolvedValueOnce(jobRow(ID_B))
-      .mockResolvedValueOnce(jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }] }));
+      .mockResolvedValueOnce(jobRow(ID_B, { assignees: [{ user_id: TEST_USERS.technician.id }], visits: [{ ...FIXTURE_VISIT, assignees: [{ user_id: TEST_USERS.technician.id }] }] }));
     mockPrisma.user.findUnique.mockResolvedValue({
       id: TEST_USERS.technician.id, role: 'TECHNICIAN', is_active: true,
       email: TEST_USERS.technician.email, first_name: TEST_USERS.technician.first_name, last_name: TEST_USERS.technician.last_name,
@@ -403,7 +441,9 @@ describe('POST /api/jobs/bulk-assign', () => {
       .send({ ids: [ID_A, ID_B], assignee_ids: [TEST_USERS.technician.id], notify: { email: false } });
 
     expect(res.status).toBe(200);
-    expect(mockPrisma.jobAssignee.createMany).toHaveBeenCalledTimes(2);
+    // S8 (D6): the crew write lands on the trip - visit_assignees, not the dropped table.
+    expect(mockPrisma.visitAssignee.createMany).toHaveBeenCalledTimes(2);
+    expect(mockPrisma.jobAssignee.createMany).not.toHaveBeenCalled();
     expect(dispatchCalls('TECH_ASSIGNED')).toHaveLength(0);
   });
 

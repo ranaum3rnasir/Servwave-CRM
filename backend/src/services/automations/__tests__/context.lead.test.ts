@@ -29,7 +29,7 @@ function currentVisit(overrides: Record<string, unknown> = {}) {
     completed_at: null,
     cancelled_at: null,
     created_at: new Date('2026-07-01'),
-    performers: [
+    assignees: [
       {
         user: {
           id: 't0000000-0000-0000-0000-000000000001',
@@ -56,7 +56,7 @@ function leadRow(overrides: Record<string, unknown> = {}) {
       email: 'sarah@example.com',
       phone: '+15551234567',
     },
-    walkthroughs: [currentVisit()],
+    visits: [currentVisit()],
     commission_owner: null,
     service_location: {
       address_line1: '88 Cedar Lane',
@@ -97,7 +97,7 @@ describe('loadExecutionBundle — lead', () => {
   // current visit — the merge fields/state must resolve to empty/null, not throw.
   it('resolves to empty merge fields and null state when the lead has no current visit', async () => {
     mockPrisma.lead.findFirst.mockResolvedValue(leadRow({
-      walkthroughs: [currentVisit({ status: 'REQUESTED', scheduled_at: null })],
+      visits: [currentVisit({ status: 'REQUESTED', scheduled_at: null })],
     }));
 
     const result = await loadExecutionBundle({
@@ -120,10 +120,10 @@ describe('loadExecutionBundle — lead', () => {
     const completed = currentVisit({
       id: 'w-old', status: 'COMPLETED', scheduled_at: new Date('2026-06-01T10:00:00Z'),
       completed_at: new Date('2026-06-01T11:00:00Z'),
-      performers: [{ user: { id: 'u-old', email: 'old@example.com', first_name: 'Old', last_name: 'Tech' } }],
+      assignees: [{ user: { id: 'u-old', email: 'old@example.com', first_name: 'Old', last_name: 'Tech' } }],
     });
     const scheduled = currentVisit();
-    mockPrisma.lead.findFirst.mockResolvedValue(leadRow({ walkthroughs: [completed, scheduled] }));
+    mockPrisma.lead.findFirst.mockResolvedValue(leadRow({ visits: [completed, scheduled] }));
 
     const result = await loadExecutionBundle({
       entityType: 'lead',
@@ -167,8 +167,8 @@ describe('loadExecutionBundle — lead', () => {
   it('joins multiple current-visit performer names with a comma and empties gracefully with none assigned', async () => {
     mockPrisma.lead.findFirst.mockResolvedValueOnce(
       leadRow({
-        walkthroughs: [currentVisit({
-          performers: [
+        visits: [currentVisit({
+          assignees: [
             { user: { first_name: 'Mike', last_name: 'Torres' } },
             { user: { first_name: 'Ana', last_name: 'Lee' } },
           ],
@@ -183,7 +183,7 @@ describe('loadExecutionBundle — lead', () => {
     });
     expect(withTwo!.bundle.mergeCtx['lead.performer_names']).toBe('Mike Torres, Ana Lee');
 
-    mockPrisma.lead.findFirst.mockResolvedValueOnce(leadRow({ walkthroughs: [currentVisit({ performers: [] })] }));
+    mockPrisma.lead.findFirst.mockResolvedValueOnce(leadRow({ visits: [currentVisit({ assignees: [] })] }));
     const withNone = await loadExecutionBundle({
       entityType: 'lead',
       entityId: LEAD_ID,

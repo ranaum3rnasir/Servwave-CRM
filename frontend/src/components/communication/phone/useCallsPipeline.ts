@@ -18,8 +18,26 @@ import {
 } from '@/components/communication/phone/shared';
 import type { DateRange, CallsFocus } from '@/components/communication/phone/shared';
 
+/**
+ * Does this agent row represent whoever `id` names?
+ *
+ * A real call's `answeredBy.id` is a ServWave USER id, while a PhoneAgent has
+ * its own primary key and links to a user via `userId`. Comparing the two
+ * directly - as every call site used to - never matched on live data, so the
+ * Calls table showed no answerer and the per-agent Performance drawer counted
+ * zero calls for everyone. The demo seed keys `answeredBy.id` to the agent row
+ * id instead, so both identities have to keep working.
+ *
+ * The `!id` guard is load-bearing: without it an unlinked agent (`userId`
+ * undefined) would match every unattributed call.
+ */
+export function agentMatchesId(agent: PhoneAgent, id?: string): boolean {
+  if (!id) return false;
+  return agent.id === id || agent.userId === id;
+}
+
 export function agentName(agents: PhoneAgent[], id?: string): string | undefined {
-  return id ? agents.find((a) => a.id === id)?.name : undefined;
+  return id ? agents.find((a) => agentMatchesId(a, id))?.name : undefined;
 }
 
 // Which subset of the table each clickable stat card scopes to. The stat

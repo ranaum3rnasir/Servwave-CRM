@@ -137,8 +137,8 @@ describe('computeDso', () => {
     expect(computeDso(100_000, 400_000, 30)).toBe(8);
   });
 
-  // Regression lock on the real numbers from the B&G cutover clone.
-  it('reproduces the verified B&G figure', () => {
+  // Regression lock on the real numbers from the Lakeside cutover clone.
+  it('reproduces the verified Lakeside figure', () => {
     expect(computeDso(276_854, 972_833)).toBe(26);
   });
 });

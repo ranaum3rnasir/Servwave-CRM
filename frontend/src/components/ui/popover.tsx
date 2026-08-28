@@ -8,6 +8,8 @@ const Popover = PopoverPrimitive.Root
 
 const PopoverTrigger = PopoverPrimitive.Trigger
 
+const PopoverAnchor = PopoverPrimitive.Anchor
+
 /* =============================================================================
    PopoverContent - W2 primitive vocabulary: `width` (max-width) x `pad` (padding).
 
@@ -137,4 +139,4 @@ const PopoverContent = React.forwardRef<
 ))
 PopoverContent.displayName = PopoverPrimitive.Content.displayName
 
-export { Popover, PopoverTrigger, PopoverContent, popoverContentVariants }
+export { Popover, PopoverTrigger, PopoverAnchor, PopoverContent, popoverContentVariants }

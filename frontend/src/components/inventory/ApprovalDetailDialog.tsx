@@ -42,6 +42,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusBadge } from "@/components/data/status-badge";
+import { useScheduleTimezone } from '@/lib/schedule-tz';
 
 type EditablePatch = Partial<
   Pick<
@@ -143,6 +144,7 @@ export function ApprovalDetailDialog({
   const { data: allTechs = [] } = useTechs();
   const { data: allJobs = [] } = useInventoryJobs();
   const decideApproval = useDecideApproval();
+  const tz = useScheduleTimezone();
 
   const [rejectComment, setRejectComment] = useState("");
   const [approveComment, setApproveComment] = useState("");
@@ -217,7 +219,7 @@ export function ApprovalDetailDialog({
     if (!approval) return;
     if (!approverSig) return; // gated by signature
     const note = approveComment.trim();
-    const sigNote = `Signed by ${approverSig.fullName} · ${fmtSignedAt(approverSig.signedAt)}`;
+    const sigNote = `Signed by ${approverSig.fullName} · ${fmtSignedAt(approverSig.signedAt, tz)}`;
     const combined = note ? `${note} — ${sigNote}` : sigNote;
     // Seam mutation (mock resolves; Track 2 -> POST /api/inventory/stock-approvals/decide).
     decideApproval.mutate({

@@ -21,7 +21,7 @@
 //   Authentication-Results: amazonses.com;
 //    spf=none (spfCheck: 209.85.221.174 is neither permitted nor denied by
 //    domain of servwave.com) client-ip=209.85.221.174;
-//    envelope-from=info@servwave.com; helo=mail-vk1-f174.google.com;
+//    envelope-from=art.nakamura@servwave.com; helo=mail-vk1-f174.google.com;
 //    dkim=pass header.i=@servwave.com;
 //    dmarc=pass header.from=servwave.com;
 import { describe, it, expect } from 'vitest';
@@ -31,7 +31,7 @@ import { parseDmarcVerdict, INBOUND_AUTHSERV_ID } from '../lib/inbound-auth';
 const REAL_SES_HEADER =
   'amazonses.com; ' +
   'spf=none (spfCheck: 209.85.221.174 is neither permitted nor denied by domain of servwave.com) ' +
-  'client-ip=209.85.221.174; envelope-from=info@servwave.com; helo=mail-vk1-f174.google.com; ' +
+  'client-ip=209.85.221.174; envelope-from=art.nakamura@servwave.com; helo=mail-vk1-f174.google.com; ' +
   'dkim=pass header.i=@servwave.com; ' +
   'dmarc=pass header.from=servwave.com;';
 

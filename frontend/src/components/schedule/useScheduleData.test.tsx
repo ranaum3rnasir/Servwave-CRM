@@ -63,7 +63,7 @@ describe('useScheduleData', () => {
     await waitFor(() =>
       expect(api.get).toHaveBeenCalledWith('/api/jobs', {
         params: {
-          status: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS', 'COMPLETED'],
+          status: ['SCHEDULED', 'IN_PROGRESS', 'COMPLETED'],
           scheduled_after: expectedAfter,
           scheduled_before: expectedBefore,
           department_id: 'dept-9',
@@ -81,7 +81,7 @@ describe('useScheduleData', () => {
     await waitFor(() =>
       expect(api.get).toHaveBeenCalledWith('/api/jobs', {
         params: {
-          status: ['SCHEDULED', 'EN_ROUTE', 'ON_SITE', 'IN_PROGRESS', 'COMPLETED'],
+          status: ['SCHEDULED', 'IN_PROGRESS', 'COMPLETED'],
           scheduled_after: expectedAfter,
           scheduled_before: expectedBefore,
           limit: 500,
@@ -112,7 +112,7 @@ describe('useScheduleData', () => {
     renderHook(() => useScheduleData({ dateRange, departmentFilter: 'all', tz: TZ }), { wrapper: wrapper(qc) });
 
     await waitFor(() => {
-      expect(api.get).toHaveBeenCalledWith('/api/jobs', { params: { status: 'UNASSIGNED', limit: 100 } });
+      expect(api.get).toHaveBeenCalledWith('/api/jobs', { params: { status: 'UNSCHEDULED', limit: 100 } });
       expect(api.get).toHaveBeenCalledWith('/api/leads', {
         params: { walkthrough_status: 'needs_scheduling', limit: 100 },
       });
@@ -129,7 +129,7 @@ describe('useScheduleData', () => {
     });
 
     await waitFor(() =>
-      expect(api.get).toHaveBeenCalledWith('/api/jobs', { params: { status: 'UNASSIGNED', limit: 100 } }),
+      expect(api.get).toHaveBeenCalledWith('/api/jobs', { params: { status: 'UNSCHEDULED', limit: 100 } }),
     );
     expect(vi.mocked(api.get).mock.calls.filter(([url]) => String(url) === '/api/leads')).toEqual([]);
   });
@@ -174,5 +174,53 @@ describe('useScheduleData', () => {
         params: { walkthrough_status: 'needs_scheduling', limit: 100 },
       });
     });
+  });
+});
+
+// ─── Slice 03 — calendar entries (spec §4: core scheduler, every plan tier) ───────────────────
+describe('useScheduleData — calendar entries (slice 03)', () => {
+  it('queries /api/calendar-entries with start_after/start_before matching the window', async () => {
+    mockOrgFeatures(['leads']);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderHook(() => useScheduleData({ dateRange, departmentFilter: 'all', tz: TZ }), { wrapper: wrapper(qc) });
+
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith('/api/calendar-entries', {
+        params: { start_after: expectedAfter, start_before: expectedBefore },
+      }),
+    );
+  });
+
+  it('fires with NO leads feature — unlike the two lead queries, it is not useFeature-gated (spec §4)', async () => {
+    mockOrgFeatures(['jobs', 'scheduling']);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderHook(() => useScheduleData({ dateRange, departmentFilter: 'all', tz: TZ }), { wrapper: wrapper(qc) });
+
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith('/api/calendar-entries', {
+        params: { start_after: expectedAfter, start_before: expectedBefore },
+      }),
+    );
+  });
+});
+
+describe('the board stops asking for statuses the API no longer has (multi-visit S4, D17)', () => {
+  it('never sends EN_ROUTE or ON_SITE in the jobs query', async () => {
+    mockOrgFeatures(['leads']);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderHook(() => useScheduleData({ dateRange, departmentFilter: 'all', tz: TZ }), { wrapper: wrapper(qc) });
+
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    // The jobs facet drops an unknown enum literal rather than 400ing, so sending these would not
+    // break loudly - it would just quietly narrow nothing while looking deliberate. Asserted here
+    // so the board's own contract stays honest about what a job status can be.
+    const jobsCalls = vi.mocked(api.get).mock.calls.filter((c) => c[0] === '/api/jobs');
+    expect(jobsCalls.length).toBeGreaterThan(0);
+    for (const call of jobsCalls) {
+      const status = (call[1] as { params?: { status?: unknown } } | undefined)?.params?.status;
+      const values = Array.isArray(status) ? status : [status];
+      expect(values).not.toContain('EN_ROUTE');
+      expect(values).not.toContain('ON_SITE');
+    }
   });
 });

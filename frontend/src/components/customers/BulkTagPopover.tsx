@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { toast } from '@/components/ui/use-toast';
 import { useTags } from '@/lib/api/tags';
 import { summariseBulkResult } from '@/lib/bulk-result';
+import { TAG_EMBEDDING_QUERY_KEYS } from '@/lib/tag-entities';
 
 interface BulkTagPopoverProps {
   customerIds: string[];
@@ -27,14 +28,38 @@ export function BulkTagPopover({ customerIds, onDone }: BulkTagPopoverProps) {
   const queryClient = useQueryClient();
   const { data: tags } = useTags();
 
+  // Bulk-tagging N customers changes the same caches one tag write changes, so it
+  // drops the same set TagInput does - derived from the shared entity map rather
+  // than hand-listed, because a second hand-written list is exactly how this bug
+  // reached a third writer (#1753, #1760). This one had only ['customers'] and
+  // ['tags']: it never dropped ['customer'], so a customer detail page cached in
+  // the background kept a stale chip row, and it never dropped the other four
+  // entity list keys or the schedule board's four (whose /api/jobs and /api/leads
+  // payloads carry tags too).
+  //
+  // Unlike TagInput this drops the BARE ['customer'] key and emits no
+  // ['customer', id] keys at all. TagInput writes one known record, so it drops
+  // that record scoped and must then SKIP the bare prefix - dropping both would
+  // match the same query twice and invalidateQueries defaults to
+  // cancelRefetch: true, cancelling and restarting its own in-flight refetch. A
+  // bulk write has no single id to scope to, and the bare key is prefix-matched:
+  // one drop already reaches every ['customer', id] in the batch. Enumerating the
+  // ids instead would mean N invalidations that scale with the selection and
+  // re-introduce that double-drop against the bare key, for no added precision.
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['tags'] });
+    for (const key of TAG_EMBEDDING_QUERY_KEYS) {
+      void queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
   const bulkTag = useMutation({
     mutationFn: async (body: { tag_id?: string; name?: string }) => {
       const { data } = await api.post('/api/customers/bulk-tag', { ids: customerIds, ...body });
       return data as { tagged: string[]; failed: { id: string; error: string }[] };
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['tags'] });
+      invalidate();
       setOpen(false);
       setSearch('');
       onDone();

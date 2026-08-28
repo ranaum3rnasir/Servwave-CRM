@@ -45,7 +45,7 @@ describe('PATCH /api/organization — default_inventory_location_id (DEC3)', () 
     mockPrisma.inventoryLocation.findFirst.mockResolvedValue(null); // not in org
     mockPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockPrisma));
     const res = await request(app).patch('/api/organization').set(authHeader('admin'))
-      .send({ default_inventory_location_id: '99555555-0224-9999-9999-995555550224' });
+      .send({ default_inventory_location_id: '99999999-9999-9999-9999-999999999999' });
     expect(res.status).toBe(400);
     expect(mockPrisma.organization.update).not.toHaveBeenCalled();
   });

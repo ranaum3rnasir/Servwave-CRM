@@ -94,7 +94,6 @@ export default function JobsPage() {
               key={metric.key}
               label={metric.label}
               value={metric.value}
-              delta={metric.hint ? { value: metric.hint, direction: "flat" } : undefined}
               active={active}
               onClick={
                 isStatus

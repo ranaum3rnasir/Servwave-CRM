@@ -31,7 +31,7 @@ test.beforeAll(async () => {
     first_name: 'Sarah',
     last_name: 'Chen',
     email: `sarah.chen.${api.suffix}@e2e.local`,
-    phone: '5555550207',
+    phone: '5129876543',
   });
   sarahCustomerId = sarahCustomer.id;
 

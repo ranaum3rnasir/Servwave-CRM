@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/axios';
+import { jobVisitsQueryKey } from '@/lib/useJobVisits';
 import { AssignTeamPopover } from '@/components/crm/AssignTeamPopover';
 
 interface AssignJobCrewPopoverProps {
@@ -33,6 +34,10 @@ export function AssignJobCrewPopover({ jobId, currentAssigneeIds, trigger }: Ass
         queryClient.invalidateQueries({ queryKey: ['job-timeline', jobId] });
         queryClient.invalidateQueries({ queryKey: ['schedule-jobs'] });
         queryClient.invalidateQueries({ queryKey: ['schedule-unassigned'] });
+        // Since S3 the crew lives on visit_assignees (setJobCrewOnCurrentVisit), and the
+        // Visits card names each trip's crew - so the visits query is stale after a
+        // crew replace even though "schedule" was untouched.
+        queryClient.invalidateQueries({ queryKey: jobVisitsQueryKey(jobId) });
       }}
     />
   );

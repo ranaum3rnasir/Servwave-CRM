@@ -1,4 +1,4 @@
--- The local part of an org's business From address (`alphadoors@mail.servwave.com`)
+-- The local part of an org's business From address (`northwind@mail.servwave.com`)
 -- has always been derived from `organizations.name` with no way to override it.
 -- This column lets an org choose its own.
 --

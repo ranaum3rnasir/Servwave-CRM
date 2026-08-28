@@ -5,20 +5,35 @@
  * - vi.mock useAssignableUsers → returns 2 test users
  * - vi.mock the tasks store's addTask so we can inspect what it receives
  * - Radix Select doesn't fully work in jsdom (no portal-based open/close), so we
- *   verify the shadcn SelectTrigger shows placeholder text (AssigneeSelect rendered)
+ *   verify the shadcn SelectTrigger shows placeholder text (the assignee picker rendered)
  *   and that MultiAssigneeSelect rendered its add-member trigger.
- * - Submit path: mock store addTask, fill title, click Create, assert owner_id passed.
+ * - Submit path: mock store addTask, fill title, click Create, assert assignee_ids passed.
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './helpers';
+import { buildAbility } from '@/lib/ability';
 import { CreateTaskModal } from '@/components/tasks/CreateTaskModal';
 import type { AssignableUser } from '@/lib/api/users';
 
+// The signed-in user, per the default auth.store mock in __tests__/setup.ts.
+// They must ALSO be an assignable user, or the self-assigned chip a non-holder
+// sees would render as "Unknown".
+const ACTOR_ID = '00000000-0000-0000-0000-000000000001';
+
 // ── Mock useAssignableUsers ──────────────────────────────────────────────────
 const MOCK_USERS: AssignableUser[] = [
+  {
+    id: ACTOR_ID,
+    first_name: 'Test',
+    last_name: 'Admin',
+    role: 'ADMIN',
+    is_active: true,
+    has_login: true,
+    department: { id: 'dept-ops', name: 'Operations' },
+  },
   {
     id: 'user-alice-uuid',
     first_name: 'Alice',
@@ -52,7 +67,8 @@ const mockAddTask = vi.fn().mockResolvedValue({
   description: '',
   status: 'TODO',
   priority: 'MEDIUM',
-  owner_id: 'user-alice-uuid',
+  assignee_ids: ['user-alice-uuid'],
+  assignees: [{ id: 'user-alice-uuid', name: 'Alice Anderson' }],
   watcher_ids: [],
   due_at: null,
   linked_entity: null,
@@ -89,7 +105,8 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
       description: '',
       status: 'TODO',
       priority: 'MEDIUM',
-      owner_id: 'user-alice-uuid',
+      assignee_ids: ['user-alice-uuid'],
+      assignees: [{ id: 'user-alice-uuid', name: 'Alice Anderson' }],
       watcher_ids: [],
       due_at: null,
       linked_entity: null,
@@ -105,15 +122,15 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
     });
   });
 
-  it('renders the owner AssigneeSelect with placeholder instead of a plain <select>', () => {
+  it('renders the assignee picker with placeholder instead of a plain <select>', () => {
     renderWithProviders(
       <CreateTaskModal open={true} onOpenChange={vi.fn()} />
     );
 
     // The shadcn Select renders a button[role="combobox"] as the trigger.
-    // AssigneeSelect is used for owner; its trigger shows the placeholder.
+    // MultiAssigneeSelect is used for assignees; its trigger shows the placeholder.
     const triggers = screen.getAllByRole('combobox');
-    // At least one combobox trigger exists (the AssigneeSelect for owner)
+    // At least one combobox trigger exists (the assignee picker)
     expect(triggers.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -157,7 +174,7 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
     expect(screen.getByText('New Task')).toBeInTheDocument();
   });
 
-  it('does NOT render a "Suggested:" owner recommendation chip (#415)', () => {
+  it('does NOT render a "Suggested:" assignee recommendation chip (#415)', () => {
     // suggestAssignee([], [alice, bob]) returns alice as "lightest load", so the
     // chip would render under these mocks if the component still showed it.
     renderWithProviders(
@@ -177,7 +194,7 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
     expect(screen.queryByLabelText('Emanuel Dahan')).not.toBeInTheDocument();
   });
 
-  it('does NOT render MOCK_PEOPLE as plain <option> elements in the owner select', () => {
+  it('does NOT render MOCK_PEOPLE as plain <option> elements in the assignee select', () => {
     const { container } = renderWithProviders(
       <CreateTaskModal open={true} onOpenChange={vi.fn()} />
     );
@@ -195,15 +212,16 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
     // MultiAssigneeSelect renders a combobox with placeholder "Add member..."
     // (we can't open Radix dropdowns in jsdom, but the trigger renders)
     const comboboxes = screen.getAllByRole('combobox');
-    expect(comboboxes.length).toBeGreaterThanOrEqual(2); // owner + watchers
+    expect(comboboxes.length).toBeGreaterThanOrEqual(2); // assignees + watchers
   });
 
-  it('submits with owner_id from state when Create is clicked after filling title', async () => {
+  it('submits without assignee_ids when a grant-holder leaves the field blank, so the server defaults to the actor', async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
 
     renderWithProviders(
-      <CreateTaskModal open={true} onOpenChange={onOpenChange} />
+      <CreateTaskModal open={true} onOpenChange={onOpenChange} />,
+      { ability: buildAbility([{ action: 'assign', subject: 'Task' }]) },
     );
 
     // Fill in the title (required)
@@ -224,10 +242,54 @@ describe('CreateTaskModal — real assignee/watcher pickers (FE-3)', () => {
       status: 'TODO',
       priority: 'MEDIUM',
     });
-    // owner_id should be null (nothing selected) or a string — never a MOCK_PEOPLE id
-    if (callArg.owner_id !== null && callArg.owner_id !== undefined && callArg.owner_id !== '') {
-      expect(callArg.owner_id).not.toMatch(/^u_/); // mock people ids start with u_
-    }
+    // An EMPTY assignee field must send no key at all: the server reads a
+    // missing `assignee_ids` as "default to the actor", while an empty array is
+    // a 400.
+    expect(callArg.assignee_ids).toBeUndefined();
+  });
+
+  // ── Assignee gating (CASL `assign` on Task) ───────────────────────────────
+
+  it('disables the assignee field and pre-fills the actor for a caller WITHOUT `assign` on Task', async () => {
+    // No `ability` -> emptyAbility -> can('assign','Task') is false. This is the
+    // custom-role case: `role === 'ADMIN'` would answer this question wrongly in
+    // both directions, so the control reads the CASL grant instead.
+    const user = userEvent.setup();
+    renderWithProviders(<CreateTaskModal open={true} onOpenChange={vi.fn()} />);
+
+    // The picker's trigger is disabled, and the actor is shown as a chip, so
+    // the field states the outcome the server will force rather than looking
+    // like a free choice.
+    expect(screen.getByText('You can only assign tasks to yourself.')).toBeInTheDocument();
+    expect(document.getElementById('new-task-assignees')).toBeDisabled();
+    expect(screen.getByText('Test Admin')).toBeInTheDocument();
+    // The chip carries no remove control while disabled.
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText('Task title'), 'My own errand');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => expect(mockAddTask).toHaveBeenCalledOnce());
+    // Exactly [actorId] - the only array the server accepts from a non-holder.
+    expect((mockAddTask as Mock).mock.calls[0][0].assignee_ids)
+      .toEqual([ACTOR_ID]);
+  });
+
+  it('lets a caller WITH `assign` on Task edit the field, and sends what they chose', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <CreateTaskModal open={true} onOpenChange={vi.fn()} />,
+      { ability: buildAbility([{ action: 'assign', subject: 'Task' }]) },
+    );
+
+    // A holder starts blank - no forced self-assignment, no explanatory note.
+    expect(screen.queryByText('You can only assign tasks to yourself.')).not.toBeInTheDocument();
+    expect(document.getElementById('new-task-assignees')).toBeEnabled();
+
+    await user.type(screen.getByPlaceholderText('Task title'), 'Crew job');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(mockAddTask).toHaveBeenCalledOnce());
+    expect((mockAddTask as Mock).mock.calls[0][0].assignee_ids).toBeUndefined();
   });
 
   it('closes modal and resets after successful create', async () => {
@@ -271,7 +333,8 @@ describe('CreateTaskModal — watcher_ids forwarded to addTask (bug fix)', () =>
       description: '',
       status: 'TODO',
       priority: 'MEDIUM',
-      owner_id: null,
+      assignee_ids: ['admin'],
+      assignees: [{ id: 'admin', name: 'Admin User' }],
       watcher_ids: [],
       due_at: null,
       linked_entity: null,
@@ -295,7 +358,8 @@ describe('CreateTaskModal — watcher_ids forwarded to addTask (bug fix)', () =>
       description: '',
       status: 'TODO',
       priority: 'MEDIUM',
-      owner_id: null,
+      assignee_ids: ['admin'],
+      assignees: [{ id: 'admin', name: 'Admin User' }],
       due_at: null,
       linked_entity_type: null,
       linked_entity_id: null,
@@ -324,7 +388,8 @@ describe('CreateTaskModal — watcher_ids forwarded to addTask (bug fix)', () =>
       description: '',
       status: 'TODO',
       priority: 'MEDIUM',
-      owner_id: null,
+      assignee_ids: ['admin'],
+      assignees: [{ id: 'admin', name: 'Admin User' }],
       due_at: null,
       linked_entity_type: null,
       linked_entity_id: null,

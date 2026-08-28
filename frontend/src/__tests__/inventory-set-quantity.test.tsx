@@ -20,8 +20,20 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
-import InventoryPage from '@/pages/inventory/InventoryPage';
+import InventoryPage from '@/pages/v2/inventory/InventoryPage';
 import { buildAbility } from '@/lib/ability';
+
+import { toast } from '@/ui-kit/components/ui/sonner';
+
+// The routed page reports through the kit's sonner toaster, which App.tsx
+// mounts at the root and renderWithProviders does not. Spying on the call is
+// how the toast copy stays asserted without standing a toaster up per test.
+vi.mock('@/ui-kit/components/ui/sonner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/ui-kit/components/ui/sonner')>()),
+  toast: vi.fn(),
+}));
+
+const mockToast = vi.mocked(toast);
 
 const h = vi.hoisted(() => ({
   LOC_MAIN: 'aaaaaaa1-0000-4000-8000-000000000001',
@@ -109,7 +121,7 @@ beforeEach(() => {
   mockApi.post.mockResolvedValue({ data: { success: true, on_hand: 7, delta: -2 } });
 });
 
-describe('InventoryPage — Set quantity (Inventory P1 §6)', () => {
+describe('v2 InventoryPage - Set quantity (Inventory P1 §6)', () => {
   it('the kebab offers "Set quantity" and no longer the dead-end "Cycle count"', async () => {
     renderWithProviders(<InventoryPage />, {
       initialEntries: ['/inventory'],
@@ -156,10 +168,18 @@ describe('InventoryPage — Set quantity (Inventory P1 §6)', () => {
     await waitFor(() => {
       expect(screen.queryByText('Set Quantity (Count)')).toBeNull();
     });
-    expect(
-      await screen.findByText(/FLT-20: set to 7 at Main Warehouse \(adjust -2\)/),
-    ).toBeInTheDocument();
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory'] });
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.stringMatching(/FLT-20: set to 7 at Main Warehouse \(adjust -2\)/),
+      ),
+    );
+    // A stock write now refreshes its own key set rather than the whole
+    // ['inventory'] prefix (#1639): the blanket key refetched all 22 inventory
+    // queries per write and could exhaust the 100-per-60s API limiter.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'items'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'movements'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['inventory', 'low-stock'] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['inventory'] });
   });
 
   it('requires a reason preset before submitting (no POST without one)', async () => {

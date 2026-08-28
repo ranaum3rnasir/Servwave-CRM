@@ -40,7 +40,7 @@ describe('Jobs Report — DEPOSIT invoices excluded from billed/paid (#499)', ()
           // row-map (report.controller.ts:262-288) dereferences them unguarded.
           customer: { company_name: 'Acme', first_name: null, last_name: null, email: 'a@x.com', phone: null, source: null },
           service_location: { address_line1: '1 Main', address_line2: null, city: 'NYC', state: 'NY', zip: '10001' },
-          assignees: [],
+          assignees: [], visits: [{ assignees: [] }],
           dispatcher: null,
           invoices,
         },

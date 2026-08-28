@@ -32,15 +32,22 @@ import {
 /**
  * The exact string DialogContent renders for a call site passing nothing.
  *
- * This is the pre-phase-8 baseline plus one deliberate addition:
- * `grid-cols-[minmax(0,1fr)]`, which stops a nowrap child sizing the single
- * `auto` track past the panel's max width (see dialog.tsx's note). The guard
- * this baseline enforces is that `width`/`pad`/`gap` never move the rendered
- * string, not that the primitive can never be fixed - so a change here has to
- * be an intended change to the primitive itself, as this one is.
+ * The guard this baseline enforces is that `width`/`pad`/`gap` never move the
+ * rendered string - NOT that the primitive can never be fixed. A change here
+ * has to be an intended change to the primitive itself. Two have been made:
+ *
+ *  1. phase 8's `grid-cols-[minmax(0,1fr)]`, which stops a nowrap child sizing
+ *     the single `auto` track past the panel's max width;
+ *  2. the v2 repaint - the kit's scrim, radius, elevation, surface and close
+ *     cell, plus the height cap and scroll that stop a tall dialog spilling off
+ *     both edges of the viewport at once. See dialog.tsx's own header for why
+ *     that repaint lives in this file rather than in sixty call sites.
+ *
+ * The box model is deliberately untouched by both: `w-*` aside, the width,
+ * padding and gap defaults are still `max-w-lg` / `p-6` / `gap-4`.
  */
 const BASELINE =
-  'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg grid-cols-[minmax(0,1fr)] translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-surface-light p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-card'
+  'fixed left-[50%] top-[50%] z-50 grid w-[calc(100%-2.5rem)] max-w-lg grid-cols-[minmax(0,1fr)] translate-x-[-50%] translate-y-[-50%] gap-4 max-h-[calc(100dvh-2.5rem)] overflow-y-auto overflow-x-hidden overscroll-contain border bg-kit-card p-6 shadow-modal duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] rounded-xl'
 
 /**
  * DialogContent renders through a Radix Portal, so it lands on

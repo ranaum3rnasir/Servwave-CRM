@@ -10,11 +10,13 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Label } from '@/components/ui/label';
+import { FormField } from '@/components/patterns/FormField';
 import { DatePicker } from '@/components/form/DatePicker';
-import { DateTimePicker } from '@/components/form/DateTimePicker';
 import { MultiAssigneeSelect } from '@/components/crm/MultiAssigneeSelect';
-import { useScheduleTimezone, pickerValueToIso, isoToPickerValue } from '@/lib/schedule-tz';
+import { ScheduleTimeFields } from '@/components/schedule/ScheduleTimeFields';
+import { EMPTY_SCHEDULE_TIME, isInvertedRange, type ScheduleTimeValue } from '@/components/schedule/scheduleTimeValue';
+import { useScheduleTimezone, dayAndTimeToIso, isoToOrgDay, isoToOrgTime } from '@/lib/schedule-tz';
+import { jobVisitsQueryKey } from '@/lib/useJobVisits';
 import { Loader2 } from 'lucide-react';
 
 type AssignJobDialogMode = 'assign' | 'schedule';
@@ -35,18 +37,36 @@ interface AssignJobDialogProps {
   defaultEnd?: string;      // ISO string — pre-fills scheduled end from calendar drop
   defaultTechId?: string;   // pre-selects technician (for grouped-by-tech calendar drop)
   defaultIsAllDay?: boolean;
+  /**
+   * Whether the defaults above describe where the job ALREADY is, rather than where it is
+   * being moved to. The two callers mean opposite things by the same props: the board seeds
+   * the slot the user just dropped onto, which is the whole statement even if nothing is then
+   * edited, while the job page seeds the job's own window so Reschedule opens on it. Only in
+   * the second case is leaving the fields alone a no-op, and saying so is what stops a
+   * crew-only assign from re-booking the job. Defaults to false - the board's meaning.
+   */
+  defaultsAreCurrentSchedule?: boolean;
 }
 
-export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', currentAssigneeIds, isScheduled, defaultStart, defaultEnd, defaultTechId, defaultIsAllDay }: AssignJobDialogProps) {
+export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', currentAssigneeIds, isScheduled, defaultStart, defaultEnd, defaultTechId, defaultIsAllDay, defaultsAreCurrentSchedule = false }: AssignJobDialogProps) {
   const queryClient = useQueryClient();
   // The picker values below are zoneless wall clock and mean the ORG's clock. This dialog
   // is reached from BOTH the scheduler board and the job detail page, so before this it was
   // the one place where dragging a card and pressing Assign produced different stored times.
   const timezone = useScheduleTimezone();
   const [techIds, setTechIds] = useState<string[]>([]);
-  const [scheduledStart, setScheduledStart] = useState('');
-  const [scheduledEnd, setScheduledEnd] = useState('');
+  // The four picker fields ARE the state of record, held exactly as ScheduleTimeFields
+  // edits them. Storing a combined 'YYYY-MM-DDTHH:mm' pair instead lost every partial
+  // edit — a start date picked before its time collapsed the whole value to '', so the
+  // fields never accumulated and Schedule posted crew with no schedule at all.
+  const [time, setTime] = useState<ScheduleTimeValue>(EMPTY_SCHEDULE_TIME);
   const [isAllDay, setIsAllDay] = useState(false);
+  // What the fields held the moment the dialog opened, so the submit can tell a window the
+  // user EDITED from one that was only ever displayed to them. See `scheduleUnchanged`.
+  const [seeded, setSeeded] = useState<{ time: ScheduleTimeValue; isAllDay: boolean }>({
+    time: EMPTY_SCHEDULE_TIME,
+    isAllDay: false,
+  });
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
   const [pendingForce, setPendingForce] = useState<{ techIds: string[]; start: string; end: string } | null>(null);
   const isReassign = Boolean(currentAssigneeIds && currentAssigneeIds.length > 0);
@@ -58,14 +78,85 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
     return new Date(Date.UTC(y!, m! - 1, d! + 1)).toISOString().slice(0, 10);
   };
 
+  /** The day before `day` ('YYYY-MM-DD'), the inverse of `nextDay`. */
+  const prevDay = (day: string): string => {
+    const [y, m, d] = day.split('-').map(Number);
+    return new Date(Date.UTC(y!, m! - 1, d! - 1)).toISOString().slice(0, 10);
+  };
+
+  /**
+   * An all-day job spanning `firstDay`..`lastDay` INCLUSIVE, as the user reads the two
+   * date fields: picking Aug 17 - Aug 19 means the job runs through the end of Aug 19.
+   * Stored the way every other surface stores a window - an EXCLUSIVE end instant - so
+   * the API contract is untouched and `isInvertedRange` still guards it: a single-day
+   * all-day job is midnight-to-midnight, never a zero-length range.
+   */
+  const allDayRange = (firstDay: string, lastDay: string): ScheduleTimeValue => ({
+    date: firstDay,
+    startTime: '00:00',
+    endDate: nextDay(lastDay),
+    endTime: '00:00',
+  });
+
+  /**
+   * The last day the current value OCCUPIES, which is what the End date field shows.
+   * An end at exactly midnight belongs to the previous day - the same convention rbc
+   * itself uses when it decides an event crosses a day boundary (see
+   * `occupiesAllDayStrip`), so toggling All Day on a timed job keeps its real span
+   * instead of collapsing a four-day job to one.
+   */
+  const lastDayOf = (v: ScheduleTimeValue): string => {
+    if (!v.endDate) return v.date;
+    return v.endTime === '00:00' ? prevDay(v.endDate) : v.endDate;
+  };
+
+  // The two instants the API speaks, derived from the fields at the seam. `undefined`
+  // whenever a half is not fully set, which is what "leave the schedule alone" means to
+  // POST /assign.
+  const startIso = dayAndTimeToIso(time.date, time.startTime, timezone);
+  const endIso = dayAndTimeToIso(time.endDate, time.endTime, timezone);
+
+  // What the All Day "End date" field displays: the inclusive last day, or '' while the
+  // form is still empty - never a day derived from an end that was never set.
+  const allDayLastDay = time.endDate ? lastDayOf(time) : '';
+
+  /**
+   * True when the pickers still hold exactly what they were seeded with. Both instants are
+   * then withheld from the POST, because to `assign()` any scheduled_start means "this job
+   * is being booked": it forces status to SCHEDULED and runs milestoneClears('scheduled'),
+   * nulling en_route_at / on_site_at / started_at / completed_at / cancelled_at. Since this
+   * dialog seeds the job's own window so Reschedule can edit it, the crew-focused triggers
+   * would otherwise restate that window and quietly un-complete a finished job.
+   *
+   * Also what keeps a lone seeded start off the wire - assignJobSchema's pairing refine 400s
+   * on a start with no end, a state updateJobSchema deliberately allows a PATCH to create.
+   */
+  const scheduleUnchanged =
+    defaultsAreCurrentSchedule &&
+    time.date === seeded.time.date &&
+    time.startTime === seeded.time.startTime &&
+    time.endDate === seeded.time.endDate &&
+    time.endTime === seeded.time.endTime &&
+    isAllDay === seeded.isAllDay;
+
   // Reset state when dialog opens, apply defaults. Seed the crew from a calendar
   // drop (defaultTechId) or the job's current crew (currentAssigneeIds).
   useEffect(() => {
     if (open) {
       setTechIds(defaultTechId ? [defaultTechId] : (currentAssigneeIds ?? []));
-      setScheduledStart(defaultStart ? isoToPickerValue(defaultStart, timezone) : '');
-      setScheduledEnd(defaultEnd ? isoToPickerValue(defaultEnd, timezone) : '');
+      const opening: ScheduleTimeValue = {
+        date: isoToOrgDay(defaultStart, timezone),
+        startTime: isoToOrgTime(defaultStart, timezone),
+        endDate: isoToOrgDay(defaultEnd, timezone),
+        endTime: isoToOrgTime(defaultEnd, timezone),
+      };
+      setTime(opening);
       setIsAllDay(defaultIsAllDay ?? false);
+      // Snapshot the FIELDS, not the incoming instants: isoToOrgTime formats HH:mm, so a
+      // stored start carrying seconds seeds as :00 and would never compare equal to its own
+      // ISO. Comparing what the pickers were given to what they now hold is the only test
+      // that means "the user did not touch this".
+      setSeeded({ time: opening, isAllDay: defaultIsAllDay ?? false });
       setConflictMessage(null);
       setPendingForce(null);
     }
@@ -77,8 +168,10 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
     mutationFn: async () => {
       const { data } = await api.post(`/api/jobs/${jobId}/assign`, {
         assignee_ids: techIds,
-        scheduled_start: pickerValueToIso(scheduledStart, timezone),
-        scheduled_end: pickerValueToIso(scheduledEnd, timezone),
+        scheduled_start: scheduleUnchanged ? undefined : startIso,
+        scheduled_end: scheduleUnchanged ? undefined : endIso,
+        // Sent either way: assign() writes `is_all_day ?? false`, so omitting it on a
+        // crew-only assign would clear the flag on an all-day job.
         is_all_day: isAllDay,
       });
       return data;
@@ -89,6 +182,11 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
       queryClient.invalidateQueries({ queryKey: ['job-timeline', jobId] });
       queryClient.invalidateQueries({ queryKey: ['schedule-unassigned'] });
       queryClient.invalidateQueries({ queryKey: ['schedule-jobs'] });
+      // /assign writes the VISIT SET through the door (multi-visit S2 - first booking creates
+      // Visit 1), so the visits query is as stale as the job payload. Without this, the job
+      // page's Visits tab and lifecycle rail keep the cached pre-assign list for the full
+      // 5-minute staleTime while the hero tile already shows the new window.
+      queryClient.invalidateQueries({ queryKey: jobVisitsQueryKey(jobId) });
       onOpenChange(false);
     },
     onError: (err: unknown) => {
@@ -96,11 +194,7 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
       if (axiosErr.response?.status === 409) {
         const msg = extractApiError(err, 'Scheduling conflict detected.');
         setConflictMessage(msg);
-        setPendingForce({
-          techIds,
-          start: pickerValueToIso(scheduledStart, timezone) ?? '',
-          end: pickerValueToIso(scheduledEnd, timezone) ?? '',
-        });
+        setPendingForce({ techIds, start: startIso ?? '', end: endIso ?? '' });
       }
     },
   });
@@ -122,6 +216,9 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
       queryClient.invalidateQueries({ queryKey: ['job-timeline', jobId] });
       queryClient.invalidateQueries({ queryKey: ['schedule-unassigned'] });
       queryClient.invalidateQueries({ queryKey: ['schedule-jobs'] });
+      // Same visit-set write as the non-force path above - the force flag only skips the
+      // conflict check, not the booking.
+      queryClient.invalidateQueries({ queryKey: jobVisitsQueryKey(jobId) });
       setConflictMessage(null);
       setPendingForce(null);
       onOpenChange(false);
@@ -150,15 +247,23 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
         </DialogHeader>
 
         <div className="space-y-4">
-          <div>
-            <Label>Crew *</Label>
+          <FormField
+            label="Crew"
+            required={mode !== 'schedule'}
+            // A visit can be booked with no crew yet - assignJobSchema accepts
+            // assignee_ids: [] (REPLACE semantics), the board's reschedule confirm
+            // already renders "Crew (unchanged): No crew", and the notify email falls
+            // back to "Our team" (PR #1694). Only 'assign' mode still requires a pick;
+            // see the submit gate below for why.
+            hint={mode === 'schedule' ? 'Optional - assign later if you like.' : undefined}
+          >
             <MultiAssigneeSelect
               value={techIds}
               onChange={setTechIds}
               placeholder="Add member..."
               enabled={open}
             />
-          </div>
+          </FormField>
 
           <div className="flex items-center gap-2 py-1">
             {/* Not converted to FormField: a checkbox row (label sits beside the control, not
@@ -169,11 +274,7 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
               checked={isAllDay}
               onChange={(e) => {
                 setIsAllDay(e.target.checked);
-                if (e.target.checked && scheduledStart) {
-                  const day = scheduledStart.slice(0, 10);
-                  setScheduledStart(`${day}T00:00`);
-                  setScheduledEnd(`${nextDay(day)}T00:00`);
-                }
+                if (e.target.checked && time.date) setTime(allDayRange(time.date, lastDayOf(time)));
               }}
               className="rounded border-border"
             />
@@ -181,30 +282,35 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
           </div>
 
           {isAllDay ? (
-            <div>
-              <Label>Date</Label>
-              <DatePicker
-                value={scheduledStart ? (scheduledStart.split('T')[0] ?? '') : ''}
-                onChange={(dateStr) => {
-                  if (dateStr) {
-                    setScheduledStart(`${dateStr}T00:00`);
-                    setScheduledEnd(`${nextDay(dateStr)}T00:00`);
-                  }
-                }}
-              />
+            /* Two dates, not one. An all-day job routinely runs several days (a multi-day
+               install), and a single Date field made that unsayable - the end silently
+               became the next morning however long the work actually was. Both fields read
+               INCLUSIVE; `allDayRange` converts to the stored exclusive end. */
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Start date">
+                <DatePicker
+                  value={time.date}
+                  onChange={(dateStr) => {
+                    if (!dateStr) return;
+                    // Dragging the start past the end takes the end with it, rather than
+                    // leaving a backwards range the user has to notice and repair.
+                    const last = lastDayOf(time);
+                    setTime(allDayRange(dateStr, last && last >= dateStr ? last : dateStr));
+                  }}
+                />
+              </FormField>
+              <FormField
+                label="End date"
+                error={isInvertedRange(time) ? 'Ends before it starts' : undefined}
+              >
+                <DatePicker
+                  value={allDayLastDay}
+                  onChange={(dateStr) => { if (dateStr) setTime(allDayRange(time.date || dateStr, dateStr)); }}
+                />
+              </FormField>
             </div>
           ) : (
-            <>
-              <div>
-                <Label>Scheduled Start</Label>
-                <DateTimePicker value={scheduledStart} onChange={setScheduledStart} />
-              </div>
-
-              <div>
-                <Label>Scheduled End</Label>
-                <DateTimePicker value={scheduledEnd} onChange={setScheduledEnd} />
-              </div>
-            </>
+            <ScheduleTimeFields value={time} onChange={setTime} />
           )}
 
           {conflictMessage && (
@@ -240,7 +346,18 @@ export function AssignJobDialog({ open, onOpenChange, jobId, mode = 'assign', cu
             </Button>
             <Button
               onClick={() => mutation.mutate()}
-              disabled={techIds.length === 0 || mutation.isPending || Boolean(conflictMessage)}
+              disabled={
+                // Crew is required only in 'assign' mode - that dialog exists to NAME a
+                // crew, and assign()'s REPLACE semantics mean an empty submit there would
+                // silently clear whoever is already on the job. 'schedule' mode has no
+                // such gate: a visit without a crew yet is a designed state (see the
+                // Crew FormField's hint above), so submitting posts assignee_ids: [].
+                (mode !== 'schedule' && techIds.length === 0) ||
+                mutation.isPending ||
+                Boolean(conflictMessage) ||
+                // The fields say why; posting a backwards range is never what was meant.
+                isInvertedRange(time)
+              }
             >
               {mutation.isPending ? (
                 <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> {submitBusyLabel}</>

@@ -84,7 +84,8 @@ async function seedTechnician() {
     } // end of else block for user creation
 
     // Check if sample data already exists
-    const existingJobs = await prisma.job.findMany({ where: { assignees: { some: { user_id: techUserId } } } });
+    // S8 (D6): crew lives on the VISIT.
+    const existingJobs = await prisma.job.findMany({ where: { visits: { some: { assignees: { some: { user_id: techUserId } } } } } });
     if (existingJobs.length > 0) {
       console.log(`\nSample data already exists (${existingJobs.length} jobs). Skipping.`);
       return;
@@ -189,14 +190,28 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer.id,
         service_location_id: location.id,
-        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        // S8 (D6): the crew rides on the job's trip, not on the job. The visit carries the same
+        // window the job states, which is what makes the seeded technician reachable by OWN_JOB.
+        visits: {
+          create: {
+            organization_id: DEMO_ORG_ID,
+            purpose: 'WORK',
+            visit_seq: 1,
+            // Mirrors the job's own window below - S8's readers resolve schedule and duration off
+            // the visit set now, and an un-timed seeded visit renders no time at all once they do.
+            scheduled_at: makeTime(9, 0),
+            scheduled_end: makeTime(11, 0),
+            assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+          },
+        },
         organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'AC Unit Repair — AC unit not cooling. Customer reports warm air blowing. Unit is a Carrier 24ACC636, installed 2019. Located on south side of house. Gate code is 4521. Dog in backyard — enter through side gate.',
         status: 'IN_PROGRESS',
-        scheduled_start: makeTime(9, 0),
-        scheduled_end: makeTime(11, 0),
+        // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the visit
+        // created above already carries the matching window, and the wire keys are now a
+        // computed projection off it.
         started_at: makeTime(9, 8),
       },
     });
@@ -207,14 +222,27 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer2.id,
         service_location_id: location2.id,
-        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        // S8 (D6): the crew rides on the job's trip, not on the job. The visit carries the same
+        // window the job states, which is what makes the seeded technician reachable by OWN_JOB.
+        visits: {
+          create: {
+            organization_id: DEMO_ORG_ID,
+            purpose: 'WORK',
+            visit_seq: 1,
+            // Mirrors the job's own window below - S8's readers resolve schedule and duration off
+            // the visit set now, and an un-timed seeded visit renders no time at all once they do.
+            scheduled_at: makeTime(11, 30),
+            scheduled_end: makeTime(13, 30),
+            assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+          },
+        },
         organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Furnace Installation — Install new Lennox SL280V furnace. Old unit removed by previous crew. Ductwork modification may be needed.',
+        // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the visit
+        // created above already carries the matching window.
         status: 'SCHEDULED',
-        scheduled_start: makeTime(11, 30),
-        scheduled_end: makeTime(13, 30),
       },
     });
 
@@ -224,14 +252,27 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer3.id,
         service_location_id: location3.id,
-        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        // S8 (D6): the crew rides on the job's trip, not on the job. The visit carries the same
+        // window the job states, which is what makes the seeded technician reachable by OWN_JOB.
+        visits: {
+          create: {
+            organization_id: DEMO_ORG_ID,
+            purpose: 'WORK',
+            visit_seq: 1,
+            // Mirrors the job's own window below - S8's readers resolve schedule and duration off
+            // the visit set now, and an un-timed seeded visit renders no time at all once they do.
+            scheduled_at: makeTime(14, 30),
+            scheduled_end: makeTime(16, 30),
+            assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+          },
+        },
         organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Water Heater Replacement — Replace 40-gallon gas water heater. Customer wants tankless upgrade quote as well.',
+        // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the visit
+        // created above already carries the matching window.
         status: 'SCHEDULED',
-        scheduled_start: makeTime(14, 30),
-        scheduled_end: makeTime(16, 30),
       },
     });
 
@@ -241,14 +282,27 @@ async function seedTechnician() {
         job_number: `J${String(nextNum++).padStart(5, '0')}`,
         customer_id: customer.id,
         service_location_id: location.id,
-        assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+        // S8 (D6): the crew rides on the job's trip, not on the job. The visit carries the same
+        // window the job states, which is what makes the seeded technician reachable by OWN_JOB.
+        visits: {
+          create: {
+            organization_id: DEMO_ORG_ID,
+            purpose: 'WORK',
+            visit_seq: 1,
+            // Mirrors the job's own window below - S8's readers resolve schedule and duration off
+            // the visit set now, and an un-timed seeded visit renders no time at all once they do.
+            scheduled_at: makeTime(17, 0),
+            scheduled_end: makeTime(17, 45),
+            assignees: { create: { user_id: techUserId, organization_id: DEMO_ORG_ID } },
+          },
+        },
         organization_id: DEMO_ORG_ID,
         // Creator tracking (audit only): a seeded job was authored by the seeder, not a person.
         created_by_source: 'SYSTEM',
         scope_notes: 'Thermostat Wiring Check — Follow-up from AC repair. Verify thermostat wiring after unit replacement.',
+        // S8 (RATIFIED, A5): scheduled_start/scheduled_end DROPPED as job columns - the visit
+        // created above already carries the matching window.
         status: 'SCHEDULED',
-        scheduled_start: makeTime(17, 0),
-        scheduled_end: makeTime(17, 45),
       },
     });
 

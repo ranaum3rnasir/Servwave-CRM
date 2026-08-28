@@ -74,6 +74,9 @@ const config: StorybookConfig = {
     "../src/components/charts/**/*.stories.@(ts|tsx)",
     "../src/components/jobs/overview/**/*.stories.@(ts|tsx)",
     "../src/components/data/**/*.stories.@(ts|tsx)",
+    // SRVW-243 - schedule was never globbed, so a story here would have existed on
+    // disk and been invisible in Storybook (the recurring phase-12 trap).
+    "../src/components/schedule/**/*.stories.@(ts|tsx)",
   ],
   addons: ["@storybook/addon-essentials"],
   framework: {

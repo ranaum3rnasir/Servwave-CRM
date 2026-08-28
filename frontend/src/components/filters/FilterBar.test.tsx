@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { screen, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { renderWithProviders } from '@/__tests__/helpers';
 import { FilterBar } from './FilterBar';
 import type { FacetConfig, FacetOption, FilterState } from '@/lib/filters/types';
 
@@ -68,7 +69,9 @@ const sourceOptions: FacetOption[] = [
 function setup(value: FilterState = {}, onChange = vi.fn()) {
   const resolveOptions = vi.fn((sourceId: string) => (sourceId === 'sources' ? sourceOptions : []));
   const resolveMax = vi.fn((sourceId: string) => (sourceId === 'estimatesMax' ? 25 : 0));
-  render(
+  // #1634: the dateRange facet's control (DateFacet) now calls
+  // useScheduleTimezone(), which needs a QueryClientProvider ancestor.
+  renderWithProviders(
     <FilterBar
       registry={registry}
       value={value}

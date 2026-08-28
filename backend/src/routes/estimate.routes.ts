@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/authenticate';
 import { attachAbility } from '../middleware/attachAbility';
 import { canDo } from '../middleware/canGuard';
 import { validate } from '../middleware/validate';
+import { requireUuidParam } from '../middleware/requireUuidParam';
 import { publicReadLimiter, publicActionLimiter, expensiveLimiter } from '../middleware/rate-limit';
 import { unscopedRequest } from '../middleware/unscopedRequest';
 import { withOrgContext } from '../middleware/withOrgContext';
@@ -53,6 +54,13 @@ router.post('/', canDo('create', 'Estimate'), validate(estimateController.create
 router.get('/:id', canDo('read', 'Estimate'), estimateController.getById);
 router.patch('/:id', canDo('update', 'Estimate'), validate(estimateController.updateEstimateSchema), estimateController.update);
 router.delete('/:id', canDo('delete', 'Estimate'), estimateController.remove);
+
+// Editable record ids (Workiz dual-run, SERV10X record-renumber). Preview is read-only/advisory
+// (no lock); PATCH is the real rename, transactional. Both gated by the dedicated `renumber`
+// grant (distinct from `update`) - canAccessRow inside the controller does the per-instance
+// ownership check.
+router.post('/:id/number/preview', canDo('renumber', 'Estimate'), validate(estimateController.estimateNumberSchema), estimateController.previewNumber);
+router.patch('/:id/number', canDo('renumber', 'Estimate'), validate(estimateController.estimateNumberSchema), estimateController.renameNumber);
 
 // Actions
 router.post('/:id/send', canDo('send', 'Estimate'), validate(estimateController.sendEstimateSchema), estimateController.send);
@@ -126,7 +134,13 @@ router.get('/:id/history', canDo('read', 'Estimate'), estimateController.getHist
 router.post('/:id/notes', canDo('update', 'Estimate'), validate(estimateController.createEstimateNoteSchema), estimateController.addNote);
 
 // Tags (polymorphic)
-router.post('/:id/tags', canDo('update', 'Estimate'), validate(tagController.addTagToEntitySchema), tagController.addTagToEstimate);
-router.delete('/:id/tags/:tagId', canDo('update', 'Estimate'), tagController.removeTagFromEstimate);
+// Tag routes take BOTH ids straight from the path into `where` clauses over Postgres
+// `uuid` columns, so without these guards a stray segment makes the driver throw P2023
+// and the controller's catch reports a 500 for what is only a bad URL. They sit AFTER
+// canDo so a caller without the grant still gets 403 rather than learning whether the
+// id was well-formed, and they return the SAME 404 text the handler gives for a row
+// that genuinely is not there.
+router.post('/:id/tags', canDo('update', 'Estimate'), requireUuidParam('id', 'estimate not found'), validate(tagController.addTagToEntitySchema), tagController.addTagToEstimate);
+router.delete('/:id/tags/:tagId', canDo('update', 'Estimate'), requireUuidParam('id', 'estimate not found'), requireUuidParam('tagId', 'Tag not attached to this estimate'), tagController.removeTagFromEstimate);
 
 export default router;

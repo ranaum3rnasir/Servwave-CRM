@@ -35,8 +35,8 @@ UPDATE "organizations"
 -- ─── Backfill 2: preserve today's Communication access exactly ───────────────
 -- SCALE includes `phone` (minPlan PRO), but Communication is NOT enabled for
 -- real production orgs today — backend/src/lib/communicationAccess.ts grants it
--- ONLY to demo orgs and the Alpha Doors allowlist. Without this statement the
--- migration would silently hand B&G, Talon and every other tenant the full
+-- ONLY to demo orgs and the Northwind Services allowlist. Without this statement the
+-- migration would silently hand Lakeside, Riverbend and every other tenant the full
 -- /api/communication/* surface, including the softphone token minter at
 -- comm-phone-access.routes.ts:19.
 --
@@ -46,7 +46,7 @@ UPDATE "organizations"
   SET "feature_overrides" = COALESCE("feature_overrides", '{}'::jsonb) || '{"phone": false}'::jsonb
   WHERE "created_at" < TIMESTAMP '2026-07-21 00:00:00'
     AND "is_demo" = false
-    AND "id" <> 'd40afcec-0ddf-471f-b99d-8e5f23cbdadf';  -- Alpha Doors, the CTM pilot
+    AND "id" <> '11111111-2222-4333-8444-555555555555';  -- Northwind Services, the CTM pilot
 
 -- On a vanilla postgres:16 CI database no organizations rows exist, so both
 -- UPDATEs match 0 rows and return success. Harmless — same pattern as

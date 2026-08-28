@@ -10,6 +10,14 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 const requestCall = vi.hoisted(() => vi.fn());
+// These specs render deep phone components without a QueryClientProvider - every
+// data hook is stubbed individually. Times now resolve against the ORG's zone, so
+// the org query joins that list; pinned here so the rendered clock is fixed rather
+// than the runner's.
+vi.mock("@/lib/api/organization", () => ({
+  useOrganization: () => ({ data: { timezone: "America/New_York" } }),
+}));
+
 vi.mock("@/lib/communication/phoneTabHandoff", () => ({
   requestCall,
 }));
@@ -29,7 +37,7 @@ vi.mock("@/lib/api/communication", () => ({
   fmtPhone: (n: string) => n,
   // Pulled in transitively by the Dialer module (ActiveCallPopup/MessagePanel
   // live there) — CallsView itself must never place a call after this fix.
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   useCalls: () => ({ data: [] }),
   useMessageThreads: () => ({ data: [] }),
   useDialerSearch: () => ({ data: null, isFetching: false }),
@@ -70,7 +78,7 @@ const MISSED_CALL: CallSession = {
   id: "cd000000-0000-0000-0000-000000000001",
   direction: "inbound",
   fromNumber: "+15551230000",
-  toNumber: "+15555550202",
+  toNumber: "+12019037784",
   status: "missed",
   answeredBy: { kind: "none" },
   startedAt: new Date().toISOString(),

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { Trash2 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -19,12 +21,16 @@ import { StatusBadge } from '@/components/data/status-badge';
 import { PriorityDot } from './PriorityDot';
 import { RiskBadge } from './RiskBadge';
 import { LinkedEntityChip } from './LinkedEntityChip';
-import { AssigneeSelect } from '@/components/crm/AssigneeSelect';
 import { MultiAssigneeSelect } from '@/components/crm/MultiAssigneeSelect';
+import { useTaskAssignPermission } from '@/lib/tasks/useTaskAssignPermission';
+import { useTaskDeletePermission } from '@/lib/tasks/useTaskDeletePermission';
+import { useLinkedEntityAccess, useTaskRosterEditable } from '@/lib/tasks/useLinkedEntityAccess';
 import { SelectField } from '@/components/form/SelectField';
 import { DateTimePicker } from '@/components/form/DateTimePicker';
 import { useScheduleTimezone, pickerValueToIso, isoToPickerValue } from '@/lib/schedule-tz';
 import { STATUS_REGISTRY } from '@/design-system/status-registry';
+import { toast } from '@/components/ui/use-toast';
+import { extractApiError } from '@/lib/utils';
 
 const ACTIVITY_LABELS: Record<string, string> = {
   created: 'Created',
@@ -35,6 +41,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
   commented: 'Commented',
   nudged: 'Nudged',
   completed: 'Completed',
+  cancelled: 'Cancelled',
 };
 
 export function TaskDetailDrawer() {
@@ -42,9 +49,20 @@ export function TaskDetailDrawer() {
   const timezone = useScheduleTimezone();
 
   const { openTaskId, close } = useTaskDetailStore();
-  const { tasks, updateStatus, updateTask, fetchTaskDetail, addComment, addSubtask, toggleSubtask, deleteSubtask, setWatchers, nudge } = useTasksStore();
+  const { tasks, updateStatus, updateTask, fetchTaskDetail, addComment, addSubtask, toggleSubtask, deleteSubtask, deleteTask, setAssignees, setWatchers, nudge } = useTasksStore();
+  const { canAssignOthers } = useTaskAssignPermission();
 
   const task = openTaskId ? tasks.find((t) => t.id === openTaskId) ?? null : null;
+
+  // Either the `delete` grant, or design §3's row-level escape hatch (creator AND
+  // sole assignee). Same two arms the DELETE endpoint checks, so the control is
+  // offered exactly where the server would say yes.
+  const canDelete = useTaskDeletePermission(task);
+
+  // Null for an unlinked task, for a shut drawer, and for a reader who can change neither the
+  // assignee nor the watcher roster - none of the three has anything to do with the answer.
+  const rosterEditable = useTaskRosterEditable('update');
+  const entityAccess = useLinkedEntityAccess(rosterEditable ? task?.linked_entity ?? null : null);
 
   // Fetch full detail (subtasks / comments / activity / watchers) whenever the open id changes.
   useEffect(() => {
@@ -80,8 +98,43 @@ export function TaskDetailDrawer() {
     setSubtaskText('');
   };
 
+  // Delete confirmation state
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  /**
+   * The store's `deleteTask` REJECTS on a 4xx (the server can still answer 403 -
+   * the row it sees may not be the row this render was built from), so the await
+   * is wrapped: an unhandled rejection here would leave the drawer open with no
+   * explanation and the row still on screen while the console shows the only
+   * evidence. The drawer closes and the toast fires only on a real 204.
+   */
+  const handleDelete = async () => {
+    if (!task) return;
+    const label = task.task_number;
+    setDeleting(true);
+    try {
+      await deleteTask(task.id);
+      setConfirmDeleteOpen(false);
+      close();
+      toast({
+        title: 'Task deleted',
+        description: `${label} is gone, along with its comments and activity.`,
+      });
+    } catch (err) {
+      setConfirmDeleteOpen(false);
+      toast({
+        title: 'Could not delete this task',
+        description: extractApiError(err, 'You do not have permission to delete this task.'),
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const risk = task
-    ? assessRisk(task, { now: new Date(), ownerOpenCount: 0 })
+    ? assessRisk(task, { now: new Date(), assigneeOpenCount: 0 })
     : { score: 0, reason: null, atRisk: false };
 
   const overdue = task ? isOverdue(task, new Date()) : false;
@@ -94,6 +147,7 @@ export function TaskDetailDrawer() {
     : [];
 
   return (
+    <>
     <Sheet open={!!task} onOpenChange={(o) => { if (!o) close(); }}>
       <SheetContent
         side="right"
@@ -184,22 +238,34 @@ export function TaskDetailDrawer() {
                   Details
                 </p>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
-                  <dt className="text-text-secondary font-medium whitespace-nowrap self-center">Owner</dt>
+                  <dt className="text-text-secondary font-medium whitespace-nowrap self-start pt-1">Assignees</dt>
                   <dd>
-                    <AssigneeSelect
-                      value={task.owner_id || null}
-                      onChange={(id) => updateTask(task.id, { owner_id: id })}
-                      placeholder="Unassigned"
+                    {/* Read-only for a caller without `assign` on Task: they may still
+                        change status/priority/due on a task they can see, but any edit to
+                        the assignee set is a 403. Showing the REAL set disabled (not their
+                        own id) is the honest render for an existing task. */}
+                    <MultiAssigneeSelect
+                      id="task-assignees"
+                      value={task.assignee_ids}
+                      onChange={(ids) => setAssignees(task.id, ids)}
+                      disabled={!canAssignOthers}
                       eligibleFor="task"
+                      flaggedIds={entityAccess.flaggedIds}
+                      flagNote={entityAccess.note}
+                      flagBadge={entityAccess.badge}
                     />
                   </dd>
 
                   <dt className="text-text-secondary font-medium whitespace-nowrap self-start pt-1">Watchers</dt>
                   <dd>
                     <MultiAssigneeSelect
+                      id="task-watchers"
                       value={task.watcher_ids}
                       onChange={(ids) => setWatchers(task.id, ids)}
                       eligibleFor="task"
+                      flaggedIds={entityAccess.flaggedIds}
+                      flagNote={entityAccess.note}
+                      flagBadge={entityAccess.badge}
                     />
                   </dd>
 
@@ -449,10 +515,56 @@ export function TaskDetailDrawer() {
                   </Button>
                 </div>
               </section>
+
+              {/* Danger zone. Rendered only when the DELETE would actually be
+                  allowed - the `delete` grant, or creator-and-sole-assignee.
+                  outline/danger is the grid's cell for a serious top-level
+                  destructive action, as opposed to ghost/danger, which is the
+                  inline row action the subtask × above uses. */}
+              {canDelete && (
+                <section className="border-t border-border pt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-text-secondary mb-2">
+                    Danger zone
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    tone="danger"
+                    size="sm"
+                    onClick={() => setConfirmDeleteOpen(true)}
+                    aria-label="Delete task"
+                  >
+                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                    Delete task
+                  </Button>
+                </section>
+              )}
             </div>
           </>
         )}
       </SheetContent>
     </Sheet>
+
+    {/* Sibling of the Sheet, not a child of it: a Dialog nested inside the
+        sheet's own dismissable layer fights it for focus on close. */}
+    <ConfirmDialog
+      open={confirmDeleteOpen}
+      onOpenChange={(next) => { if (!deleting) setConfirmDeleteOpen(next); }}
+      tone="danger"
+      icon={Trash2}
+      title={`Delete ${task?.task_number ?? 'this task'}?`}
+      description={
+        <>
+          <span className="font-medium">{task?.title}</span> will be permanently
+          removed, along with every comment and its whole activity history. This
+          cannot be undone.
+        </>
+      }
+      confirmLabel="Delete permanently"
+      cancelLabel="Keep task"
+      isLoading={deleting}
+      onConfirm={() => { void handleDelete(); }}
+    />
+    </>
   );
 }

@@ -63,7 +63,7 @@ describe('POST /api/leads - the acting user is recorded as the lead creator', ()
     mockPrisma.customer.findUnique.mockResolvedValue(CUSTOMER_FIXTURE);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-1' }) },
+        visit: { create: vi.fn().mockResolvedValue({ id: 'wt-1' }) },
         lead: { findFirst: vi.fn().mockResolvedValue(null), create: capture('lead', LEAD_FIXTURE) },
         serviceLocation: { findFirst: vi.fn().mockResolvedValue({ id: 'primary-loc-id' }) },
       }),
@@ -83,7 +83,7 @@ describe('POST /api/leads - the acting user is recorded as the lead creator', ()
     mockPrisma.customer.findMany.mockResolvedValue([]);
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        walkthrough: { create: vi.fn().mockResolvedValue({ id: 'wt-1' }) },
+        visit: { create: vi.fn().mockResolvedValue({ id: 'wt-1' }) },
         customer: {
           create: capture('customer', {
             id: CUSTOMER_FIXTURE.id,

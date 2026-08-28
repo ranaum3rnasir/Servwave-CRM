@@ -13,6 +13,14 @@ import { MemoryRouter } from "react-router-dom";
 import type { DialerEntityContext } from "@/stores/dialer.store";
 
 const mockNavigate = vi.fn();
+// These specs render deep phone components without a QueryClientProvider - every
+// data hook is stubbed individually. Times now resolve against the ORG's zone, so
+// the org query joins that list; pinned here so the rendered clock is fixed rather
+// than the runner's.
+vi.mock("@/lib/api/organization", () => ({
+  useOrganization: () => ({ data: { timezone: "America/New_York" } }),
+}));
+
 vi.mock("react-router-dom", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router-dom")>();
   return { ...actual, useNavigate: () => mockNavigate };
@@ -28,7 +36,7 @@ const JOB_88_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const seam = vi.hoisted(() => ({ result: null as unknown }));
 
 vi.mock("@/lib/api/communication", () => ({
-  BUSINESS_NUMBER: "(555) 555-0208",
+  BUSINESS_NUMBER: "(551) 282-7064",
   DISPOSITION_LABELS: {},
   fmtPhone: (n: string) => n,
   useCalls: () => ({ data: [] }),
@@ -62,12 +70,12 @@ vi.mock("@/components/communication/phone/shared", () => ({
 import { DialerWorkspace } from "../Dialer";
 
 const MATCH_RESULT = {
-  query: { isPhone: true, e164: "+15555550212" },
+  query: { isPhone: true, e164: "+15555550199" },
   customers: [
     {
       id: CUSTOMER_UUID,
       name: "ZZ-TEST CTM",
-      phone: "5555550212",
+      phone: "5555550199",
       site: "1 Main St, Newark",
       openJobs: [
         { id: JOB_77_UUID, number: "J00077", status: "SCHEDULED", location: "1 Main St, Newark" },
@@ -81,7 +89,7 @@ const MATCH_RESULT = {
       number: "J00088",
       status: "IN_PROGRESS",
       location: "2 Oak Ave, Jersey City",
-      customer: { id: CUSTOMER_UUID, name: "ZZ-TEST CTM", phone: "5555550212" },
+      customer: { id: CUSTOMER_UUID, name: "ZZ-TEST CTM", phone: "5555550199" },
     },
   ],
   identity: {
@@ -100,7 +108,7 @@ function renderWorkspace(openContext: DialerEntityContext | null) {
       <DialerWorkspace
         calls={[]}
         onToast={() => {}}
-        openNumber="+15555550212"
+        openNumber="+15555550199"
         openContext={openContext}
         openNonce={1}
       />
@@ -123,7 +131,7 @@ describe("Dialer auto-pick on entity-context handoff (Task #56)", () => {
     expect(screen.getByRole("button", { name: /J00088/ })).toBeInTheDocument();
     // The softphone is prefilled with the DIALED number (kept verbatim, not
     // replaced by the customer's stored number) so the call is one click away.
-    expect(screen.getByPlaceholderText("Enter a number")).toHaveValue("+15555550212");
+    expect(screen.getByPlaceholderText("Enter a number")).toHaveValue("+15555550199");
   });
 
   it("focuses the job from context first when the handoff carries a jobId", async () => {
@@ -149,7 +157,7 @@ describe("Dialer auto-pick on entity-context handoff (Task #56)", () => {
     const body = placeCall.mutate.mock.calls[0]![0] as Record<string, unknown>;
     expect(body.job_id).toBe(JOB_88_UUID);
     expect(body.customer_id).toBe(CUSTOMER_UUID);
-    expect(body.to_number).toBe("+15555550212");
+    expect(body.to_number).toBe("+15555550199");
   });
 
   it("falls back to the resolved phone identity when no context rides along", async () => {

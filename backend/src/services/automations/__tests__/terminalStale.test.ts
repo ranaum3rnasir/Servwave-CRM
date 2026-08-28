@@ -58,9 +58,18 @@ describe('terminalStaleReason', () => {
       expect(terminalStaleReason('BEFORE_JOB_START', undefined, state, NOW)).toBeNull();
     });
 
-    it('is stale once the job is ON_SITE (Spec B1, B-6: widened scan must not re-message an arrived customer)', () => {
-      const state: EntityState = { jobStatus: 'ON_SITE', jobScheduledStart: FUTURE };
-      expect(terminalStaleReason('BEFORE_JOB_START', undefined, state, NOW)).toBe('Work has already started');
+    // Multi-visit S4 (D17) replaces the old ON_SITE case here, and the replacement is a real
+    // BEHAVIOUR CHANGE rather than a fixture tidy-up, so it is asserted rather than deleted.
+    //
+    // Before S4 a technician marking themselves on site moved the JOB to ON_SITE, and this guard
+    // suppressed the "your appointment is in 1 hour" reminder because the tech was already at the
+    // door. ON_SITE has now retired from JobStatus and lives on VisitStatus, and D12 defines
+    // IN_PROGRESS as "any visit STARTED" - so a job whose crew has arrived but not started reads
+    // SCHEDULED, and the reminder is NO LONGER suppressed by arrival alone. Suppression now begins
+    // when work actually starts (the IN_PROGRESS case directly below).
+    it('still chases a job whose crew has arrived but not started, because arrival leaves it SCHEDULED', () => {
+      const state: EntityState = { jobStatus: 'SCHEDULED', jobScheduledStart: FUTURE };
+      expect(terminalStaleReason('BEFORE_JOB_START', undefined, state, NOW)).toBeNull();
     });
 
     it('is stale once the job is IN_PROGRESS (Spec B1, B-6)', () => {
@@ -209,7 +218,7 @@ describe('terminalStaleReason', () => {
       });
 
       it('is stale when the job is no longer scheduled (null start), regardless of direction', () => {
-        const state: EntityState = { jobStatus: 'UNASSIGNED', jobScheduledStart: null };
+        const state: EntityState = { jobStatus: 'UNSCHEDULED', jobScheduledStart: null };
         expect(terminalStaleReason('JOB_DATE_ANCHORED', undefined, state, NOW, 'before')).toBe('Job is no longer scheduled');
         expect(terminalStaleReason('JOB_DATE_ANCHORED', undefined, state, NOW, 'after')).toBe('Job is no longer scheduled');
       });
@@ -247,27 +256,27 @@ describe('terminalStaleReason', () => {
   describe('LEAD_DATE_ANCHORED', () => {
     describe('direction: before', () => {
       it('is null when the walkthrough is still scheduled and in the future', () => {
-        const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
+        const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', FUTURE.toISOString(), state, NOW, 'before')).toBeNull();
       });
 
       it('is stale once the walkthrough time has passed', () => {
-        const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
+        const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', PAST.toISOString(), state, NOW, 'before')).toBe(
           'Walkthrough time has already passed',
         );
       });
 
       // Walkthrough-as-entity redesign, PR-B2: the "still pending" check now keys off the
-      // VISIT's own status (leadWalkthroughStatus), not lead.status — a lead can sit at any
+      // VISIT's own status (leadVisitStatus), not lead.status — a lead can sit at any
       // LeadStatus (ESTIMATED, WON, CONTACTED, ...) while its current visit is REQUESTED/
       // COMPLETED/CANCELLED, and any of those non-SCHEDULED visit states is stale for 'before'.
       it.each(['COMPLETED', 'CANCELLED', 'REQUESTED'] as const)(
         'is stale when the current visit is %s — a before-reminder promises a STILL-pending walkthrough',
-        (leadWalkthroughStatus) => {
-          const state: EntityState = { leadStatus: 'ESTIMATED', leadWalkthroughStatus, leadWalkthroughScheduledAt: FUTURE };
+        (leadVisitStatus) => {
+          const state: EntityState = { leadStatus: 'ESTIMATED', leadVisitStatus, leadWalkthroughScheduledAt: FUTURE };
           expect(terminalStaleReason('LEAD_DATE_ANCHORED', FUTURE.toISOString(), state, NOW, 'before')).toBe(
-            `Walkthrough is ${leadWalkthroughStatus.toLowerCase().replace(/_/g, ' ')} — reminder not needed`,
+            `Walkthrough is ${leadVisitStatus.toLowerCase().replace(/_/g, ' ')} — reminder not needed`,
           );
         },
       );
@@ -275,7 +284,7 @@ describe('terminalStaleReason', () => {
 
     describe('direction: after', () => {
       it('is null for the SAME anchor-passed state that is stale under before — the core direction contrast', () => {
-        const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
+        const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', PAST.toISOString(), state, NOW, 'before')).toBe(
           'Walkthrough time has already passed',
         );
@@ -284,8 +293,8 @@ describe('terminalStaleReason', () => {
 
       it.each(['COMPLETED', 'CANCELLED'] as const)(
         'is null when the current visit is %s — normal forward progress by the time an after-reminder is due, not staleness',
-        (leadWalkthroughStatus) => {
-          const state: EntityState = { leadStatus: 'ESTIMATED', leadWalkthroughStatus, leadWalkthroughScheduledAt: PAST };
+        (leadVisitStatus) => {
+          const state: EntityState = { leadStatus: 'ESTIMATED', leadVisitStatus, leadWalkthroughScheduledAt: PAST };
           expect(terminalStaleReason('LEAD_DATE_ANCHORED', PAST.toISOString(), state, NOW, 'after')).toBeNull();
         },
       );
@@ -315,7 +324,7 @@ describe('terminalStaleReason', () => {
       });
 
       it('is stale on an occurrence mismatch (rescheduled), regardless of direction', () => {
-        const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
+        const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
         const occurrence = '2026-07-16T15:00:00.000Z'; // different from FUTURE
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', occurrence, state, NOW, 'before')).toBe(
           'Walkthrough was rescheduled — this reminder was replaced by an updated one',
@@ -340,12 +349,12 @@ describe('terminalStaleReason', () => {
 
     describe('direction: undefined (defensive — malformed trigger_config)', () => {
       it('does not apply the already-passed check — fails open like an after-direction reminder', () => {
-        const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
+        const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', PAST.toISOString(), state, NOW, undefined)).toBeNull();
       });
 
       it('does not apply the before-only exact-status-match check either', () => {
-        const state: EntityState = { leadStatus: 'WON', leadWalkthroughStatus: 'COMPLETED', leadWalkthroughScheduledAt: FUTURE };
+        const state: EntityState = { leadStatus: 'WON', leadVisitStatus: 'COMPLETED', leadWalkthroughScheduledAt: FUTURE };
         expect(terminalStaleReason('LEAD_DATE_ANCHORED', FUTURE.toISOString(), state, NOW, undefined)).toBeNull();
       });
 
@@ -622,38 +631,38 @@ describe('terminalStaleReason', () => {
   });
 
   // Walkthrough-as-entity redesign, PR-B2: keys off the VISIT's own status
-  // (leadWalkthroughStatus), not lead.status — scheduleWalkthrough no longer writes
+  // (leadVisitStatus), not lead.status — scheduleWalkthrough no longer writes
   // WALKTHROUGH_SCHEDULED onto the lead at all (D5: NEW -> CONTACTED only).
   describe.each(['WALKTHROUGH_SCHEDULED', 'WALKTHROUGH_RESCHEDULED'] as const)('%s', (trigger) => {
     describe.each(['COMPLETED', 'CANCELLED', 'REQUESTED'] as const)(
       'when the current visit is %s',
-      (leadWalkthroughStatus) => {
+      (leadVisitStatus) => {
         it('is stale — walkthrough reminder not needed', () => {
-          const state: EntityState = { leadStatus: 'ESTIMATED', leadWalkthroughStatus, leadWalkthroughScheduledAt: FUTURE };
+          const state: EntityState = { leadStatus: 'ESTIMATED', leadVisitStatus, leadWalkthroughScheduledAt: FUTURE };
           expect(terminalStaleReason(trigger, undefined, state, NOW)).toBe(
-            `Walkthrough is ${leadWalkthroughStatus.toLowerCase().replace(/_/g, ' ')} — reminder not needed`,
+            `Walkthrough is ${leadVisitStatus.toLowerCase().replace(/_/g, ' ')} — reminder not needed`,
           );
         });
       },
     );
 
     it('is stale when the walkthrough is no longer scheduled (null date)', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: null };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: null };
       expect(terminalStaleReason(trigger, undefined, state, NOW)).toBe('Walkthrough is no longer scheduled');
     });
 
     it('is stale when the walkthrough time has already passed', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: PAST };
       expect(terminalStaleReason(trigger, undefined, state, NOW)).toBe('Walkthrough time has already passed');
     });
 
     it('is stale when the walkthrough time equals now exactly (<=)', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: NOW };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: NOW };
       expect(terminalStaleReason(trigger, undefined, state, NOW)).toBe('Walkthrough time has already passed');
     });
 
     it('is stale when the occurrence no longer matches the current walkthrough time (rescheduled)', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
       const occurrence = '2026-07-16T15:00:00.000Z'; // different from FUTURE
       expect(terminalStaleReason(trigger, occurrence, state, NOW)).toBe(
         'Walkthrough was rescheduled — this reminder was replaced by an updated one',
@@ -661,13 +670,13 @@ describe('terminalStaleReason', () => {
     });
 
     it('is null when the occurrence matches and the walkthrough is still in the future', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
       const occurrence = FUTURE.toISOString();
       expect(terminalStaleReason(trigger, occurrence, state, NOW)).toBeNull();
     });
 
     it('is null when there is no occurrence to compare and the walkthrough is still in the future', () => {
-      const state: EntityState = { leadStatus: 'CONTACTED', leadWalkthroughStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
+      const state: EntityState = { leadStatus: 'CONTACTED', leadVisitStatus: 'SCHEDULED', leadWalkthroughScheduledAt: FUTURE };
       expect(terminalStaleReason(trigger, undefined, state, NOW)).toBeNull();
     });
   });
@@ -717,7 +726,7 @@ describe('terminalStaleReason', () => {
     });
 
     it('WALKTHROUGH_SCHEDULED: unaffected by direction', () => {
-      const state: EntityState = { leadStatus: 'ESTIMATED', leadWalkthroughStatus: 'COMPLETED', leadWalkthroughScheduledAt: FUTURE };
+      const state: EntityState = { leadStatus: 'ESTIMATED', leadVisitStatus: 'COMPLETED', leadWalkthroughScheduledAt: FUTURE };
       const omitted = terminalStaleReason('WALKTHROUGH_SCHEDULED', undefined, state, NOW);
       expect(omitted).toBe('Walkthrough is completed — reminder not needed');
       expect(terminalStaleReason('WALKTHROUGH_SCHEDULED', undefined, state, NOW, 'before')).toBe(omitted);

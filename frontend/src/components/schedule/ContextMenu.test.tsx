@@ -8,7 +8,7 @@ import type { BoardEvent } from '@/components/schedule/scheduleModel';
 import { asWallClock } from '@/lib/schedule-tz';
 
 const jobEvent: BoardEvent = {
-  id: 'job-1', type: 'job', number: 'J00041', title: 'Furnace tune-up', customer: 'Acme',
+  boardId: 'jv-v1', parentId: 'job-1', visitId: 'v1', type: 'job', number: 'J00041', title: 'Furnace tune-up', customer: 'Acme',
   crew: ['m1'], ownerId: null,
   start: asWallClock(new Date(2026, 5, 10, 9, 0)), end: asWallClock(new Date(2026, 5, 10, 11, 0)), raw: {},
 };
@@ -41,7 +41,7 @@ describe('ContextMenu — D9 read-only gating (TG13)', () => {
     expect(screen.queryByText(/Edit crew & schedule/)).not.toBeInTheDocument();
     expect(screen.queryByText('Cancel Job')).not.toBeInTheDocument();
     fireEvent.click(screen.getByText('Open Job Details'));
-    expect(onOpenDetails).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1' }));
+    expect(onOpenDetails).toHaveBeenCalledWith(expect.objectContaining({ parentId: 'job-1' }));
     expect(onClose).toHaveBeenCalled();
   });
 });

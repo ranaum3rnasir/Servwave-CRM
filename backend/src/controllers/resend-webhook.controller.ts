@@ -9,7 +9,6 @@ import {
   normalizeSuppressionAddress,
   TRANSACTIONAL_SUPPRESSION_CATEGORY,
 } from '../lib/email-suppression';
-import { applyFreshDomainStatus, notifyDomainVerified, OrganizationDomainRow } from '../lib/organization-domain';
 import { fetchReceivedEmail, persistInboundEmail } from '../lib/inbound-email';
 import { emit } from '../services/notifications/notificationService';
 import { publishEmailsChanged } from '../services/notifications/realtimePublish';
@@ -174,9 +173,7 @@ interface StatusUpdate {
 /** Maps a handled Resend event type onto our own delivery-status vocabulary.
  * Returns null for any event type we don't track a status for (email.opened,
  * email.clicked, contact.*, …) — those are still recorded in the idempotency
- * ledger and acknowledged, just with no Email row side effect. domain.* events
- * are NOT routed through this map — see domainEventDataOf below; they update a
- * different model (OrganizationDomain) entirely. */
+ * ledger and acknowledged, just with no Email row side effect. */
 function mapEventToUpdate(event: WebhookEventPayload): StatusUpdate | null {
   switch (event.type) {
     case 'email.sent':
@@ -206,16 +203,6 @@ function mapEventToUpdate(event: WebhookEventPayload): StatusUpdate | null {
  * shaped events carry no such field at all). */
 function emailIdOf(event: WebhookEventPayload): string | undefined {
   return (event.data as { email_id?: string }).email_id;
-}
-
-/** Email slice 10 (guided domain verification) — the (id, status, records)
- * DomainEventData carried by domain.created/domain.updated/domain.deleted.
- * Resend's own resend_domain_id is the correlation key here, mirroring how
- * BaseEmailEventData.email_id correlates the email.* events above. */
-function domainEventDataOf(event: WebhookEventPayload): { id: string; status: string; records: unknown } | undefined {
-  const data = event.data as { id?: string; status?: string; records?: unknown };
-  if (!data.id) return undefined;
-  return { id: data.id, status: data.status ?? 'not_started', records: data.records ?? [] };
 }
 
 /** Every address on the ORIGINAL send's `to` list, normalized. Resend's event
@@ -317,12 +304,7 @@ export async function processResendEvent(
       subject: string;
     } | null = null;
 
-    // Non-null ONLY when this call is the transaction that just observed the
-    // FIRST transition into verified for an OrganizationDomain row — set
-    // inside the transaction below, read after it commits so the one-time
-    // success email (email slice 10) is never sent from inside a transaction
-    // that might still roll back.
-    const justVerifiedDomain = await prisma.$transaction(async (tx): Promise<OrganizationDomainRow | null> => {
+    await prisma.$transaction(async (tx): Promise<null> => {
       // FIRST — atomic idempotency claim; P2002 = concurrent duplicate.
       try {
         await tx.resendEvent.create({
@@ -370,38 +352,12 @@ export async function processResendEvent(
         return null;
       }
 
-      // ─── domain.* events (email slice 10) — a DIFFERENT model (OrganizationDomain), never
-      // routed through the email.* correlation/status machinery below. ───
-      if (event.type === 'domain.created' || event.type === 'domain.updated') {
-        const domainEvent = domainEventDataOf(event);
-        if (!domainEvent) return null;
-        const domainRow = await tx.organizationDomain.findUnique({ where: { resend_domain_id: domainEvent.id } });
-        if (!domainRow) {
-          // Unknown/race (e.g. our own create() row hasn't committed yet, or this
-          // domain belongs to a different Resend project entirely): recorded
-          // above, acknowledge rather than 404/500ing a webhook into a retry dead end.
-          logger.warn(`[resend-webhook] ${event.type} for unknown resend_domain_id ${domainEvent.id} — recorded, ignored`);
-          return null;
-        }
-        const { row: updatedDomain, justVerified } = await applyFreshDomainStatus(tx, domainRow, {
-          status: domainEvent.status,
-          records: domainEvent.records,
-        });
-        return justVerified ? updatedDomain : null;
-      }
-      if (event.type === 'domain.deleted') {
-        const domainEvent = domainEventDataOf(event);
-        if (!domainEvent) return null;
-        const domainRow = await tx.organizationDomain.findUnique({ where: { resend_domain_id: domainEvent.id } });
-        if (!domainRow) {
-          logger.warn(`[resend-webhook] domain.deleted for unknown resend_domain_id ${domainEvent.id} — recorded, ignored`);
-          return null;
-        }
-        // Mirrors a dashboard-side deletion locally — dispatchEmail's From-address
-        // resolution finds no row and safely falls back to the shared domain.
-        await tx.organizationDomain.delete({ where: { id: domainRow.id } });
-        return null;
-      }
+      // domain.* events carry no email_id and correlate to nothing we store -
+      // per-org sending domains were removed with the guided custom-domain
+      // feature, so every org sends from the one shared platform domain. They
+      // are still RECORDED in the event ledger above and acknowledged here,
+      // rather than 404ing a webhook into a retry dead end.
+      if (event.type.startsWith('domain.')) return null;
 
       const emailId = emailIdOf(event);
       if (!emailId) return null; // event type carries no correlation key — recorded, nothing more to do.
@@ -462,15 +418,6 @@ export async function processResendEvent(
       }
       return null;
     });
-
-    if (justVerifiedDomain) {
-      // AFTER the transaction commits, never from inside it (see
-      // notifyDomainVerified's doc comment) — and awaited so the ack this
-      // webhook sends back only follows a genuine best-effort delivery
-      // attempt, matching this handler's own claim-first-then-side-effect shape.
-      await notifyDomainVerified(justVerifiedDomain).catch((err) =>
-        logger.error(`[resend-webhook] failed to send domain-verified notification for organization ${justVerifiedDomain.organization_id}:`, err));
-    }
 
     if (inboundToAnnounce) {
       // Wholly best-effort. emit() already swallows its own failures, but this

@@ -48,7 +48,11 @@
      which is a live, registered, resolving class with 854 sites.) */
   --kit-background: 255 255 255;   /* #ffffff */
   --foreground: 20 27 32;          /* #141b20 */
-  --app: 238 242 244;              /* #eef2f4  canvas the panel floats on */
+  /* The page surround and the sidebar. White, matching the mockup's surface:
+     the canvas is separated from it by `--elevation-canvas` alone, which is
+     what the floating-canvas decision has always relied on - a border here
+     would put the hairline grid back that removing borders fixed. */
+  --app: 255 255 255;              /* #ffffff  canvas the panel floats on */
   --column: 240 243 245;           /* #f0f3f5  kanban column bed */
   --column-active: 228 237 240;    /* #e4edf0 */
   --card: 255 255 255;             /* #ffffff */
@@ -75,6 +79,16 @@
   --subtle-foreground: 139 152 160;/* #8b98a0  placeholders, meta, disabled */
   --accent: 244 247 249;           /* #f4f7f9 */
   --accent-foreground: 20 27 32;   /* #141b20 */
+
+  /* disabled - the one grey nothing live is allowed to wear.
+     Deliberately NOT --muted: muted is the hover surface for ghost buttons and
+     the fill behind table group headers, both of which are live. A disabled
+     control has to be distinguishable from a hovered one at a glance, so it
+     gets a step darker, and a foreground that lands under AA on purpose - the
+     text is meant to read as unavailable, not as content. */
+  --disabled: 228 233 236;         /* #e4e9ec */
+  --disabled-foreground: 152 164 172; /* #98a4ac */
+  --disabled-border: 214 221 225;  /* #d6dde1 */
 
   --destructive: 226 68 92;            /* #e2445c */
   --destructive-foreground: 255 255 255;
@@ -108,6 +122,18 @@
   --sidebar-subtle-foreground: 139 160 168;
   --sidebar-accent: rgb(12 45 58 / 0.055);
   --sidebar-ring: 14 116 144;
+  /* The active-page indicator - the 3px rail expanded, the rounded square in
+     the rail. Kept as its own name so the indicator stays one decision, but
+     pointed at --primary: the mark that says "you are here" is the brand's
+     anchor colour, not a second petrol invented beside it. Re-point here to
+     move the indicator without hunting through shell.css. */
+  --sidebar-rail: var(--primary);         /* ocean-800  #0C2D3A */
+  /* The active row's pill and its label/icon. Same family as the rail, because
+     the rail, the pill and the label are ONE indicator seen as one thing - a
+     3px sliver in primary next to a full-width pill in teal reads as two
+     marks disagreeing, and the pill wins the eye. */
+  --sidebar-active: var(--primary-subtle);      /* ocean-subtle #E8EEF0 */
+  --sidebar-active-foreground: var(--primary);  /* ocean-800    #0C2D3A */
 
   /* scrollbars - pre-composed like --sidebar-accent, because a scrollbar thumb
      is a tint of the ink colour rather than a palette entry of its own. */
@@ -154,12 +180,73 @@
   --elevation-sm: 0 1px 2px rgb(12 45 58 / 0.07), 0 1px 3px rgb(12 45 58 / 0.04);
   --elevation-md: 0 2px 6px rgb(12 45 58 / 0.10), 0 1px 2px rgb(12 45 58 / 0.06);
   --elevation-lg: 0 8px 22px rgb(12 45 58 / 0.13), 0 2px 6px rgb(12 45 58 / 0.07);
-  --elevation-canvas: 0 1px 2px rgb(12 45 58 / 0.05), 0 6px 18px rgb(12 45 58 / 0.06);
+  /* Three layers, and the FIRST one is why the top edge reads at all.
+     `--app` and `--card` are both #ffffff, so this shadow is the only thing
+     separating the canvas from its surround. Both of the offset layers below
+     are cast DOWNWARD: the sides get their blur bleeding out horizontally and
+     the bottom gets the offset, but above the canvas there is nothing to see,
+     because the shadow sits behind the opaque panel. The top edge against the
+     topbar was invisible while the sidebar edge read fine.
+     A 0-offset ambient layer casts equally in every direction, so the top gets
+     the same soft edge the sides already had - without the border the
+     floating-canvas decision exists to avoid. */
+  --elevation-canvas:
+    0 0 10px rgb(12 45 58 / 0.055),
+    0 1px 2px rgb(12 45 58 / 0.05),
+    0 6px 18px rgb(12 45 58 / 0.06);
   --elevation-card: 0 1px 1px rgb(12 45 58 / 0.18), 0 0 1px rgb(12 45 58 / 0.22);
   --elevation-card-hover: 0 3px 8px rgb(12 45 58 / 0.16), 0 0 1px rgb(12 45 58 / 0.25);
   --elevation-popover: 0 6px 18px rgb(12 45 58 / 0.14), 0 2px 5px rgb(12 45 58 / 0.07);
   --elevation-modal: 0 20px 50px rgb(12 45 58 / 0.24), 0 5px 14px rgb(12 45 58 / 0.12);
   --elevation-rail: 14px 0 40px rgb(8 26 34 / 0.28);
+
+  /* motion - the kit shipped none of these, so this layer had no timing of its
+     own and every state change in v2 was either instant or borrowed the kit
+     Button's hardcoded 150ms. Grouped under one --motion- prefix and mapped to
+     duration-* / ease-* / animate-* in the tailwind config, the same
+     indirection --elevation-* uses, so the names here stay independent of
+     whatever Tailwind calls the utility. Theme-independent: no .dark override.
+
+     `fast` is for a colour or fill changing in place (the tab indicator
+     cross-fade); `panel` is for a region of content arriving, which needs long
+     enough to be seen as a movement rather than a repaint.
+
+     THE NUMBERS COME FROM THE SHELL, they are not fresh guesses. The first cut
+     of this scale (200/320ms on an easeOutQuint of its own) sat next to a
+     sidebar that moves at 460-620ms on two different curves, and the tab swap
+     read as a pop where the sidebar reads as a glide. Every value below is now
+     a shell.css declaration, quoted in its comment. Nothing here invents a
+     third curve. */
+
+  /* `.nav-rail { ... opacity 0.24s linear }` - the shell's own figure for
+     "a thing changes state in place, no travel". That is exactly the tab
+     indicator's job, so the strip stays crisp under the slower panel. */
+  --motion-duration-fast: 240ms;
+  /* `.sidebar { transition: width 0.46s ... }` - the longest thing the shell
+     does to a region of the layout, and a tab panel replacing its whole
+     content area is the same size of event. */
+  --motion-duration-panel: 460ms;
+  /* `.sb-label { transition: opacity 0.3s ... }` - the shell never fades over
+     the same span it travels over: the label is fully opaque well before the
+     rail has finished moving, so what you watch is the movement, not the
+     fade. The panel is split the same way (see `tab-panel-in` in the tailwind
+     config), and this is the fade half. */
+  --motion-duration-panel-fade: 300ms;
+  /* How far the panel travels. 6px over 320ms was a twitch - too small to
+     track, so all the eye got was the fade, which is what "not smooth" meant.
+     The shell's rail crosses a whole nav row (~38px) and the sidebar 132px of
+     width; a full-bleed panel needs less displacement than a 3px bar to be
+     legible, and more than a hairline to be motion at all. */
+  --motion-travel-panel: 20px;
+  /* The sidebar's shared curve, lifted verbatim from
+     `.sidebar { transition: width 0.46s cubic-bezier(0.32, 0.72, 0, 1) }` and
+     `.sb-label { transition: opacity 0.3s cubic-bezier(0.32, 0.72, 0, 1) }`.
+     Sharp out of the gate, then a long settle, and no overshoot - shell.css
+     notes an overshooting curve "bounced, and the bounce is what read as
+     unsettled". The shell's other curve, the rail's expo-out
+     cubic-bezier(0.16, 1, 0.3, 1), is for an indicator TRAVELLING between
+     rows; the tab indicator only cross-fades, so one curve covers the tabs. */
+  --motion-ease-out: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .dark {
@@ -190,6 +277,13 @@
   --accent: 23 48 58;              /* #17303a */
   --accent-foreground: 230 237 239;
 
+  /* disabled - lighter than the surface here, for the same reason it is darker
+     in light mode: it has to read as "lifted out of the flow", and on a dark
+     canvas that direction is up. */
+  --disabled: 33 60 71;            /* #213c47 */
+  --disabled-foreground: 106 124 133; /* #6a7c85 */
+  --disabled-border: 45 72 84;     /* #2d4854 */
+
   --destructive: 226 68 92;
   --destructive-foreground: 255 255 255;
   --destructive-hover: 201 57 79;
@@ -218,6 +312,18 @@
   --sidebar-foreground: 214 226 230;
   --sidebar-muted-foreground: 142 161 169;
   --sidebar-subtle-foreground: 104 126 135;
+  /* Stays a literal rather than following --primary like the light theme does.
+     tokens.css does not re-point --primary in dark, so it is still the deep
+     ocean #0C2D3A - which IS roughly the dark sidebar surface, and an indicator
+     the colour of the thing behind it is no indicator. The dark brand accent
+     carries the mark instead. */
+  --sidebar-rail: 42 162 186;             /* #2aa2ba */
+  /* Literals for the same reason as the rail, and tracking it so the indicator
+     stays one colour per theme. --primary-subtle is NOT re-pointed in dark, so
+     inheriting the light value would paint a near-white pill onto the dark
+     sidebar. */
+  --sidebar-active: 23 48 58;                   /* #17303a */
+  --sidebar-active-foreground: 42 162 186;      /* #2aa2ba, matches the rail */
   --sidebar-accent: rgb(255 255 255 / 0.05);
   --sidebar-ring: 42 162 186;
 
@@ -230,7 +336,13 @@
   --elevation-sm: 0 1px 3px rgb(0 0 0 / 0.45);
   --elevation-md: 0 6px 18px rgb(0 0 0 / 0.55);
   --elevation-lg: 0 18px 40px rgb(0 0 0 / 0.65);
-  --elevation-canvas: 0 1px 3px rgb(0 0 0 / 0.5);
+  /* Same ambient-first structure as the light theme, so the canvas top edge
+     reads against the topbar here too. Dark surfaces need the ambient layer
+     more, not less: --app and --card are 9 points apart in luminance, so the
+     offset layers alone leave the top boundary to a difference that small. */
+  --elevation-canvas:
+    0 0 10px rgb(0 0 0 / 0.45),
+    0 1px 3px rgb(0 0 0 / 0.5);
   --elevation-card: 0 1px 1px rgb(0 0 0 / 0.5), 0 0 1px rgb(0 0 0 / 0.6);
   --elevation-card-hover: 0 3px 10px rgb(0 0 0 / 0.55);
   --elevation-popover: 0 10px 30px rgb(0 0 0 / 0.6);

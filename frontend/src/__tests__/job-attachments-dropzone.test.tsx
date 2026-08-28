@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { vi } from 'vitest';
 import api from '@/lib/axios';
-import { AttachmentsTabBody } from '@/pages/JobDetailPage';
+import { AttachmentsTabBody } from '@/components/jobs/AttachmentsTabBody';
 
 // @/lib/axios is globally mocked in src/__tests__/setup.ts
 

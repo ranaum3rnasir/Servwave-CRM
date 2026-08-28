@@ -39,10 +39,10 @@ const mockUpdateAccountStatementDescriptor = vi.mocked(updateAccountStatementDes
 // Full org select shape connectStripe reads to build the ConnectedAccountPrefill.
 const ORG_PREFILL_FIXTURE = {
   id: ALPHA_ORG_ID,
-  name: 'Alpha Doors & Security',
-  email: 'owner@alphadoors.com',
-  website: 'https://alphadoors.com',
-  support_email: 'support@alphadoors.com',
+  name: 'Northwind Services',
+  email: 'owner@northwind.com',
+  website: 'https://northwind.com',
+  support_email: 'support@northwind.com',
   industry: ['HVAC'],
   stripe_account_id: null as string | null,
   phone: '8045551234',
@@ -200,7 +200,7 @@ describe('assertPaymentsTermsAccepted — version-aware gate (NOT existence-only
 
 describe('toStatementDescriptor', () => {
   it('trims and collapses internal whitespace', () => {
-    expect(toStatementDescriptor('  Alpha   Doors  ')).toBe('Alpha Doors');
+    expect(toStatementDescriptor('  Northwind   Services  ')).toBe('Northwind Services');
   });
 
   it('strips disallowed characters < > / \' " *', () => {
@@ -208,7 +208,7 @@ describe('toStatementDescriptor', () => {
   });
 
   it('truncates to at most 22 characters', () => {
-    const longName = 'Alpha Doors And Security Services LLC';
+    const longName = 'Northwind Services And Security Services LLC';
     expect(toStatementDescriptor(longName)).toBe(longName.slice(0, 22));
     expect(toStatementDescriptor(longName)!.length).toBe(22);
   });
@@ -224,7 +224,7 @@ describe('toStatementDescriptor', () => {
 
 describe('updateDescriptorSchema', () => {
   it('accepts a 5-22 char descriptor with a letter and no disallowed chars', () => {
-    expect(updateDescriptorSchema.safeParse({ statement_descriptor: 'ALPHA DOORS' }).success).toBe(true);
+    expect(updateDescriptorSchema.safeParse({ statement_descriptor: 'NORTHWIND SERVICES' }).success).toBe(true);
   });
 
   it('rejects under 5 characters', () => {
@@ -271,11 +271,11 @@ describe('POST /api/organization/stripe/connect', () => {
     expect(res.body).toEqual({ stripe_account_id: 'acct_new_1' });
     expect(mockCreateConnectedAccount).toHaveBeenCalledWith(expect.objectContaining({
       orgId: ALPHA_ORG_ID,
-      email: 'owner@alphadoors.com',
-      businessName: 'Alpha Doors & Security',
+      email: 'owner@northwind.com',
+      businessName: 'Northwind Services',
       mcc: '1711', // industry: ['HVAC'] → mccForIndustry
-      url: 'https://alphadoors.com',
-      supportEmail: 'support@alphadoors.com',
+      url: 'https://northwind.com',
+      supportEmail: 'support@northwind.com',
       supportPhone: '8045551234',
       brandColorHex: '#0C2D3A',
       businessType: 'company',
@@ -475,7 +475,7 @@ describe('PATCH /api/organization/stripe/statement-descriptor', () => {
     const res = await request(app)
       .patch('/api/organization/stripe/statement-descriptor')
       .set(authHeader('admin'))
-      .send({ statement_descriptor: 'ALPHA DOORS' });
+      .send({ statement_descriptor: 'NORTHWIND SERVICES' });
 
     expect(res.status).toBe(409);
     expect(mockUpdateAccountStatementDescriptor).not.toHaveBeenCalled();
@@ -487,11 +487,11 @@ describe('PATCH /api/organization/stripe/statement-descriptor', () => {
     const res = await request(app)
       .patch('/api/organization/stripe/statement-descriptor')
       .set(authHeader('admin'))
-      .send({ statement_descriptor: 'ALPHA DOORS' });
+      .send({ statement_descriptor: 'NORTHWIND SERVICES' });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ statement_descriptor: 'ALPHA DOORS' });
-    expect(mockUpdateAccountStatementDescriptor).toHaveBeenCalledWith('acct_1', 'ALPHA DOORS');
+    expect(res.body).toEqual({ statement_descriptor: 'NORTHWIND SERVICES' });
+    expect(mockUpdateAccountStatementDescriptor).toHaveBeenCalledWith('acct_1', 'NORTHWIND SERVICES');
   });
 });
 
@@ -516,7 +516,7 @@ describe('ServWave Payments routes — behavioral 403 (non-ADMIN lacks update-Or
     const res = await request(app)
       .patch('/api/organization/stripe/statement-descriptor')
       .set(authHeader('dispatcher'))
-      .send({ statement_descriptor: 'ALPHA DOORS' });
+      .send({ statement_descriptor: 'NORTHWIND SERVICES' });
     expect(res.status).toBe(403);
     expect(mockUpdateAccountStatementDescriptor).not.toHaveBeenCalled();
   });

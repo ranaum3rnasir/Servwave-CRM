@@ -142,7 +142,7 @@ describe('buildScheduleLanes', () => {
       scope_notes: 'Fix door',
       scheduled_start: new Date('2026-07-02T09:00:00Z'),
       scheduled_end: new Date('2026-07-02T11:00:00Z'),
-      assignees: [{ user: ann }],
+      visits: [{ assignees: [{ user: ann }] }],
       customer,
       service_location: location,
       ...overrides,
@@ -227,9 +227,9 @@ describe('buildScheduleLanes', () => {
     // so extraction changes nothing for jobs-only payloads — a guarded invariant.
     const t = new Date('2026-07-02T09:00:00Z');
     const jobs: ScheduleJobIn[] = [
-      makeJob({ id: 'j-1', job_number: 'J00001', scheduled_start: t, assignees: [{ user: ann }, { user: bob }] }),
-      makeJob({ id: 'j-2', job_number: 'J00002', scheduled_start: t, assignees: [{ user: ann }] }),
-      makeJob({ id: 'j-3', job_number: 'J00003', scheduled_start: new Date('2026-07-02T12:00:00Z'), assignees: [] }),
+      makeJob({ id: 'j-1', job_number: 'J00001', scheduled_start: t, visits: [{ assignees: [{ user: ann }, { user: bob }] }] }),
+      makeJob({ id: 'j-2', job_number: 'J00002', scheduled_start: t, visits: [{ assignees: [{ user: ann }] }] }),
+      makeJob({ id: 'j-3', job_number: 'J00003', scheduled_start: new Date('2026-07-02T12:00:00Z'), visits: [{ assignees: [] }] }),
     ];
     const out = buildScheduleLanes(jobs, []);
     expect(out).toEqual([

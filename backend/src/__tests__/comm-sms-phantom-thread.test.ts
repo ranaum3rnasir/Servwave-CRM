@@ -24,7 +24,7 @@ const EXISTING_THREAD_ID = 'a1b2c3d4-0000-0000-0000-0000000000bb';
 function mockConnectedOrg() {
   client.isCtmConfigured.mockReturnValue(true);
   p.organization.findUnique.mockResolvedValue({
-    ctm_account_id: '596375',
+    ctm_account_id: '500001',
     ctm_sms_ready: true,
     sms_sending_enabled: true,
     plan: 'PRO',

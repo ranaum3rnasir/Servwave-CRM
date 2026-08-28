@@ -986,6 +986,87 @@ describe('price-book item type follows kind (SRVW-90)', () => {
   });
 });
 
+// Item Kind collapsed to material|service. `labor`, `bundle` and `fee` were
+// selectable but bought nothing: typeForKind already billed all three as
+// SERVICE, and the Stock > Items grid filtered bundle and fee out entirely, so
+// an item saved as either simply vanished. Rather than reject the retired
+// tokens - which would 400 an old client, a stored CSV or a queued request -
+// the server folds them into `service`, the value they already behaved as.
+describe('item kind normalizes to material|service', () => {
+  it.each([
+    ['labor', 'service', 'SERVICE'],
+    ['bundle', 'service', 'SERVICE'],
+    ['fee', 'service', 'SERVICE'],
+    ['service', 'service', 'SERVICE'],
+    ['material', 'material', 'MATERIAL'],
+    // Case and padding: the dropdown only ever sends lower-case, but a CSV or a
+    // hand-rolled request does not, and two spellings of one kind would split
+    // the grid filter.
+    ['Labor', 'service', 'SERVICE'],
+    ['  MATERIAL  ', 'material', 'MATERIAL'],
+    // Anything unrecognised lands where typeForKind already put it.
+    ['widget', 'service', 'SERVICE'],
+  ])('POST with kind %s stores %s', async (sent, storedKind, storedType) => {
+    mockAuthAs('admin');
+    mockPrisma.priceBookItem.create.mockResolvedValue(ITEM_FIXTURE);
+
+    const res = await request(app)
+      .post('/api/price-book/items')
+      .set(authHeader('admin'))
+      .send({ name: 'Anything', sell_price: 45, kind: sent });
+
+    expect(res.status).toBe(201);
+    const data = mockPrisma.priceBookItem.create.mock.calls[0][0].data;
+    expect(data.kind).toBe(storedKind);
+    expect(data.type).toBe(storedType);
+  });
+
+  it('POST with no kind still stores null rather than inventing one', async () => {
+    mockAuthAs('admin');
+    mockPrisma.priceBookItem.create.mockResolvedValue(ITEM_FIXTURE);
+
+    const res = await request(app)
+      .post('/api/price-book/items')
+      .set(authHeader('admin'))
+      .send({ name: 'Kindless', sell_price: 45 });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.priceBookItem.create.mock.calls[0][0].data.kind).toBeNull();
+  });
+
+  it('PATCH with kind: labor writes kind service', async () => {
+    mockAuthAs('admin');
+    mockPrisma.priceBookItem.findFirst.mockResolvedValue(ITEM_FIXTURE);
+    mockPrisma.priceBookItem.updateMany.mockResolvedValue({ count: 1 });
+
+    const res = await request(app)
+      .patch(`/api/price-book/items/${ITEM_FIXTURE.id}`)
+      .set(authHeader('admin'))
+      .send({ kind: 'labor' });
+
+    expect(res.status).toBe(200);
+    const data = mockPrisma.priceBookItem.updateMany.mock.calls[0][0].data;
+    expect(data.kind).toBe('service');
+    expect(data.type).toBe('SERVICE');
+  });
+
+  it('PATCH clearing kind to null still clears it', async () => {
+    // Guarded separately because normalize() must not turn a deliberate clear
+    // into the string "service" - that would silently reclassify the item.
+    mockAuthAs('admin');
+    mockPrisma.priceBookItem.findFirst.mockResolvedValue(ITEM_FIXTURE);
+    mockPrisma.priceBookItem.updateMany.mockResolvedValue({ count: 1 });
+
+    const res = await request(app)
+      .patch(`/api/price-book/items/${ITEM_FIXTURE.id}`)
+      .set(authHeader('admin'))
+      .send({ kind: null });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.priceBookItem.updateMany.mock.calls[0][0].data.kind).toBeNull();
+  });
+});
+
 describe('PATCH /api/price-book/items/:id — mirror + 409 (P0 §D1)', () => {
   it('mirrors sell_price into unit_price on update', async () => {
     mockAuthAs('admin');

@@ -90,10 +90,10 @@ gitleaks-report.json
 # Example files
 examples/
 
-# B&G import cleaned data (real customer PII — never commit)
+# Lakeside import cleaned data (real customer PII — never commit)
 
 # ─── Customer / client PII — NEVER commit real customer data ─────────────────
-# Onboarding & migration work (ServiceCore, B&G, Alpha Doors, Talon, …) produces
+# Onboarding & migration work (vendor migrations) produces
 # raw vendor exports and ETL "staged" files full of names / addresses / phones /
 # emails. Ignore by file TYPE so PII is caught no matter which folder it lands in.
 # Source code never uses these extensions, so this hides nothing legitimate:
@@ -106,8 +106,8 @@ examples/
 *.csv
 *_staged.json
 # ETL/import working dirs (raw exports + any transformed PII output)
-md_files/plans/onboarding/**/talon-etl/*.json
-**/Service Core Reports/
+md_files/plans/onboarding/**/*-etl/*.json
+**/*Reports/
 # ─── Agent + tooling scratch output (generated, never source) ────────────────
 # These accumulate in the primary checkout and masquerade as uncommitted work.
 # Measured 2026-08-05: ~1,050 untracked files, 41 MB, none of it source.

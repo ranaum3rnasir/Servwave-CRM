@@ -40,6 +40,9 @@ const BUCKET_ICONS: Record<EventType, typeof Briefcase> = {
   job: Briefcase,
   walkthrough: Footprints,
   'service-plan': Repeat,
+  // Dead v1 fork (no importer outside its own test) - added only to satisfy
+  // Record<EventType, ...> after slice 03 widened EventType. Not wired into any live surface.
+  'calendar-entry': Repeat,
 };
 
 export interface UnassignedBucketsProps {
@@ -193,6 +196,7 @@ export function UnassignedBuckets({
     job: true,
     walkthrough: true,
     'service-plan': true,
+    'calendar-entry': true,
   });
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropHover, setDropHover] = useState(false);
@@ -200,7 +204,7 @@ export function UnassignedBuckets({
   // A collapsed bucket has to reveal a search hit, or selecting the result highlights
   // something nobody can see. Derived at render rather than pushed into `open` from an
   // effect - an effect here is a cascading render (react-hooks/set-state-in-effect).
-  const highlightedType = events.find((e) => e.id === highlightedCardId)?.type;
+  const highlightedType = events.find((e) => e.boardId === highlightedCardId)?.type;
 
   return (
     <div
@@ -278,14 +282,14 @@ export function UnassignedBuckets({
                 ) : (
                   items.map((ev) => (
                     <BucketCard
-                      key={ev.id}
+                      key={ev.boardId}
                       ev={ev}
                       members={members}
-                      dragging={draggingId === ev.id}
+                      dragging={draggingId === ev.boardId}
                       dragDisabled={dragDisabled}
-                      highlighted={ev.id === highlightedCardId}
+                      highlighted={ev.boardId === highlightedCardId}
                       onDragStart={(e) => {
-                        setDraggingId(ev.id);
+                        setDraggingId(ev.boardId);
                         onDragStartCard(ev, e);
                       }}
                       onDragEnd={(e) => {

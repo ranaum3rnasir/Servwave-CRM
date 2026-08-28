@@ -6,6 +6,10 @@ import { tenantWhere } from '../lib/tenant';
 import { arOutstandingWhere } from '../lib/ar';
 import { ESTIMATE_STATUS } from '../constants/estimateStatus';
 import { signAvatarPaths, resolveAvatarUrl } from '../lib/avatar';
+import { NO_LIVE_VISIT_WHERE, resolveNextJobVisit } from '../services/walkthrough.service';
+import { LIVE_VISIT_STATUSES } from '../lib/visit-status';
+import { jobCrewIds } from '../lib/job-crew';
+import { resolveDeletedTaskLabels } from '../lib/tasks/deletion';
 import {
   buildScoreboard,
   buildJobsByStatus,
@@ -22,6 +26,33 @@ const OPEN_LEAD_STATUSES: LeadStatus[] = [
   'CONTACTED',
   'ESTIMATED',
 ];
+
+/**
+ * S8 repoint (D14): "does this job have a trip in this window" — the reference pattern from
+ * `buildJobListWhere` (job.controller.ts:948-972). Composed under `AND` by every call site below
+ * (never assigned onto `where.visits`) so a future row-scope on this endpoint can never be
+ * clobbered. The second OR arm exists because a CANCELLED job holds nothing but cancelled trips
+ * (D19 keeps the rows) — on the KPI tiles below that already exclude CANCELLED at the top level
+ * the arm is inert, but it is kept so every site written against this helper shares one shape
+ * with the shipped reference rather than each reasoning separately about when it's safe to drop.
+ */
+function visitInWindowClause(window: { gte?: Date; lte?: Date; lt?: Date; gt?: Date }): Record<string, unknown> {
+  return {
+    OR: [
+      { visits: { some: { scheduled_at: window, status: { not: 'CANCELLED' } } } },
+      { status: 'CANCELLED' as const, visits: { some: { scheduled_at: window } } },
+    ],
+  };
+}
+
+// Prisma cannot ORDER BY a to-many relation's resolved value, so the two genuinely
+// forward-looking queries below (site 3 "needs attention: past start" and site 6 "coming up")
+// cannot ask the DB to sort/limit by "the winning live visit's instant" directly. Both over-fetch
+// a generous, bounded cap and resolve/sort/slice in application code instead — the same
+// trade-off search.controller.ts's SCHEDULE_OVERFETCH already makes for an analogous bounded,
+// non-paginated UI slot (a dashboard tile, not a report).
+const ATTENTION_OVERFETCH = 25; // widget shows top 3
+const COMING_UP_OVERFETCH = 40; // widget shows top 6
 
 export async function getDashboard(req: Request, res: Response) {
   try {
@@ -118,23 +149,26 @@ export async function getDashboard(req: Request, res: Response) {
       dispatchScoreboardGroups,
       activePlans,
     ] = await Promise.all([
-      // 1. Jobs today grouped by status
+      // 1. Jobs today grouped by status. S8 repoint (D14): backward-looking — "did this job have
+      // a trip today", so it reads the visit set, not the (to-be-dropped) scheduled_start mirror.
+      // Free bug fix (see PR body): the mirror NULLs for a COMPLETED job once its last live visit
+      // leaves the live set (D16), so this tile has been under-counting completed work today.
       prisma.job.groupBy({
         by: ['status'],
         where: {
           ...orgWhere,
-          scheduled_start: { gte: todayStart, lte: todayEnd },
           status: { not: 'CANCELLED' },
+          AND: [visitInWindowClause({ gte: todayStart, lte: todayEnd })],
         },
         _count: { _all: true },
       }),
 
-      // 2. Jobs yesterday count (for delta)
+      // 2. Jobs yesterday count (for delta). Same repoint as #1.
       prisma.job.count({
         where: {
           ...orgWhere,
-          scheduled_start: { gte: yesterdayStart, lte: yesterdayEnd },
           status: { not: 'CANCELLED' },
+          AND: [visitInWindowClause({ gte: yesterdayStart, lte: yesterdayEnd })],
         },
       }),
 
@@ -179,7 +213,10 @@ export async function getDashboard(req: Request, res: Response) {
       // 8. Open leads
       prisma.lead.findMany({
         where: { ...orgWhere, status: { in: OPEN_LEAD_STATUSES } },
-        select: { id: true, lead_assignees: { select: { user_id: true } }, contacted_at: true },
+        select: {
+          id: true,
+          lead_assignees: { select: { user_id: true } },
+        },
       }),
 
       // 9. Close rate — current 30 days
@@ -235,36 +272,59 @@ export async function getDashboard(req: Request, res: Response) {
         prisma.lead.count({
           where: { ...orgWhere, lead_assignees: { none: {} }, status: { in: OPEN_LEAD_STATUSES } },
         }),
-        // Jobs past their scheduled start time (still SCHEDULED)
+        // Jobs past their scheduled start time (still SCHEDULED — no visit has begun, or
+        // deriveJobStatusFromVisits would already read IN_PROGRESS).
+        //
+        // S8 repoint (D14): forward-looking. Resolves each candidate's WINNING live visit with
+        // the same `resolveNextJobVisit` the retired mirror was written from, then keeps only the
+        // ones whose winning visit is actually overdue today — this is deliberately a fresh
+        // resolution, not "does any live visit fall in this window": a job holding both an
+        // unactioned 9am trip and a booked-next-week trip now resolves to the FUTURE one (matching
+        // what a live mirror write would say), and correctly drops off this list. See the PR body.
+        //
+        // The WHERE below is a widening pre-filter only (candidates must have SOME overdue live
+        // visit), not the final answer — ATTENTION_OVERFETCH + the post-processing resolve/filter/
+        // sort below is what decides membership, because Prisma cannot ORDER BY a to-many
+        // relation's resolved value.
         prisma.job.findMany({
           where: {
             ...orgWhere,
             status: 'SCHEDULED',
-            scheduled_start: { gte: todayStart, lt: now },
+            AND: [
+              { visits: { some: { status: { in: [...LIVE_VISIT_STATUSES] }, scheduled_at: { gte: todayStart, lt: now } } } },
+            ],
           },
           select: {
             id: true,
             job_number: true,
-            scheduled_start: true,
             scope_notes: true,
-            assignees: { select: { user: { select: { first_name: true, last_name: true } } } },
+            // S8 (D6): crew through the trips. Unfiltered by date/status beyond LIVE — the full
+            // live-visit set is what resolveNextJobVisit needs to resolve correctly below.
+            visits: {
+              where: { status: { in: [...LIVE_VISIT_STATUSES] } },
+              select: {
+                scheduled_at: true,
+                scheduled_end: true,
+                created_at: true,
+                assignees: { select: { user: { select: { first_name: true, last_name: true } } } },
+              },
+            },
           },
-          orderBy: { scheduled_start: 'asc' },
-          take: 3,
+          take: ATTENTION_OVERFETCH,
         }),
-        // Leads requiring walkthrough, not yet scheduled.
+        // Leads requiring a visit, none booked.
         //
-        // Walkthrough-as-entity redesign, PR-B2: repointed onto Walkthrough.status = REQUESTED,
-        // the same collapsed bucket definition used everywhere else (lead.filters.ts's
-        // walkthrough_status=needs_scheduling facet). This is a real, intentional behavior
-        // shift: the old query additionally required lead status NEW/CONTACTED, which the
-        // bucket collapse deliberately drops (D11/D12 — a cancelled visit with nothing
-        // rebooked, or a REQUESTED visit on a lead that has moved past CONTACTED, both belong
-        // in "needs scheduling"). The attention list can surface more leads than before.
+        // Multi-visit D22a: flipped off the retired REQUESTED placeholder onto the ABSENCE of a
+        // live visit. REQUESTED encoded "this lead needs a visit booked", which is not a state of
+        // a visit at all - it is the absence of one - and it cannot survive multi-visit, because
+        // with several live visits per lead there is no single row for the placeholder to be.
+        //
+        // The `none` phrasing is what makes this correct under multi-visit rather than merely
+        // equivalent: a lead holding three trips, one of them cancelled, must NOT appear here.
         prisma.lead.findMany({
           where: {
             ...orgWhere,
-            walkthroughs: { some: { status: 'REQUESTED' } },
+            ...NO_LIVE_VISIT_WHERE,
           },
           select: {
             id: true,
@@ -277,28 +337,54 @@ export async function getDashboard(req: Request, res: Response) {
         }),
       ]),
 
-      // 12. Schedule jobs for selected date (optionally filtered by assignee's department)
+      // 12. Schedule jobs for selected date (optionally filtered by assignee's department).
+      //
+      // S8 repoint (D14): backward-looking — "does this job have a trip today", the visit set,
+      // not the (to-be-dropped) scheduled_start/scheduled_end mirror. The window clause and the
+      // department clause are BOTH `visits.some.*` shapes now, so both are pushed into `AND` as
+      // separate array entries rather than either being a bare `where.visits` key — a second bare
+      // assignment here would silently overwrite the first (house rule: composed under AND, never
+      // assigned onto `where.visits`). Free bug fix: same D16-collapse under-count as sites #1/#2
+      // applies to any COMPLETED job showing on this strip.
       prisma.job.findMany({
         where: {
           ...orgWhere,
-          scheduled_start: { gte: scheduleDateStart, lte: scheduleDateEnd },
           status: { not: 'CANCELLED' },
-          ...(scheduleDepartmentId
-            ? { assignees: { some: { user: { department_id: scheduleDepartmentId } } } }
-            : {}),
+          AND: [
+            visitInWindowClause({ gte: scheduleDateStart, lte: scheduleDateEnd }),
+            // S8 (D6): crew through the trips. `Job.assignees` went with `job_assignees`, and a
+            // conditional spread is exempt from excess-property checking, so tsc cannot see a
+            // dead relation name here. The sibling clause on query 12b below looks identical but
+            // is on `prisma.visit`, where `assignees` is the real relation - do not "tidy" the
+            // two into one shape. Every dashboard query shares one Promise.all, so getting this
+            // wrong 500s the whole endpoint rather than just this strip.
+            ...(scheduleDepartmentId
+              ? [{ visits: { some: { assignees: { some: { user: { department_id: scheduleDepartmentId } } } } } }]
+              : []),
+          ],
         },
         select: {
           id: true,
           job_number: true,
           status: true,
           scope_notes: true,
-          scheduled_start: true,
-          scheduled_end: true,
-          assignees: { select: { user: { select: { id: true, first_name: true, last_name: true, avatar_path: true } } } },
+          // scheduled_start/scheduled_end are no longer read directly here (S8 retires that
+          // mirror) — scheduleJobsWithVisitTimes below derives them per job from the matching
+          // trip(s) in `visits`, keyed on scheduled_at/scheduled_end so a job with an unrelated
+          // trip on a DIFFERENT day never lends this widget the wrong time.
+          visits: {
+            select: {
+              scheduled_at: true,
+              scheduled_end: true,
+              status: true,
+              assignees: { select: { user: { select: { id: true, first_name: true, last_name: true, avatar_path: true } } } },
+            },
+          },
           customer: { select: { first_name: true, last_name: true, company_name: true } },
           service_location: { select: { address_line1: true, city: true } },
         },
-        orderBy: { scheduled_start: 'asc' },
+        // No DB-level orderBy: buildScheduleLanes re-sorts each lane by the DERIVED
+        // scheduled_start below, so the fetch order here doesn't matter.
       }),
 
       // 12b. Scheduled walkthroughs for selected date (optionally filtered by
@@ -311,13 +397,18 @@ export async function getDashboard(req: Request, res: Response) {
       // "null-out-the-timestamp" trick — cancelling a visit now KEEPS its scheduled_at as
       // history (D15 needs it to resolve "the most recent visit that happened"), so an
       // implicit not-null check on scheduled_at would wrongly keep a cancelled visit visible.
-      prisma.walkthrough.findMany({
+      prisma.visit.findMany({
         where: {
           ...orgWhere,
+          // LEAD visits only. `visits` holds a job's trips too from multi-visit S2 (D5: exactly
+          // one parent, so a job visit carries no lead at all), and its migration backfills one
+          // per already-scheduled job - without this predicate every such job turns up in the
+          // walkthrough lane of the dashboard. Job visits get their own lane in S6.
+          lead_id: { not: null },
           scheduled_at: { gte: scheduleDateStart, lte: scheduleDateEnd },
           status: { in: ['SCHEDULED', 'COMPLETED'] },
           ...(scheduleDepartmentId
-            ? { performers: { some: { user: { department_id: scheduleDepartmentId } } } }
+            ? { assignees: { some: { user: { department_id: scheduleDepartmentId } } } }
             : {}),
         },
         select: {
@@ -334,7 +425,7 @@ export async function getDashboard(req: Request, res: Response) {
               service_location: { select: { address_line1: true, city: true } },
             },
           },
-          performers: {
+          assignees: {
             select: { user: { select: { id: true, first_name: true, last_name: true, avatar_path: true } } },
           },
         },
@@ -410,12 +501,12 @@ export async function getDashboard(req: Request, res: Response) {
         where: { ...orgWhere, status: 'COMPLETED', completed_at: { gte: weekStart, lte: weekEnd } },
       }),
 
-      // 19. Jobs scheduled this week
+      // 19. Jobs scheduled this week. S8 repoint (D14): same backward-looking repoint as #1/#2/#12.
       prisma.job.count({
         where: {
           ...orgWhere,
-          scheduled_start: { gte: weekStart, lte: weekEnd },
           status: { not: 'CANCELLED' },
+          AND: [visitInWindowClause({ gte: weekStart, lte: weekEnd })],
         },
       }),
 
@@ -437,24 +528,45 @@ export async function getDashboard(req: Request, res: Response) {
       // A job shared by multiple crew counts toward each (scheduler-assignment-redesign).
       prisma.job.findMany({
         where: { ...orgWhere, status: 'COMPLETED' },
-        select: { amount_invoiced: true, assignees: { select: { user_id: true } } },
+        select: { amount_invoiced: true, visits: { select: { assignees: { select: { user_id: true } } } } },
       }),
 
-      // 23. Coming up — next upcoming scheduled jobs
+      // 23. Coming up — next upcoming scheduled jobs.
+      //
+      // S8 repoint (D14(ii)): genuinely forward-looking — "when is this job next happening" — so
+      // this resolves each candidate's next live visit with `resolveNextJobVisit`, the same
+      // function the retired mirror was written from, rather than reading the mirror itself.
+      // The WHERE is a widening pre-filter (candidate must have SOME visit `resolveNextJobVisit`
+      // could call "upcoming" — mirroring its own `(scheduled_end ?? scheduled_at) > now` rule so
+      // an in-progress-by-schedule trip whose window straddles `now` isn't missed); the
+      // post-processing resolve/filter/sort/slice below (COMING_UP_OVERFETCH) is what actually
+      // decides the final 6, because Prisma cannot ORDER BY a to-many relation's resolved value.
       prisma.job.findMany({
         where: {
           ...orgWhere,
-          scheduled_start: { gt: now },
           status: { notIn: ['CANCELLED', 'COMPLETED'] },
+          AND: [
+            {
+              visits: {
+                some: {
+                  status: { in: [...LIVE_VISIT_STATUSES] },
+                  OR: [{ scheduled_end: { gt: now } }, { scheduled_end: null, scheduled_at: { gt: now } }],
+                },
+              },
+            },
+          ],
         },
         select: {
           id: true,
-          scheduled_start: true,
           customer: { select: { first_name: true, last_name: true, company_name: true } },
           service_location: { select: { address_line1: true, city: true } },
+          // Unfiltered by time beyond LIVE — resolveNextJobVisit needs the full live-visit set.
+          visits: {
+            where: { status: { in: [...LIVE_VISIT_STATUSES] } },
+            select: { scheduled_at: true, scheduled_end: true, created_at: true },
+          },
         },
-        orderBy: { scheduled_start: 'asc' },
-        take: 6,
+        take: COMING_UP_OVERFETCH,
       }),
 
       // 24. Pipeline — leads created MTD (funnel head)
@@ -521,11 +633,11 @@ export async function getDashboard(req: Request, res: Response) {
     const techAgg = new Map<string, { revenue: number; jobs: number }>();
     for (const j of techScoreboardJobs) {
       const rev = Number(j.amount_invoiced ?? 0);
-      for (const a of j.assignees) {
-        const cur = techAgg.get(a.user_id) ?? { revenue: 0, jobs: 0 };
+      for (const userId of jobCrewIds(j)) {
+        const cur = techAgg.get(userId) ?? { revenue: 0, jobs: 0 };
         cur.revenue += rev;
         cur.jobs += 1;
-        techAgg.set(a.user_id, cur);
+        techAgg.set(userId, cur);
       }
     }
     // Resolve names for both the tech crews and the dispatchers in one lookup.
@@ -581,7 +693,6 @@ export async function getDashboard(req: Request, res: Response) {
     // Open Leads KPI
     const leadsOpenCount = openLeads.length;
     const unassignedLeadsCount = openLeads.filter((l) => l.lead_assignees.length === 0).length;
-    const needFollowupCount = openLeads.filter((l) => !l.contacted_at).length;
 
     // Close Rate KPI
     const crCurrentMap: Record<string, number> = {};
@@ -605,9 +716,22 @@ export async function getDashboard(req: Request, res: Response) {
       overdueInvoices,
       oldestUnassignedLeads,
       unassignedLeadCount,
-      jobsPastStart,
+      jobsPastStartCandidates,
       walkthroughsNeeded,
     ] = attentionData;
+
+    // S8 repoint (D14): resolve each candidate's winning live visit (`resolveNextJobVisit` — the
+    // same function the retired mirror was written from) and keep only the ones whose winning
+    // visit is actually overdue today. See the query comment (site 3) for why this is a fresh
+    // resolution rather than "any live visit in window".
+    const jobsPastStart = jobsPastStartCandidates
+      .map((job) => ({ job, visit: resolveNextJobVisit(job.visits, now) }))
+      .filter(
+        (x): x is { job: (typeof jobsPastStartCandidates)[number]; visit: NonNullable<typeof x.visit> & { scheduled_at: Date } } =>
+          x.visit !== null && x.visit.scheduled_at !== null && x.visit.scheduled_at >= todayStart && x.visit.scheduled_at < now,
+      )
+      .sort((a, b) => a.visit.scheduled_at.getTime() - b.visit.scheduled_at.getTime())
+      .slice(0, 3);
 
     type AttentionItem = {
       id: string;
@@ -657,10 +781,12 @@ export async function getDashboard(req: Request, res: Response) {
       });
     }
 
-    for (const job of jobsPastStart) {
-      const minutesPast = Math.floor((now.getTime() - job.scheduled_start!.getTime()) / 60_000);
-      // Crew job: surface the first assignee (the board's lead tech).
-      const crewLead = job.assignees[0]?.user;
+    for (const { job, visit } of jobsPastStart) {
+      // S8 repoint (D14): the winning visit's OWN instant, not the retired mirror.
+      const minutesPast = Math.floor((now.getTime() - visit.scheduled_at.getTime()) / 60_000);
+      // Crew: the winning visit's own assignees (not a union across every trip the job has) —
+      // the lead tech for THIS overdue trip, exactly as this attention item is about.
+      const crewLead = visit.assignees[0]?.user;
       const techName = crewLead
         ? `${crewLead.first_name} ${crewLead.last_name}`
         : 'Unassigned';
@@ -698,9 +824,36 @@ export async function getDashboard(req: Request, res: Response) {
     // Walkthrough-as-entity redesign, PR-B2: `id` here MUST stay the LEAD's id, not the
     // Walkthrough row's — the frontend widget (TodaySchedule.tsx) navigates to `/leads/${id}`
     // for a `entity: 'walkthrough'` row, and that wire contract does not change in this PR.
+    // S8 repoint (D14): derive each job's DISPLAYED time from the trip(s) that actually fall
+    // inside the viewed day, not the retired scheduled_start/scheduled_end mirror. Crew fan-out
+    // (S8/D6, already shipped) is untouched — buildScheduleLanes still unions assignees across
+    // `visits` exactly as before; only the two fields it reads for the time badge are recomputed.
+    const scheduleJobsWithVisitTimes = scheduleJobs.map((job) => {
+      const inWindow = job.visits
+        .filter(
+          (v) =>
+            v.scheduled_at !== null &&
+            v.scheduled_at >= scheduleDateStart &&
+            v.scheduled_at <= scheduleDateEnd &&
+            v.status !== 'CANCELLED',
+        )
+        .sort((a, b) => a.scheduled_at!.getTime() - b.scheduled_at!.getTime());
+      const winner = inWindow[0] ?? null;
+      return {
+        ...job,
+        scheduled_start: winner?.scheduled_at ?? null,
+        scheduled_end: winner?.scheduled_end ?? null,
+      };
+    });
+
     const scheduleOut = buildScheduleLanes(
-      scheduleJobs,
-      scheduleWalkthroughs.map((w) => ({
+      scheduleJobsWithVisitTimes,
+      // `lead` became nullable when visits gained a job parent (multi-visit D5). Query 12b is
+      // lead-scoped, so a job visit cannot reach here - and the filter below is the belt to that
+      // braces: a lead-less row must be skipped, never dereferenced. Dropping the predicate
+      // above used to mean a TypeError that 500'd the WHOLE dashboard for any org holding a job
+      // scheduled on the viewed day. Job visits get their own lane in S6.
+      scheduleWalkthroughs.flatMap((w) => (w.lead === null ? [] : [{
         id: w.lead.id,
         lead_number: w.lead.lead_number,
         service_request: w.lead.service_request,
@@ -710,8 +863,8 @@ export async function getDashboard(req: Request, res: Response) {
         walkthrough_completed_at: w.completed_at,
         customer: w.lead.customer,
         service_location: w.lead.service_location,
-        performers: w.performers.map((p) => p.user),
-      })),
+        performers: w.assignees.map((p) => p.user),
+      }])),
     );
 
     // Today's Schedule avatars — `avatar_path` already rode along on SchedulePerson/ScheduleLane
@@ -723,16 +876,29 @@ export async function getDashboard(req: Request, res: Response) {
       avatar_url: resolveAvatarUrl(avatar_path, scheduleAvatarSigned),
     }));
 
-    // Activity feed
-    const activity = activityFeed.map((e) => ({
-      id: e.id,
-      event_type: e.event_type,
-      description: e.description,
-      entity_type: e.entity_type,
-      entity_id: e.entity_id,
-      created_at: e.created_at.toISOString(),
-      creator_name: e.creator ? `${e.creator.first_name} ${e.creator.last_name}` : null,
-    }));
+    // Activity feed.
+    //
+    // Issue 04 - this query carries NO entity filter, so once a task's timeline outlives the task
+    // it can land here pointing at a row that is gone. `entity_deleted` says so and `entity_label`
+    // carries the snapshot taken at delete time, which is the only identity the task has left.
+    // A client must not offer navigation to an `entity_deleted` event.
+    const deletedTaskLabels = await resolveDeletedTaskLabels(orgWhere.organization_id, activityFeed);
+    const activity = activityFeed.map((e) => {
+      // Keyed on the pair, not the id alone: the feed carries every entity type, and a
+      // lookup by id alone would mislabel a same-id event of another type.
+      const deletedLabel = e.entity_type === 'TASK' ? deletedTaskLabels.get(e.entity_id) ?? null : null;
+      return {
+        id: e.id,
+        event_type: e.event_type,
+        description: e.description,
+        entity_type: e.entity_type,
+        entity_id: e.entity_id,
+        entity_deleted: deletedLabel !== null,
+        entity_label: deletedLabel,
+        created_at: e.created_at.toISOString(),
+        creator_name: e.creator ? `${e.creator.first_name} ${e.creator.last_name}` : null,
+      };
+    });
 
     // Revenue chart — build month slots and fill
     const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -787,14 +953,27 @@ export async function getDashboard(req: Request, res: Response) {
       5,
     );
 
+    // S8 repoint (D14(ii)): resolve each candidate's next live visit (`resolveNextJobVisit`) —
+    // see the query comment (site 6) for why the WHERE alone isn't the final answer.
+    const comingUpResolved = comingUpRows
+      .map((j) => ({ j, visit: resolveNextJobVisit(j.visits, now) }))
+      .filter(
+        (x): x is { j: (typeof comingUpRows)[number]; visit: NonNullable<typeof x.visit> & { scheduled_at: Date } } =>
+          x.visit !== null &&
+          x.visit.scheduled_at !== null &&
+          (x.visit.scheduled_end ?? x.visit.scheduled_at).getTime() > now.getTime(),
+      )
+      .sort((a, b) => a.visit.scheduled_at.getTime() - b.visit.scheduled_at.getTime())
+      .slice(0, 6);
+
     const comingUp = buildComingUp(
-      comingUpRows.map((j) => {
+      comingUpResolved.map(({ j, visit }) => {
         const c = j.customer;
         const title = c.company_name || [c.first_name, c.last_name].filter(Boolean).join(' ') || 'Customer';
         const address = j.service_location
           ? `${j.service_location.address_line1}, ${j.service_location.city}`
           : '';
-        return { id: j.id, scheduled_start: j.scheduled_start, title, address };
+        return { id: j.id, scheduled_start: visit.scheduled_at, title, address };
       }),
       now,
     );
@@ -871,8 +1050,8 @@ export async function getDashboard(req: Request, res: Response) {
           total: jobsTodayTotal,
           scheduled: jobsByStatus['SCHEDULED'] ?? 0,
           // Spec B1 (Task 5): the groupBy already returns every non-cancelled status; only this
-          // readout dropped EN_ROUTE/ON_SITE. Fold them in, same as job.controller.ts's KPIs.
-          in_progress: (jobsByStatus['IN_PROGRESS'] ?? 0) + (jobsByStatus['EN_ROUTE'] ?? 0) + (jobsByStatus['ON_SITE'] ?? 0),
+          // S4 (D17): EN_ROUTE/ON_SITE retired from JobStatus, so there is nothing left to fold.
+          in_progress: jobsByStatus['IN_PROGRESS'] ?? 0,
           completed: jobsByStatus['COMPLETED'] ?? 0,
           vs_yesterday: jobsTodayTotal - jobsYesterdayCount,
         },
@@ -892,7 +1071,6 @@ export async function getDashboard(req: Request, res: Response) {
         leads_open: {
           count: leadsOpenCount,
           unassigned: unassignedLeadsCount,
-          need_followup_today: needFollowupCount,
         },
         close_rate: {
           rate: closeRateValue,

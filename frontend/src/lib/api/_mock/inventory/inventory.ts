@@ -473,22 +473,15 @@ export const itemGroups: ItemGroup[] = [
 // surfaces (Catalog tab in Price Book, estimate / invoice line items in
 // Phase C). Internal-only items (labor codes, fees, internal discounts) are
 // still visible to ops staff in the Inventory + Items list. Default is
-// computed from item.kind on insert (material/service/bundle → catalog,
-// labor/fee → internal_only) and can be flipped per-item.
+// defaulted to catalog on insert and can be flipped per-item.
 export type ItemVisibility = "catalog" | "internal_only";
 
-export function defaultVisibilityForKind(kind: ItemKind): ItemVisibility {
-  switch (kind) {
-    case "material":
-    case "service":
-    case "bundle":
-      return "catalog";
-    case "labor":
-    case "fee":
-      return "internal_only";
-    default:
-      return "catalog";
-  }
+// Both surviving kinds default to the customer-facing catalog. The two that
+// defaulted to internal_only - labor and fee - were retired; keeping something
+// off customer surfaces is now an explicit choice on the item, which is the
+// only way it was ever reliable (a "service" could always be either).
+export function defaultVisibilityForKind(_kind: ItemKind): ItemVisibility {
+  return "catalog";
 }
 
 export const categories: Category[] = [
@@ -563,7 +556,9 @@ export const locations: Location[] = [
   { id: "loc_van_carlos", name: "Carlos's Van", type: "truck", branch: "Queens Branch", primaryTech: "Carlos Tran", vehicle: "Mercedes Sprinter · QN-9920" },
 ];
 
-export type ItemKind = "material" | "service" | "labor" | "bundle" | "fee";
+// Kept in lockstep with the live ItemKind in lib/api/inventory.ts - the two are
+// structurally compared wherever a mock Item feeds a real-typed prop.
+export type ItemKind = "material" | "service";
 export type Trade = "locksmith" | "door" | "security" | "hvac" | "plumbing";
 export type ItemStatus = "active" | "on_backorder" | "discontinued";
 
@@ -951,7 +946,9 @@ export const items: Item[] = [
     name: "Locksmith Labor — Hourly",
     category: "Labor",
     trade: "locksmith",
-    kind: "labor",
+    // Was "labor" - retired kind. It kept billing as SERVICE either way; the
+    // explicit internal_only below is what actually keeps it off the catalog.
+    kind: "service",
     uom: "HR",
     unitCost: 65.0,
     sellPrice: 165.0,

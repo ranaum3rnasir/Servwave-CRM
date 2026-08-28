@@ -6,9 +6,11 @@
  * The function drops the actor (ctx.actorId) from the final result, then de-duplicates
  * by userId merging priority (INTERRUPT wins) and needs_action (OR).
  *
- * Deferred verbs (task.*, estimate.viewed, estimate.delivery_failed,
- * invoice.delivery_failed, billing.payment_failed, service_plan.*) are intentionally
- * NOT encoded here — they fall through to the empty-array default.
+ * Deferred verbs (estimate.viewed, estimate.delivery_failed, invoice.delivery_failed,
+ * billing.payment_failed, service_plan.*) are intentionally NOT encoded here — they fall
+ * through to the empty-array default. `task.*` is no longer among them: the five verbs of
+ * the multi-assignee design §5, plus `task.cancelled` (issue 03), are routed below
+ * (task.due_soon / task.overdue stay deferred — they need a cron that does not exist).
  */
 
 export type RecipientSpec = {
@@ -228,6 +230,77 @@ export function resolveRecipients(ctx: ResolveContext): RecipientSpec[] {
       raw.push(...forRole(DISPATCHER, FEED));
       const assignees = strArr('assignee_ids');
       assignees.forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    // ── CALENDAR ENTRY (slice 07) ────────────────────────────────────────────────
+    // USER participants only — FEED, never INTERRUPT (a Calendar Entry is never a request
+    // for action). The caller (lib/calendar-entries/notify.ts) has already split the
+    // participant set by outcome before calling emit(), so every id reaching this case
+    // shares the SAME verb/outcome.
+    case 'calendar_entry.scheduled':
+    case 'calendar_entry.moved':
+    case 'calendar_entry.cancelled': {
+      const participantUserIds = strArr('participant_user_ids');
+      participantUserIds.forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    // ── TASK (multi-assignee design §5) ─────────────────────────────────────────
+    // The routing matrix lives HERE, not in the controller: the caller hands over the
+    // raw people-lists (and, for the two add-verbs, the DELTA it already computed for
+    // the activity log — design §6 says compute that diff once and feed both), and this
+    // switch decides who each verb is actually for.
+    //
+    // "actor always suppressed" in the design table is not implemented per-case: it is
+    // dedupe()'s job, one layer down. That is what makes `task.completed` mean "the OTHER
+    // assignees + the watchers" without a special case — the completer is the actor and
+    // falls out at the end. It also means a solo self-assign, or a task you complete
+    // alone, correctly notifies nobody and emit() early-returns without writing a row.
+    //
+    // object_type 'TASK' is deliberately absent from filterByAccess's SCOPE_TYPE_MAP, so
+    // these recipients are NOT row-scope filtered. That is correct by construction: every
+    // recipient below is someone the task itself names, and naming them IS what grants
+    // them visibility (design §4).
+    case 'task.assigned': {
+      // Only the newly ADDED assignees. Re-saving an unchanged roster must notify nobody,
+      // which is why the caller sends the delta rather than the whole list.
+      strArr('added_assignee_ids').forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'task.watching': {
+      strArr('added_watcher_ids').forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'task.completed': {
+      // The task's roster AFTER the update, minus the completer (via dedupe).
+      strArr('assignee_ids').forEach(id => raw.push(spec(id, FEED)));
+      strArr('watcher_ids').forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'task.cancelled': {
+      // Issue 03. Same roster as task.completed and for the same reason -- the whole point is
+      // that the people still carrying this work find out it is off. `task.completed` is NOT
+      // reused: it would tell them the work finished, which is the lie CANCELLED exists to end.
+      strArr('assignee_ids').forEach(id => raw.push(spec(id, FEED)));
+      strArr('watcher_ids').forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'task.removed': {
+      // The people taken off the task — from EITHER list; the caller unions them.
+      strArr('removed_ids').forEach(id => raw.push(spec(id, FEED)));
+      break;
+    }
+
+    case 'task.deleted': {
+      // Everyone who was on the task at the moment it was destroyed. Snapshotted by the
+      // caller BEFORE the delete, because there is nothing left to read afterwards.
+      strArr('assignee_ids').forEach(id => raw.push(spec(id, FEED)));
+      strArr('watcher_ids').forEach(id => raw.push(spec(id, FEED)));
       break;
     }
 

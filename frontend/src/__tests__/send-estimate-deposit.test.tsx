@@ -39,7 +39,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof SendEstimateDia
       estimateId="est-1"
       estimateNumber="J00229-2"
       totalAmount={TOTAL}
-      customerEmail="info@servwave.com"
+      customerEmail="art.nakamura@example.com"
       alreadySent={false}
       onSuccess={() => {}}
       {...props}
@@ -68,7 +68,7 @@ describe('deposit preview', () => {
   it('honours the estimate override instead of the org default', () => {
     renderDialog({ depositType: 'PERCENTAGE', depositValue: 70 });
     expect(pctInput().value).toBe('70'); // not the org's 50
-    expect(amtInput().value).toBe('74.64'); // not 53.32, and not 74.64095555550224
+    expect(amtInput().value).toBe('74.64'); // not 53.32, and not 74.64099999999999
   });
 
   it('falls back to the org default when the estimate has no override', () => {

@@ -25,7 +25,11 @@ function DataTablePagination<TData>({
   pageSizeOptions = [25, 50, 100],
 }: DataTablePaginationProps<TData>) {
   const selected = table.getFilteredSelectedRowModel().rows.length;
-  const total = table.getFilteredRowModel().rows.length;
+  // `getRowCount()` rather than the filtered row model: under server-side
+  // paging the filtered model only holds the page in hand, so the readout
+  // would say "of 25" on a 4,000-row list. It falls back to the same filtered
+  // count when the table pages itself, so the client path is unchanged.
+  const total = table.getRowCount();
   const { pageIndex, pageSize } = table.getState().pagination;
   const pageCount = table.getPageCount();
 

@@ -4,7 +4,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Heading } from '@/components/ui/heading';
 import { ChartCard } from '@/components/charts';
 import { chartPalette, token } from '@/design-system';
-import type { QaResult } from '../communication-tracking-logic';
+import type { QaResult } from '@/lib/reports/communication-tracking-logic';
 
 const ROLE_LABEL: Record<string, string> = {
   csr: 'Office / CSR',

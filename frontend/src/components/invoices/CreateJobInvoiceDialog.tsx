@@ -1,12 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/components/ui/dialog';
+import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -214,234 +208,42 @@ export function CreateJobInvoiceDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg" data-testid="create-job-invoice-dialog">
-        <DialogHeader>
-          <DialogTitle>Create Invoice for {jobNumber}</DialogTitle>
-          <DialogDescription>
-            Remaining balance:{' '}
-            <span className="font-semibold text-text-primary">{formatCurrency(billing.remaining)}</span> of{' '}
-            {formatCurrency(billing.total)}.
-          </DialogDescription>
-        </DialogHeader>
-
-        {existingDraft ? (
-          <div className="space-y-4">
-            <p className="text-sm text-text-secondary">
-              {jobNumber} already has draft invoice {existingDraft.invoice_number}. Send it
-              rather than creating a second one.
-            </p>
-            {needsRecipient && (
-              <div className="space-y-1">
-                <Label htmlFor="invoice-recipient">Send to</Label>
-                <Input
-                  id="invoice-recipient"
-                  type="email"
-                  value={recipient}
-                  onChange={(e) => setRecipient(e.target.value)}
-                  placeholder="customer@example.com"
-                />
-              </div>
-            )}
-            {sendDraft.isError && (
-              <p className="text-sm text-danger">
-                {extractApiError(sendDraft.error, 'Failed to send invoice')}
-              </p>
-            )}
-            <div className="flex justify-end gap-3">
-              <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={sendDraft.isPending}>
-                Cancel
-              </Button>
-              <Button variant="solid" tone="business" onClick={() => sendDraft.mutate()} disabled={sendDraft.isPending}>
-                {sendDraft.isPending ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending...
-                  </>
-                ) : (
-                  <>
-                    <Receipt className="mr-2 h-4 w-4" /> Send {existingDraft.invoice_number}
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-        ) : (
-        <div className="space-y-4">
-          {/* Mode toggle */}
-          <div className="flex rounded-md border border-border p-0.5" role="tablist" aria-label="Billing mode">
-            {([
-              ['AMOUNT', 'Amount'],
-              ['PERCENT', 'Percent'],
-              ['ITEMIZED', 'Itemized'],
-            ] as [Mode, string][]).map(([m, label]) => (
-              <button
-                key={m}
-                type="button"
-                role="tab"
-                aria-selected={mode === m}
-                onClick={() => setMode(m)}
-                className={cn(
-                  'flex-1 rounded-[4px] py-1.5 text-sm font-medium transition-colors',
-                  mode === m ? 'bg-primary text-on-fill' : 'text-text-secondary hover:bg-background-light',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {mode === 'AMOUNT' && (
-            <div className="space-y-1">
-              <Label htmlFor="draw-amount">Amount ($)</Label>
-              <Input
-                id="draw-amount"
-                type="number"
-                min={0.01}
-                step={0.01}
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </div>
-          )}
-
-          {mode === 'PERCENT' && (
-            <div className="space-y-1">
-              <Label htmlFor="draw-percent">
-                Percent of {formatCurrency(percentBasis)} pre-tax job total (%)
-              </Label>
-              <Input
-                id="draw-percent"
-                type="number"
-                min={0.01}
-                max={100}
-                step={0.01}
-                value={percent}
-                onChange={(e) => setPercent(e.target.value)}
-              />
-            </div>
-          )}
-
-          {mode === 'ITEMIZED' && (
-            <div className="space-y-2">
-              <Label>Select line items</Label>
-              {lines.length === 0 ? (
-                <p className="text-sm text-text-secondary">No line items on this job yet.</p>
+    <Modal
+      open={open}
+      onClose={() => handleOpenChange(false)}
+      title={`Create Invoice for ${jobNumber}`}
+      subtitle={
+        <>
+          Remaining balance:{' '}
+          <span className="font-semibold text-text-primary">{formatCurrency(billing.remaining)}</span> of{' '}
+          {formatCurrency(billing.total)}.
+        </>
+      }
+      width="md"
+      data-testid="create-job-invoice-dialog"
+      // Two different jobs, so two different footers: with a draft already on
+      // the job the only useful action is to SEND that one, not to create a
+      // second beside it.
+      footer={
+        existingDraft ? (
+          <>
+            <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={sendDraft.isPending}>
+              Cancel
+            </Button>
+            <Button variant="solid" tone="business" onClick={() => sendDraft.mutate()} disabled={sendDraft.isPending}>
+              {sendDraft.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending...
+                </>
               ) : (
                 <>
-                  <div className="flex items-center gap-3">
-                    <Checkbox
-                      id="invoice-select-all-lines"
-                      checked={allSelected ? true : lineIds.length > 0 ? 'indeterminate' : false}
-                      onCheckedChange={() => setLineIds(allSelected ? [] : lines.map((l) => l.id))}
-                    />
-                    <label
-                      htmlFor="invoice-select-all-lines"
-                      className="cursor-pointer text-xs font-semibold text-text-secondary"
-                    >
-                      {allSelected ? 'Clear all' : `Select all ${lines.length}`}
-                    </label>
-                  </div>
-
-                  <div className="max-h-80 space-y-2 overflow-y-auto pr-0.5">
-                    {lines.map((line) => {
-                      const { name, detail } = splitDescription(line.description);
-                      const isSelected = lineIds.includes(line.id);
-                      const ItemTypeIcon = line.item_type === 'SERVICE' ? Wrench : Package;
-                      return (
-                        <button
-                          key={line.id}
-                          type="button"
-                          onClick={() => toggleLine(line.id)}
-                          aria-pressed={isSelected}
-                          className={cn(
-                            'relative block w-full rounded-card border p-3 text-left transition-all',
-                            isSelected
-                              ? 'border-primary bg-primary-subtle ring-1 ring-primary'
-                              : 'border-border hover:border-border-soft hover:bg-background-light',
-                          )}
-                        >
-                          <span className="flex items-start gap-2.5">
-                            <ItemTypeIcon
-                              className={cn(
-                                'mt-0.5 h-4 w-4 shrink-0',
-                                isSelected ? 'text-primary' : 'text-text-soft',
-                              )}
-                            />
-                            <span className="min-w-0 flex-1">
-                              <span className="block break-words pr-6 text-sm font-semibold text-text-primary">
-                                {name}
-                              </span>
-                              {detail && (
-                                <span className="mt-1 block text-xs leading-relaxed text-text-secondary">
-                                  {detail}
-                                </span>
-                              )}
-                            </span>
-                            {isSelected && (
-                              <span className="absolute right-3 top-3 flex h-5 w-5 items-center justify-center rounded-full bg-primary">
-                                <Check className="h-3 w-3 text-on-fill" />
-                              </span>
-                            )}
-                          </span>
-                          <span className="mt-2.5 flex items-baseline justify-between border-t border-border-soft pt-2">
-                            <span className="text-xs tabular-nums text-text-secondary">
-                              {Number(line.quantity)} x {formatCurrency(Number(line.unit_price))}
-                            </span>
-                            <span className="text-base font-semibold tabular-nums text-text-primary">
-                              {formatCurrency(Number(line.line_total))}
-                            </span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="flex items-baseline justify-between rounded-card bg-background-light px-3 py-2">
-                    <span className="text-xs text-text-secondary">
-                      {lineIds.length} of {lines.length} selected
-                    </span>
-                    <span className="text-sm font-semibold tabular-nums text-text-primary">
-                      {formatCurrency(itemizedTotal)}
-                    </span>
-                  </div>
+                  <Receipt className="mr-2 h-4 w-4" /> Send {existingDraft.invoice_number}
                 </>
               )}
-            </div>
-          )}
-
-          <div className="space-y-1">
-            <Label htmlFor="invoice-description">Description (optional)</Label>
-            <Input
-              id="invoice-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Progress payment"
-            />
-          </div>
-
-          {/* The invoice may already exist at this point (create succeeded, send didn't) — see
-              `createdInvoiceId` in the mutation above. Resubmitting here retries the send only. */}
-          {needsRecipient && (
-            <div className="space-y-1">
-              <Label htmlFor="invoice-recipient">Send to</Label>
-              <Input
-                id="invoice-recipient"
-                type="email"
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
-                placeholder="customer@example.com"
-              />
-            </div>
-          )}
-
-          {formError && <p className="text-sm text-danger">{formError}</p>}
-          {mutation.isError && (
-            <p className="text-sm text-danger">
-              {extractApiError(mutation.error, 'Failed to create invoice')}
-            </p>
-          )}
-
-          <div className="flex justify-end gap-3">
+            </Button>
+          </>
+        ) : (
+          <>
             <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={mutation.isPending}>
               Cancel
             </Button>
@@ -461,10 +263,211 @@ export function CreateJobInvoiceDialog({
                 </>
               )}
             </Button>
-          </div>
+          </>
+        )
+      }
+    >
+      {existingDraft ? (
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            {jobNumber} already has draft invoice {existingDraft.invoice_number}. Send it
+            rather than creating a second one.
+          </p>
+          {needsRecipient && (
+            <div className="space-y-1">
+              <Label htmlFor="invoice-recipient">Send to</Label>
+              <Input
+                id="invoice-recipient"
+                type="email"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="customer@example.com"
+              />
+            </div>
+          )}
+          {sendDraft.isError && (
+            <p className="text-sm text-danger">
+              {extractApiError(sendDraft.error, 'Failed to send invoice')}
+            </p>
+          )}
         </div>
+      ) : (
+      <div className="space-y-4">
+        {/* Mode toggle */}
+        <div className="flex rounded-md border border-border p-0.5" role="tablist" aria-label="Billing mode">
+          {([
+            ['AMOUNT', 'Amount'],
+            ['PERCENT', 'Percent'],
+            ['ITEMIZED', 'Itemized'],
+          ] as [Mode, string][]).map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              role="tab"
+              aria-selected={mode === m}
+              onClick={() => setMode(m)}
+              className={cn(
+                'flex-1 rounded-[4px] py-1.5 text-sm font-medium transition-colors',
+                mode === m ? 'bg-primary text-on-fill' : 'text-text-secondary hover:bg-background-light',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === 'AMOUNT' && (
+          <div className="space-y-1">
+            <Label htmlFor="draw-amount">Amount ($)</Label>
+            <Input
+              id="draw-amount"
+              type="number"
+              min={0.01}
+              step={0.01}
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
+          </div>
         )}
-      </DialogContent>
-    </Dialog>
+
+        {mode === 'PERCENT' && (
+          <div className="space-y-1">
+            <Label htmlFor="draw-percent">
+              Percent of {formatCurrency(percentBasis)} pre-tax job total (%)
+            </Label>
+            <Input
+              id="draw-percent"
+              type="number"
+              min={0.01}
+              max={100}
+              step={0.01}
+              value={percent}
+              onChange={(e) => setPercent(e.target.value)}
+            />
+          </div>
+        )}
+
+        {mode === 'ITEMIZED' && (
+          <div className="space-y-2">
+            <Label>Select line items</Label>
+            {lines.length === 0 ? (
+              <p className="text-sm text-text-secondary">No line items on this job yet.</p>
+            ) : (
+              <>
+                <div className="flex items-center gap-3">
+                  <Checkbox
+                    id="invoice-select-all-lines"
+                    checked={allSelected ? true : lineIds.length > 0 ? 'indeterminate' : false}
+                    onCheckedChange={() => setLineIds(allSelected ? [] : lines.map((l) => l.id))}
+                  />
+                  <label
+                    htmlFor="invoice-select-all-lines"
+                    className="cursor-pointer text-xs font-semibold text-text-secondary"
+                  >
+                    {allSelected ? 'Clear all' : `Select all ${lines.length}`}
+                  </label>
+                </div>
+
+                <div className="max-h-80 space-y-2 overflow-y-auto pr-0.5">
+                  {lines.map((line) => {
+                    const { name, detail } = splitDescription(line.description);
+                    const isSelected = lineIds.includes(line.id);
+                    const ItemTypeIcon = line.item_type === 'SERVICE' ? Wrench : Package;
+                    return (
+                      <button
+                        key={line.id}
+                        type="button"
+                        onClick={() => toggleLine(line.id)}
+                        aria-pressed={isSelected}
+                        className={cn(
+                          'relative block w-full rounded-card border p-3 text-left transition-all',
+                          isSelected
+                            ? 'border-primary bg-primary-subtle ring-1 ring-primary'
+                            : 'border-border hover:border-border-soft hover:bg-background-light',
+                        )}
+                      >
+                        <span className="flex items-start gap-2.5">
+                          <ItemTypeIcon
+                            className={cn(
+                              'mt-0.5 h-4 w-4 shrink-0',
+                              isSelected ? 'text-primary' : 'text-text-soft',
+                            )}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block break-words pr-6 text-sm font-semibold text-text-primary">
+                              {name}
+                            </span>
+                            {detail && (
+                              <span className="mt-1 block text-xs leading-relaxed text-text-secondary">
+                                {detail}
+                              </span>
+                            )}
+                          </span>
+                          {isSelected && (
+                            <span className="absolute right-3 top-3 flex h-5 w-5 items-center justify-center rounded-full bg-primary">
+                              <Check className="h-3 w-3 text-on-fill" />
+                            </span>
+                          )}
+                        </span>
+                        <span className="mt-2.5 flex items-baseline justify-between border-t border-border-soft pt-2">
+                          <span className="text-xs tabular-nums text-text-secondary">
+                            {Number(line.quantity)} x {formatCurrency(Number(line.unit_price))}
+                          </span>
+                          <span className="text-base font-semibold tabular-nums text-text-primary">
+                            {formatCurrency(Number(line.line_total))}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-baseline justify-between rounded-card bg-background-light px-3 py-2">
+                  <span className="text-xs text-text-secondary">
+                    {lineIds.length} of {lines.length} selected
+                  </span>
+                  <span className="text-sm font-semibold tabular-nums text-text-primary">
+                    {formatCurrency(itemizedTotal)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-1">
+          <Label htmlFor="invoice-description">Description (optional)</Label>
+          <Input
+            id="invoice-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Progress payment"
+          />
+        </div>
+
+        {/* The invoice may already exist at this point (create succeeded, send didn't) — see
+            `createdInvoiceId` in the mutation above. Resubmitting here retries the send only. */}
+        {needsRecipient && (
+          <div className="space-y-1">
+            <Label htmlFor="invoice-recipient">Send to</Label>
+            <Input
+              id="invoice-recipient"
+              type="email"
+              value={recipient}
+              onChange={(e) => setRecipient(e.target.value)}
+              placeholder="customer@example.com"
+            />
+          </div>
+        )}
+
+        {formError && <p className="text-sm text-danger">{formError}</p>}
+        {mutation.isError && (
+          <p className="text-sm text-danger">
+            {extractApiError(mutation.error, 'Failed to create invoice')}
+          </p>
+        )}
+      </div>
+      )}
+    </Modal>
   );
 }

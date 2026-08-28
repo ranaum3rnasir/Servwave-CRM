@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { registerStoreReset } from '@/lib/storeReset';
 
 interface TaskDetailState {
   openTaskId: string | null;
@@ -11,3 +12,8 @@ export const useTaskDetailStore = create<TaskDetailState>((set) => ({
   open: (id) => set({ openTaskId: id }),
   close: () => set({ openTaskId: null }),
 }));
+
+// A task id belonging to the account that just signed out must not stay open for the next one.
+registerStoreReset(() => {
+  useTaskDetailStore.setState({ openTaskId: null });
+});

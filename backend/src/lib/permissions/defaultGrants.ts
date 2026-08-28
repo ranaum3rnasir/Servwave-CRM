@@ -8,9 +8,16 @@ type RoleGrant = Grant & { role: 'SALES' | 'DISPATCHER' | 'TECHNICIAN' };
 // `lead_assignees.some` idiom used below.
 const OWN_NOTIFICATION       = { recipients: { some: { recipient_id: '{{userId}}' } } } as const;
 const OWN_LEAD               = { lead_assignees: { some: { user_id: '{{userId}}' } } } as const;
-const OWN_JOB                = { assignees: { some: { user_id: '{{userId}}' } } } as const;
+// Multi-visit S8 (D6): crew lives on the VISIT, so "my job" is "a job with a trip I am on".
+// Byte-identical in shape to OWN_WALKTHROUGH below, deliberately - one relation path, one
+// meaning. This is NOT an equivalence-preserving rename: `Job.assignees` was S3's add-only
+// union superset and this is a strict subset, so the S8 migration repoints the STORED value in
+// role_permissions.conditions in the same PR. Changing this constant without that UPDATE
+// reddens check-role-permission-drift --strict for every org; doing the UPDATE without this
+// change re-seeds the dead path into the next org created.
+const OWN_JOB                = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } as const;
 const OWN_JOB_VIA_ESTIMATE   = { estimate: { lead: { lead_assignees: { some: { user_id: '{{userId}}' } } } } } as const;
-const OWN_INVOICE_VIA_JOB    = { job: { assignees: { some: { user_id: '{{userId}}' } } } } as const;
+const OWN_INVOICE_VIA_JOB    = { job: { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } } as const;
 const OWN_INVOICE_VIA_LEAD   = { job: { estimate: { lead: { lead_assignees: { some: { user_id: '{{userId}}' } } } } } } as const;
 const OWN_ESTIMATE_VIA_LEAD  = { lead: { lead_assignees: { some: { user_id: '{{userId}}' } } } } as const;
 // SERV10X-61 §8 - a SALES/row-scoped user owns an estimate either through the parent lead
@@ -31,7 +38,7 @@ const OWN_ESTIMATE_VIA_LEAD_OR_CREATOR = {
 // `walkthrough_performers` relation. A technician who performed on ANY of a lead's visits
 // (past or present) keeps read access to the lead - matching the pre-redesign behavior, where a
 // lead had at most one walkthrough so "any visit" and "the current visit" were the same set.
-const OWN_WALKTHROUGH        = { walkthroughs: { some: { performers: { some: { user_id: '{{userId}}' } } } } } as const;
+const OWN_WALKTHROUGH        = { visits: { some: { assignees: { some: { user_id: '{{userId}}' } } } } } as const;
 // CREATION CONFERS CONTROL (technician-ownership spec, Part B). Usable on ANY subject that carries
 // a `created_by_id` column - the rule is system-wide, not a technician rule, so a role added later
 // gets it with no per-role special case. A bare scalar condition: substituteConditions.walk
@@ -65,6 +72,10 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   ...ALL_ROLES.flatMap((role) => SHARED_BASELINE.map((g) => ({ role, ...g }))),
 
   // ─── SALES ───────────────────────────────────────────────────────────
+  // Multi-assignee design §3: NO `assign Task` row here (nor for DISPATCHER/TECHNICIAN below).
+  // Tasks are an office tool, but opening work for OTHER people is an admin/manager capability;
+  // ADMIN holds it through `manage all` (defineAbility.ts:90) and a custom role can be given it
+  // from the catalog entry. Without it a caller may only ever put themselves on a task.
   { role: 'SALES', action: 'read',                 subject: 'Task'         },
   { role: 'SALES', action: 'create',               subject: 'Task'         },
   { role: 'SALES', action: 'update',               subject: 'Task'         },
@@ -127,6 +138,7 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'SALES', action: 'submit',               subject: 'LogisticOrder' },
 
   // ─── DISPATCHER ──────────────────────────────────────────────────────
+  // NOTE: no `assign Task` — see the SALES block above.
   { role: 'DISPATCHER', action: 'read',                 subject: 'Task'         },
   { role: 'DISPATCHER', action: 'create',               subject: 'Task'         },
   { role: 'DISPATCHER', action: 'update',               subject: 'Task'         },
@@ -138,6 +150,9 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'DISPATCHER', action: 'delete',               subject: 'Customer'     },
   { role: 'DISPATCHER', action: 'export',               subject: 'Customer'     },
   { role: 'DISPATCHER', action: 'archive',              subject: 'Customer'     },
+  // Editable record IDs - DISPATCHER holds this by default (plan decision #7); ADMIN gets it via
+  // manage-all, no row needed.
+  { role: 'DISPATCHER', action: 'renumber',             subject: 'Customer'     },
   { role: 'DISPATCHER', action: 'create',               subject: 'Lead'         },
   { role: 'DISPATCHER', action: 'read',                 subject: 'Lead'         },
   { role: 'DISPATCHER', action: 'update',               subject: 'Lead'         },
@@ -148,10 +163,16 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'DISPATCHER', action: 'delete',               subject: 'Lead'         },
   { role: 'DISPATCHER', action: 'schedule_walkthrough', subject: 'Lead'         },
   { role: 'DISPATCHER', action: 'perform_walkthrough',  subject: 'Lead'         },
+  // Editable record IDs - DISPATCHER holds this by default (plan decision #7); ADMIN gets it via
+  // manage-all, no row needed.
+  { role: 'DISPATCHER', action: 'renumber',             subject: 'Lead'         },
   { role: 'DISPATCHER', action: 'read',                 subject: 'Estimate'     },
   { role: 'DISPATCHER', action: 'record_payment',       subject: 'Estimate'     },
   { role: 'DISPATCHER', action: 'waive_deposit',        subject: 'Estimate'     },
   // reactivate_deposit folded out (Phase 5) — unified Invoice refund replaces deposit refund.
+  // Editable record IDs - DISPATCHER holds this by default (plan decision #7); ADMIN gets it via
+  // manage-all, no row needed.
+  { role: 'DISPATCHER', action: 'renumber',             subject: 'Estimate'     },
   { role: 'DISPATCHER', action: 'create',               subject: 'Job'          },
   { role: 'DISPATCHER', action: 'read',                 subject: 'Job'          },
   { role: 'DISPATCHER', action: 'update',               subject: 'Job'          },
@@ -172,6 +193,9 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   // authority or the D14 guard would 403 dispatchers on their own jobs. ADMIN passes via
   // manage-all with no row needed here.
   { role: 'DISPATCHER', action: 'reschedule',           subject: 'Job'          },
+  // Editable record IDs - DISPATCHER holds this by default (plan decision #7); ADMIN gets it via
+  // manage-all, no row needed.
+  { role: 'DISPATCHER', action: 'renumber',             subject: 'Job'          },
   { role: 'DISPATCHER', action: 'create',               subject: 'Invoice'      },
   { role: 'DISPATCHER', action: 'read',                 subject: 'Invoice'      },
   { role: 'DISPATCHER', action: 'update',               subject: 'Invoice'      },
@@ -179,6 +203,9 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'DISPATCHER', action: 'delete',               subject: 'Invoice'      },
   { role: 'DISPATCHER', action: 'send',                 subject: 'Invoice'      },
   { role: 'DISPATCHER', action: 'record_payment',       subject: 'Invoice'      },
+  // Editable record IDs - DISPATCHER holds this by default (plan decision #7); ADMIN gets it via
+  // manage-all, no row needed.
+  { role: 'DISPATCHER', action: 'renumber',             subject: 'Invoice'      },
   { role: 'DISPATCHER', action: 'read',                 subject: 'PriceBook'    },
   { role: 'DISPATCHER', action: 'read',                 subject: 'Tag'          },
   { role: 'DISPATCHER', action: 'create',               subject: 'Tag'          },
@@ -236,20 +263,38 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'DISPATCHER', action: 'create',               subject: 'Automation'    },
   { role: 'DISPATCHER', action: 'update',               subject: 'Automation'    },
   { role: 'DISPATCHER', action: 'delete',               subject: 'Automation'    },
+  // Calendar Entries (Slice 01, spec §4). Default grant is ADMIN + DISPATCHER; ADMIN reaches it
+  // via the manage-all bypass (no row needed), so DISPATCHER holds the only explicit rows here.
+  // No conditions: visibility is org-wide (ADR 0002) - there is no ownership chain to scope on.
+  // SALES and TECHNICIAN deliberately get NO rows - a SALES user who needs it gets it through
+  // UserPermissionOverride (userCapabilities.ts), never by role.
+  { role: 'DISPATCHER', action: 'read',                 subject: 'CalendarEntry' },
+  { role: 'DISPATCHER', action: 'create',               subject: 'CalendarEntry' },
+  { role: 'DISPATCHER', action: 'update',               subject: 'CalendarEntry' },
+  { role: 'DISPATCHER', action: 'delete',               subject: 'CalendarEntry' },
 
   // ─── TECHNICIAN (strict default — Phase B) ───────────────────────────
-  // A technician by default can read their assigned job, close it out (`complete`), read +
-  // perform the walkthrough on their assigned lead, upload/download attachments, plus the infra
-  // reads the app shell needs. The intermediate advance verbs (en_route/arrive/start) and
-  // create/update Job·Invoice·Lead·Estimate, record_payment remain opt-in per-user toggles.
-  // `complete Job` (scoped to own jobs) is a role default so a technician can mark their own
-  // work done directly from any active status — the primary action in the tech mobile app.
+  // A technician by default can read their assigned job, read + perform the walkthrough on their
+  // assigned lead, upload/download attachments, plus the infra reads the app shell needs. The
+  // intermediate advance verbs (en_route/arrive/start) and create/update Job·Invoice·Lead·Estimate,
+  // record_payment remain opt-in per-user toggles.
+  //
+  // Multi-visit S4 (D15): `complete Job` is NO LONGER seeded. Closing the JOB is a dispatcher/admin
+  // capability by default (D7a); what a technician closes is their own VISIT, which rides the
+  // `start Job` gate they still hold. Removing the row here - and nothing else - produces exactly
+  // "on for existing orgs, off by default for new ones", because role grants are per-org
+  // role_permissions rows seeded from this table ONLY at org creation. That is the whole mechanism;
+  // there is deliberately no migration. See PRESERVED_ON_RESET below for the other half.
   // `perform_walkthrough` is the narrow lead capability that replaces the broad `update Lead`
   // a tech used to hold via OWN_WALKTHROUGH (the only thing a tech does on a lead).
   { role: 'TECHNICIAN', action: 'read',                subject: 'Task'     },
   { role: 'TECHNICIAN', action: 'create',              subject: 'Task'     },
   { role: 'TECHNICIAN', action: 'update',              subject: 'Task'     },
-  // NOTE: TECHNICIAN intentionally has NO delete:Task grant.
+  // NOTE: TECHNICIAN intentionally has NO delete:Task grant. The one thing they can still delete
+  // is a to-do they created AND are the sole assignee of - a row-level exception inside
+  // task.controller.remove (design §3), NOT a grant, so an office task they merely reached
+  // through a linked job stays undeletable.
+  // NOTE: and no assign:Task - see the SALES block above.
   { role: 'TECHNICIAN', action: 'read',                subject: 'Lead',    conditions: OWN_WALKTHROUGH },
   { role: 'TECHNICIAN', action: 'perform_walkthrough', subject: 'Lead',    conditions: OWN_WALKTHROUGH },
   // Technician-ownership spec, Part C. Two scopes now, and the split is the whole design:
@@ -259,7 +304,6 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   // Enforced per-instance by canActOnRow (lib/permissions/enforce.ts), which intersects the verb's
   // scope with the read scope. A route guard alone cannot tell these apart: canDo is subject-level.
   { role: 'TECHNICIAN', action: 'read',                subject: 'Job',     conditions: OWN_OR_CREATED_JOB },
-  { role: 'TECHNICIAN', action: 'complete',            subject: 'Job',     conditions: OWN_JOB },
   // `create Job` was a per-user toggle; it is a role default now. The creator is auto-assigned by
   // job.controller.create's row-scoped-creator branch, so a technician's own new job is an
   // assigned job from the first moment - the creator scope is what keeps it theirs afterwards.
@@ -348,4 +392,22 @@ export const DEFAULT_GRANTS: RoleGrant[] = [
   { role: 'TECHNICIAN',  action: 'read',   subject: 'Notification', conditions: OWN_NOTIFICATION },
   { role: 'TECHNICIAN',  action: 'update', subject: 'Notification', conditions: OWN_NOTIFICATION },
   { role: 'TECHNICIAN',  action: 'delete', subject: 'Notification', conditions: OWN_NOTIFICATION },
+];
+
+/**
+ * Grants the platform deliberately STOPPED seeding but must never take away from an org that
+ * already holds them (D15a).
+ *
+ * Reset-to-defaults rebuilds an org's rows purely from DEFAULT_GRANTS, so without this list the
+ * first admin who pressed "reset to defaults" would silently strip their technicians of a
+ * capability they had been using for months - the exact opposite of what D15 promises them. The
+ * drift checker reads the same list, so a live org carrying the row stops being reported as
+ * carrying an extra one.
+ *
+ * A grant belongs here only when it was REMOVED from DEFAULT_GRANTS on purpose while remaining
+ * valid for orgs that have it. It is not a place to park a grant that should simply be seeded.
+ */
+export const PRESERVED_ON_RESET: readonly { action: string; subject: string }[] = [
+  // Multi-visit S4 (D15): technician job completion.
+  { action: 'complete', subject: 'Job' },
 ];

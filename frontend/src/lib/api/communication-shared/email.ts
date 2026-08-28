@@ -182,16 +182,47 @@ export type ReplyDraft = ComposeOrigin & {
  * One helper rather than the same fallback retyped per site: the list row, the
  * reading pane, the avatar tint and the quoted reply header have to agree on
  * what a sender is called, or one person reads as two.
+ *
+ * TOTAL, deliberately: `from` is a JSON column passed straight through by the
+ * mapper, so it can be `{}` (staging holds such a row) or null. Guarding only
+ * `name` made the 'Unknown sender' fallback below unreachable - `from.email`
+ * threw first - and because the list is one `.map` behind one error boundary,
+ * a single malformed row blanked the entire Inbox.
  */
-export function senderLabel(from: { name: string | null; email: string }): string {
-  return from.name?.trim() || from.email.trim() || 'Unknown sender';
+export function senderLabel(from: EmailSender | null | undefined): string {
+  return from?.name?.trim() || from?.email?.trim() || 'Unknown sender';
 }
+
+/**
+ * The sender's ADDRESS, or '' when the row does not carry one.
+ *
+ * Every site that interpolates or searches the address needs this rather than
+ * reaching for `from.email` directly: absent, it renders the literal text
+ * "undefined" to a user, and `.toLowerCase()` / `.trim()` on it throws.
+ * Returning '' lets a caller apply its own `||` fallback and keeps a search
+ * honest - a row with no address simply matches nothing.
+ */
+export function senderAddress(from: EmailSender | null | undefined): string {
+  return from?.email?.trim() ?? '';
+}
+
+/**
+ * Who a message came from, as the row actually stores it.
+ *
+ * BOTH halves are optional on purpose. This is a JSON column that the API
+ * mapper forwards untouched (`from: e.from`), so nothing between the database
+ * and this type validates it: `name` is absent for any client that set no
+ * display name, and `email` is absent on at least one real row. Declaring
+ * `email: string` did not make it a string - it only stopped the compiler from
+ * pointing at the sites that would throw. Read it through senderLabel /
+ * senderAddress rather than reaching in.
+ */
+export type EmailSender = { name?: string | null; email?: string | null };
 
 export type Email = {
   id: string;
   account: AccountId;
-  /** `name` is null when the sender set no display name - see senderLabel. */
-  from: { name: string | null; email: string };
+  from: EmailSender;
   to: string;
   subject: string;
   snippet: string;

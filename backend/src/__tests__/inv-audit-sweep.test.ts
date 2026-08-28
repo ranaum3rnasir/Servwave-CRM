@@ -362,6 +362,16 @@ describe('branch + location audits', () => {
   });
 
   it('deleteLocation → inventory.location_deleted', async () => {
+    // The referential guards run before the delete (see
+    // inv-location-delete-guards.test.ts): the location must exist, hold no
+    // non-zero stock, and not be the org default.
+    mockPrisma.inventoryLocation.findFirst.mockResolvedValue(INVENTORY_LOCATION_FIXTURE);
+    mockPrisma.stockBalance.count.mockResolvedValue(0);
+    mockPrisma.organization.count.mockResolvedValue(0);
+    mockPrisma.stockBalance.deleteMany.mockResolvedValue({ count: 0 });
+    mockPrisma.$transaction.mockImplementation(async (ops: any) =>
+      Array.isArray(ops) ? Promise.all(ops) : ops(mockPrisma),
+    );
     mockPrisma.inventoryLocation.deleteMany.mockResolvedValue({ count: 1 });
     const res = await request(app).delete(`/api/inventory/locations/${INVENTORY_LOCATION_FIXTURE.id}`).set(authHeader('admin'));
     expect(res.status).toBe(200);

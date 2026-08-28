@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowUpRight, Users, BadgeCheck, ShieldCheck, CalendarClock, AlertTriangle } from 'lucide-react';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { KpiStrip } from '@/components/data/KpiStrip';
 import { useServicePlans, type ServicePlan } from '@/lib/api/service-plans';

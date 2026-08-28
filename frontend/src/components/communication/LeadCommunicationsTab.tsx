@@ -33,14 +33,10 @@ import { EntitySmsDrawer } from '@/components/communication/shared/EntitySmsDraw
 import { EmptyState } from '@/components/ui/empty-state';
 import { useLeadCommunications, useSendLeadSms } from '@/lib/api/jobCommunications';
 import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
-function formatAt(at: string) {
-  return new Date(at).toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+function formatAt(at: string, tz: string) {
+  return formatInstant(at, tz);
 }
 
 export function LeadCommunicationsTab({
@@ -58,6 +54,7 @@ export function LeadCommunicationsTab({
   customerName?: string;
   customerPhone?: string;
 }) {
+  const tz = useScheduleTimezone();
   const { data: items, isLoading, isError } = useLeadCommunications(leadId);
   const sendSms = useSendLeadSms(leadId);
   const ability = useAppAbility();
@@ -158,7 +155,8 @@ export function LeadCommunicationsTab({
             <CommRow
               key={`${item.channel}-${item.id}`}
               item={item}
-              formatTimestamp={formatAt}
+              formatTimestamp={(at) => formatAt(at, tz)}
+              tz={tz}
               currentLeadId={leadId}
               customerId={customerId}
               onSelect={

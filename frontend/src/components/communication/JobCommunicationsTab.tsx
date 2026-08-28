@@ -29,6 +29,7 @@ import {
   useSendJobEmail,
   useSendJobSms,
 } from '@/lib/api/jobCommunications';
+import { useScheduleTimezone, formatInstant } from '@/lib/schedule-tz';
 
 interface JobCommunicationsTabProps {
   jobId: string;
@@ -44,18 +45,15 @@ interface JobCommunicationsTabProps {
 type ComposeMode = 'sms' | 'email';
 
 // Recent items read as "2h ago"; older ones fall back to a date+time (no seconds).
-function formatCommTime(at: string): string {
+function formatCommTime(at: string, tz: string): string {
   const d = new Date(at);
   const diffMs = Date.now() - d.getTime();
+  // Elapsed time between two instants is the same number everywhere, so the
+  // relative branch needs no zone; only the absolute fallback does.
   if (diffMs >= 0 && diffMs < 24 * 60 * 60 * 1000) {
     return formatDistanceToNow(d, { addSuffix: true });
   }
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return formatInstant(at, tz);
 }
 
 export function JobCommunicationsTab({
@@ -66,6 +64,7 @@ export function JobCommunicationsTab({
   customerEmail,
   customerPhone,
 }: JobCommunicationsTabProps) {
+  const tz = useScheduleTimezone();
   const { data: items, isLoading, isError, error } = useJobCommunications(jobId);
   const sendSms = useSendJobSms(jobId);
   const sendEmail = useSendJobEmail(jobId);
@@ -161,7 +160,8 @@ export function JobCommunicationsTab({
               <CommRow
                 key={it.id}
                 item={it}
-                formatTimestamp={formatCommTime}
+                formatTimestamp={(at) => formatCommTime(at, tz)}
+                tz={tz}
                 currentJobId={jobId}
                 customerId={customerId}
                 onSelect={

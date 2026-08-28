@@ -13,6 +13,19 @@ export interface TransactionalEmailRecord {
   /** The outside party on a purchase order - the vendor, not a customer. */
   vendorId?: string | null;
   jobLabel?: string | null;
+  /**
+   * The CRM thing this email is ABOUT ('estimate', 'invoice', 'job', ...), and
+   * its id. Together they are the reply token's anchor for a send that has no
+   * thread of its own, which is every transactional send - see
+   * lib/reply-token.ts's prepareReplyToken.
+   *
+   * The anchor is what makes one entity one conversation: the estimate, its
+   * reminder and the customer's reply all resolve to a single address instead
+   * of scattering across as many threads as there were messages. Absent means
+   * the send is deliberately unreplyable (MFA codes, invites, internal alerts).
+   */
+  entityType?: string | null;
+  entityId?: string | null;
 }
 
 /**
@@ -44,6 +57,20 @@ export async function persistTransactionalEmail(
     fromAddress: string;
     /** Resend's message id; null when the provider returned no envelope. */
     providerMessageId?: string | null;
+    /**
+     * The conversation this send belongs to. Null only for a sender that mints
+     * no reply token, since a customer with nowhere to reply has no thread to
+     * reply INTO either.
+     */
+    threadId?: string | null;
+    /**
+     * Everyone else the dispatch copied. Same reasoning as fromAddress: the row
+     * reports what was transmitted, not what a caller assumed. Verified in prod
+     * before this existed - two sends carried cc art.nakamura@servwave.com and both
+     * rows recorded null, so the Communication tab named one recipient for a
+     * two-recipient email.
+     */
+    cc?: string[];
   },
 ): Promise<void> {
   try {
@@ -51,16 +78,34 @@ export async function persistTransactionalEmail(
     await prisma.email.create({
       data: {
         account: 'system',
+        // An outbound message, stated as such. This column used to be left NULL
+        // on every transactional send while the 2026-08-05 backfill stamped
+        // 'out' on all 39 historical rows - so the table read complete while no
+        // new write set it, and the inbox could not tell a sent estimate from a
+        // row of unknown provenance.
+        direction: 'out',
         // Mirrors formatSenderIdentity exactly: with no usable display name the
         // header is the bare address, so the row says the same rather than
         // inventing a label the recipient never saw.
         from: { name: args.fromName ?? args.fromAddress, email: args.fromAddress },
         provider_message_id: args.providerMessageId ?? null,
+        // Spec #1751 D5 - PROVENANCE, stated rather than inferred. Every row this function
+        // writes is a notice the platform sent on the company's behalf (estimate/invoice/PO
+        // notices and the like), so none of them is a salesperson reaching out and none may set
+        // the lead contact clock. The alternative on offer was structural - these rows tend to
+        // carry no `thread_id` while the compose path always populates one - and it is rejected
+        // rather than merely unused: this function ALREADY accepts a `threadId`, so the first
+        // caller to pass one would silently mark every lead in the system contacted.
+        automated: true,
         // This row only ever exists because a dispatch came back 'sent', so SENT
         // is the honest starting state. The webhook slice advances it from here.
         delivery_status: 'SENT',
         delivery_status_at: now,
         to: args.to,
+        // Comma-joined, matching the shape inbound mail already stores in this
+        // column. Absent rather than '' when there was no cc, so "nobody was
+        // copied" stays distinguishable from "copied to nothing".
+        ...(args.cc && args.cc.length > 0 ? { cc: args.cc.join(', ') } : {}),
         subject: args.subject,
         snippet: args.text.slice(0, 200),
         body: [args.text],
@@ -74,6 +119,7 @@ export async function persistTransactionalEmail(
         job_id: args.jobId ?? null,
         vendor_id: args.vendorId ?? null,
         job_label: args.jobLabel ?? null,
+        thread_id: args.threadId ?? null,
         organization_id: args.organizationId,
       },
     });

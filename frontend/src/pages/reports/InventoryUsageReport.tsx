@@ -14,10 +14,10 @@ import { KpiStrip } from '@/components/data/KpiStrip';
 import { ChartCard, HorizontalBars } from '@/components/charts';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatCurrency } from '@/lib/utils';
-import { findReport } from './report-catalog';
+import { findReport } from '@/lib/reports/report-catalog';
 import { ReportShell } from './ReportShell';
 import { DateRangeControl } from './DateRangeControl';
-import { useInventoryUsage, type UsageReportRow } from './inventory-usage-data';
+import { useInventoryUsage, type UsageReportRow } from '@/lib/reports/inventory-usage-data';
 
 type Preset = '12m' | 'month' | 'lastMonth' | '30d' | '90d' | 'year' | 'custom';
 const PRESET_LABEL: Record<Preset, string> = {

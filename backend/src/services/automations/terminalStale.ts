@@ -10,6 +10,7 @@
 
 import { AutomationTriggerType } from '@prisma/client';
 import type { EntityState } from './context';
+import { LEAD_ANCHOR_SATISFIED_BY, type AnchorKey } from './anchors';
 
 /**
  * Plain-English reason the enrollment is terminally stale (→ STOP the whole
@@ -43,6 +44,18 @@ export function terminalStaleReason(
   state: EntityState,
   now: Date,
   direction?: 'before' | 'after',
+  /**
+   * The 6th, OPTIONAL parameter, read ONLY by LEAD_DATE_ANCHORED (spec #1751 D8). That trigger
+   * now covers four different anchors with genuinely different staleness rules — the original
+   * walkthrough anchor, plus three lead stage clocks — so "which anchor is this" has to reach
+   * this function. Every other case ignores it outright.
+   *
+   * `undefined` reproduces the pre-#1751 behaviour exactly: LEAD_DATE_ANCHORED falls through to
+   * the walkthrough rules it has always applied. That is the right default for an enrollment
+   * whose trigger_config is missing or malformed, because the walkthrough anchor was the only
+   * lead anchor that existed when those enrollments were created.
+   */
+  anchor?: AnchorKey,
 ): string | null {
   switch (trigger) {
     case 'BEFORE_JOB_START': {
@@ -54,7 +67,11 @@ export function terminalStaleReason(
       // already working, so "your appointment is in 1 hour" would be messaging a customer whose
       // technician is at the door. EN_ROUTE is deliberately NOT included here: the tech is still
       // travelling, so the reminder is still useful.
-      if (state.jobStatus === 'ON_SITE' || state.jobStatus === 'IN_PROGRESS') return 'Work has already started';
+      // S4 (D17): ON_SITE is gone from JobStatus, and a job whose crew is merely on site now
+      // reads SCHEDULED - so this narrows to IN_PROGRESS alone. The comment above about EN_ROUTE
+      // being deliberately excluded survives intact and is now true by construction: an en-route
+      // visit leaves its job SCHEDULED, exactly the state this guard means to keep chasing.
+      if (state.jobStatus === 'IN_PROGRESS') return 'Work has already started';
       if (!state.jobScheduledStart) return 'Job is no longer scheduled';
       if (occurrence && state.jobScheduledStart.toISOString() !== occurrence) {
         return 'Job was rescheduled — this run was replaced by an updated reminder';
@@ -128,6 +145,53 @@ export function terminalStaleReason(
 
     case 'LEAD_DATE_ANCHORED': {
       const s = state.leadStatus;
+      // ── Lead stage clocks (spec #1751 D8) ────────────────────────────────
+      // These three anchors are stage clocks, not appointment times, so almost none of the
+      // walkthrough reasoning below applies to them. Handled first and returned from, rather
+      // than woven into the checks underneath, because the very first of those checks
+      // (`if (!state.leadWalkthroughScheduledAt)`) would kill every one of them outright on a
+      // lead that has no visit booked — which is the exact population an "uncontacted for two
+      // days" alert exists to chase.
+      const satisfiedBy = anchor ? LEAD_ANCHOR_SATISFIED_BY[anchor] : undefined;
+      if (satisfiedBy) {
+        // Terminal regardless of direction, exactly as below: a dead lead gets no alert.
+        if (s === 'LOST') return 'Lead was marked as lost';
+        if (s === 'CANCELLED') return 'Lead was cancelled';
+        if (s === 'WON') return 'Lead was won — nothing to chase';
+        // "…and it still has not happened", which the candidate sweep cannot express because it
+        // selects purely on the anchor date. An owner asking to hear about a lead nobody
+        // contacted within four hours does NOT want to hear about the one that was contacted in
+        // three; alerting is about failure, not about volume (user story 35).
+        //
+        // 'after' only. A 'before' reminder on a stage clock counts down to a moment already
+        // recorded, so there is nothing outstanding for it to go stale against.
+        if (direction !== 'before' && state[satisfiedBy.field] != null) {
+          return satisfiedBy.happened;
+        }
+        // OCCURRENCE MISMATCH — for the clocks that can MOVE after an enrollment was keyed on
+        // them, which the registry names rather than this switch. The exemption of the third is a
+        // property of that clock rather than an oversight: `lead.created_at` is written once, by
+        // the database, and can never produce a second occurrence to compare against.
+        //
+        // The two that do move, move for opposite reasons. `lead.contacted_at` moves through the
+        // correction door, because a human decided the recorded instant was wrong.
+        // `lead.last_visit_completed_at` moves because another trip genuinely happened — no
+        // correction, no disagreement, just later news.
+        //
+        // Either way an enrollment keyed on the OLD instant is counting a deadline the business
+        // no longer holds anyone to, so it stops rather than firing late against a clock that has
+        // moved underneath it — exactly what JOB_DATE_ANCHORED does with a rescheduled job.
+        // Nothing is dropped: the new instant mints a new occurrence and the sweep re-enrols on
+        // it, so a lead whose estimate is still outstanding two days after its SECOND trip is
+        // chased on the second trip's clock instead of being alerted on the first trip's.
+        const moves = satisfiedBy.moves;
+        if (moves && occurrence) {
+          const current = state[moves.field];
+          if (current && current.toISOString() !== occurrence) return moves.superseded;
+        }
+        return null;
+      }
+
       // LOST/CANCELLED are terminal regardless of direction (a dead lead gets
       // no reminder either way). NOTE: this is NOT redundant with the null-date
       // check below — lead.controller.ts's markLost()/cancelLead() only null
@@ -152,7 +216,7 @@ export function terminalStaleReason(
       // walkthrough, which is what an after-reminder expects) and must NOT be flagged —
       // applying this exact-match check unconditionally is the bug this task closes.
       if (direction === 'before') {
-        const wt = state.leadWalkthroughStatus;
+        const wt = state.leadVisitStatus;
         if (wt && wt !== 'SCHEDULED') {
           return `Walkthrough is ${wt.toLowerCase().replace(/_/g, ' ')} — reminder not needed`;
         }
@@ -244,10 +308,10 @@ export function terminalStaleReason(
     case 'WALKTHROUGH_SCHEDULED':
     case 'WALKTHROUGH_RESCHEDULED': {
       // Walkthrough-as-entity redesign, PR-B2: keys off the VISIT's own status
-      // (leadWalkthroughStatus), not lead.status — scheduleWalkthrough no longer writes
+      // (leadVisitStatus), not lead.status — scheduleWalkthrough no longer writes
       // WALKTHROUGH_SCHEDULED onto the lead at all (D5: NEW -> CONTACTED only), so lead.status
       // was never going to reliably read 'WALKTHROUGH_SCHEDULED' again after this redesign.
-      const wt = state.leadWalkthroughStatus;
+      const wt = state.leadVisitStatus;
       if (wt && wt !== 'SCHEDULED') {
         return `Walkthrough is ${wt.toLowerCase().replace(/_/g, ' ')} — reminder not needed`;
       }

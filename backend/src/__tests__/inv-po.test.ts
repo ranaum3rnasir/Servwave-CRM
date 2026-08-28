@@ -129,7 +129,7 @@ describe('POST /api/inventory/purchase-orders — FK population (V4/P1)', () => 
     mockAuthAs('admin');
     mockPrisma.job.findFirst.mockResolvedValue(null); // not in requesting org
     const res = await request(app).post('/api/inventory/purchase-orders').set(authHeader('admin'))
-      .send({ ...basePayload, jobId: '99555555-0224-9999-9999-995555550224' });
+      .send({ ...basePayload, jobId: '99999999-9999-9999-9999-999999999999' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/job/i);
     expect(mockPrisma.purchaseOrder.create).not.toHaveBeenCalled();
@@ -275,7 +275,7 @@ describe('POST /api/inventory/purchase-orders/receive (B2/V5)', () => {
     mockAuthAs('admin');
     mockPrisma.purchaseOrder.findFirst.mockResolvedValue(null);
     const res = await request(app).post('/api/inventory/purchase-orders/receive').set(authHeader('admin'))
-      .send({ poId: '99555555-0224-9999-9999-995555550224', lines: [{ lineId: 'aaaaaaa5-0000-0000-0000-0000000000ff', qtyReceived: 1 }] });
+      .send({ poId: '99999999-9999-9999-9999-999999999999', lines: [{ lineId: 'aaaaaaa5-0000-0000-0000-0000000000ff', qtyReceived: 1 }] });
     expect(res.status).toBe(404);
   });
 
@@ -450,7 +450,7 @@ describe('GET /api/inventory/jobs/:jobId/material-cost (V1/DEC2)', () => {
   it('404s when the job is in another org', async () => {
     mockAuthAs('admin');
     mockPrisma.job.findFirst.mockResolvedValue(null);
-    const res = await request(app).get('/api/inventory/jobs/99555555-0224-9999-9999-995555550224/material-cost').set(authHeader('admin'));
+    const res = await request(app).get('/api/inventory/jobs/99999999-9999-9999-9999-999999999999/material-cost').set(authHeader('admin'));
     expect(res.status).toBe(404);
   });
 
