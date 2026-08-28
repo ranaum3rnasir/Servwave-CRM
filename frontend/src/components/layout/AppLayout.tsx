@@ -23,6 +23,8 @@ export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const requestLeave = useSettingsGuard((s) => s.requestLeave);
 
   // Hydrate org-aware currency/date formatting once the organization loads, so
   // the central formatters (formatCurrency / the formatExact* pair) honor the org's
