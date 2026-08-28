@@ -82,15 +82,10 @@ function mockLead(lead: Record<string, unknown>) {
   });
 }
 
-/**
- * How the tab formats an instant today. Recomputed here rather than hard-coded because the
- * component still renders in the VIEWER's zone (#1634) - so a literal would pass only on a
- * machine set to the org's timezone. What these assertions pin is the instant that gets
- * formatted, which is the derivation under test.
- */
 function displayed(iso: string) {
   return new Date(iso).toLocaleString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    timeZone: 'America/New_York',
   });
 }
 
