@@ -78,8 +78,11 @@ export function SpiderNotificationPopup() {
   return (
     <div ref={panelRef} className="fixed bottom-5 right-5 z-50">
       {/* ── Floating Notification Bell FAB ───────────────────────────── */}
-      <button
+      <Button
         type="button"
+        variant="solid"
+        tone="ai"
+        size={null}
         id="spider-notification-bell-trigger"
         onClick={() => setIsWindowOpen(!isWindowOpen)}
         aria-label={
@@ -90,7 +93,7 @@ export function SpiderNotificationPopup() {
         aria-expanded={isWindowOpen}
         className={cn(
           'relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-ai-500 to-ai-600 text-on-fill',
-          'shadow-card transition-transform hover:scale-110 active:scale-95',
+          'shadow-card transition-transform hover:scale-110 active:scale-95 p-0',
           'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ai-200',
           !isWindowOpen && unreadCount > 0 && 'animate-bounce',
         )}
@@ -104,7 +107,7 @@ export function SpiderNotificationPopup() {
             {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         )}
-      </button>
+      </Button>
 
       {/* ── Notification panel ────────────────────────────────────────── */}
       {isWindowOpen && (
@@ -126,14 +129,16 @@ export function SpiderNotificationPopup() {
                 <p className="text-[11px] text-text-soft">Lead Watcher Stage Alerts</p>
               </div>
             </div>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => setIsWindowOpen(false)}
-              className="rounded-md p-1 text-text-soft hover:bg-background-light hover:text-text-primary transition-colors"
+              className="h-6 w-6 text-text-soft hover:bg-background-light hover:text-text-primary transition-colors"
               title="Close"
             >
               <X className="h-4 w-4" />
-            </button>
+            </Button>
           </div>
 
           {/* Body */}

@@ -21,6 +21,7 @@ import { useSearchParams } from 'react-router-dom';
 import { MessageSquare, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { extractApiError } from '@/lib/utils';
 import { useAppAbility } from '@/contexts/AbilityContext';
@@ -176,12 +177,12 @@ export function LeadCommunicationsTab({
       {/* ── SMS Composer ────────────────────────────────────────────── */}
       {canCompose && (
         <div className="mt-4 rounded-lg border border-border bg-surface-light p-3">
-          <label className="mb-1.5 block text-xs font-medium text-text-secondary">
+          <Label size="xs" weight="semibold" tone="subtle" className="mb-1.5 block">
             Send SMS
             {leadLabel && (
               <span className="ml-1 text-text-soft">· Tied to {leadLabel}</span>
             )}
-          </label>
+          </Label>
           <Textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}

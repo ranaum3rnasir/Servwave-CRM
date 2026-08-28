@@ -274,8 +274,10 @@ function SpiderWatcherConfig({
                   {/* Parallel Time Period Stepper & Unit Inputs */}
                   <div className="flex items-center gap-1.5 shrink-0">
                     {/* Decrement Button */}
-                    <button
+                    <Button
                       type="button"
+                      variant="outline"
+                      size="icon"
                       onClick={() => {
                         const currentVal =
                           stage.duration && stage.duration >= 1 ? stage.duration : 0;
@@ -285,11 +287,11 @@ function SpiderWatcherConfig({
                         });
                       }}
                       disabled={!stage.duration || stage.duration < 1}
-                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-light text-text-secondary hover:bg-background-light hover:text-text-primary active:scale-95 disabled:opacity-40 disabled:pointer-events-none transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500 shadow-xs cursor-pointer"
+                      className="h-7 w-7 text-text-secondary disabled:opacity-40"
                       aria-label={`Decrement time period for ${stage.label}`}
                     >
                       <Minus className="h-3 w-3" />
-                    </button>
+                    </Button>
 
                     {/* Numeric Input */}
                     <input
@@ -315,18 +317,20 @@ function SpiderWatcherConfig({
                     />
 
                     {/* Increment Button */}
-                    <button
+                    <Button
                       type="button"
+                      variant="outline"
+                      size="icon"
                       onClick={() => {
                         const currentVal =
                           stage.duration && stage.duration >= 1 ? stage.duration : 0;
                         updateLeadStage(stage.id, { duration: currentVal + 1 });
                       }}
-                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-light text-text-secondary hover:bg-background-light hover:text-text-primary active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500 shadow-xs cursor-pointer"
+                      className="h-7 w-7 text-text-secondary"
                       aria-label={`Increment time period for ${stage.label}`}
                     >
                       <Plus className="h-3 w-3" />
-                    </button>
+                    </Button>
 
                     {/* Unit Select */}
                     <Select
@@ -509,8 +513,10 @@ function SpiderWatcherConfig({
                       </span>
 
                       {/* Expand / Dropdown toggle button (Click-only) */}
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="icon"
                         aria-label={`Toggle leads for ${customer.name}`}
                         aria-expanded={isDropdownOpen}
                         onClick={(e) => {
@@ -519,7 +525,7 @@ function SpiderWatcherConfig({
                             expandedCustomerId === customer.id ? null : customer.id
                           );
                         }}
-                        className="rounded p-1 text-text-soft hover:text-text-primary hover:bg-background-light cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
+                        className="h-6 w-6 p-0 text-text-soft hover:text-text-primary"
                       >
                         <ChevronDown
                           className={cn(
@@ -527,7 +533,7 @@ function SpiderWatcherConfig({
                             isDropdownOpen && 'rotate-180 text-ai-600'
                           )}
                         />
-                      </button>
+                      </Button>
                     </div>
                   </div>
 
