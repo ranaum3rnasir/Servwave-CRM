@@ -187,7 +187,7 @@ export function LeadCommunicationsTab({
             value={body}
             onChange={(e) => setBody(e.target.value)}
             placeholder={customerName ? `Text ${customerName}...` : 'Type a message...'}
-            className="min-h-[72px] resize-y text-xs"
+            className="min-h-[72px] resize-y"
             disabled={sendSms.isPending}
           />
           {sendSms.error && (

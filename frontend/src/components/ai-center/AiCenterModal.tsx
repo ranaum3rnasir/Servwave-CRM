@@ -77,7 +77,7 @@ export function AiCenterModal() {
   return (
     <>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none bg-background-light p-0 sm:h-[92vh] sm:w-[96vw] sm:max-w-[1240px]">
+        <DialogContent className="flex h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden p-0 sm:h-[92vh] sm:w-[96vw] sm:max-w-[1240px]">
           <VisuallyHidden>
             <DialogTitle>AI Agentic Farm</DialogTitle>
             <DialogDescription>

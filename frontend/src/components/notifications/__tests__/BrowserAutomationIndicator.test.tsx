@@ -53,7 +53,7 @@ describe('BrowserAutomationIndicator', () => {
     const indicator = screen.getByRole('status');
     expect(indicator).toBeInTheDocument();
     expect(indicator).toHaveClass('pointer-events-none');
-    expect(indicator.firstElementChild).toHaveClass('border-[#800000]');
+    expect(indicator.firstElementChild).toHaveClass('border-danger');
   });
 
   it('does not render frame when no leads or customers are selected', () => {

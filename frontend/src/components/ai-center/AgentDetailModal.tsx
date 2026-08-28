@@ -235,7 +235,7 @@ function SpiderWatcherConfig({
                 }
               />
               <div className="flex items-center gap-2 text-xs font-semibold text-text-primary">
-                <Square className="h-3.5 w-3.5 text-[#800000]" />
+                <Square className="h-3.5 w-3.5 text-danger" />
                 <span>Red Frame</span>
               </div>
             </div>
@@ -249,8 +249,8 @@ function SpiderWatcherConfig({
               <Clock className="h-4 w-4 text-ai-600 shrink-0" />
               Distance
             </Heading>
-            <span className="text-[10px] font-semibold text-ai-600 bg-ai-50 border border-ai-200 px-2 py-0.5 rounded-full uppercase tracking-wider">
-              Lead Stages
+            <span className="text-[11px] text-text-secondary">
+              Set threshold per stage to trigger watcher leads
             </span>
           </div>
 
@@ -260,13 +260,11 @@ function SpiderWatcherConfig({
               {leadStages.map((stage) => (
                 <div
                   key={stage.id}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2 rounded-lg border border-border/60 bg-background-light/40 hover:bg-background-light transition-colors"
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-surface-light p-2 transition-colors hover:border-border"
                 >
-                  {/* Stage Label — clearly visible with full stage names without truncation */}
-                  <div className="min-w-0 flex-1 pr-2">
-                    <span
-                      className="block text-xs font-semibold text-text-primary whitespace-normal leading-relaxed"
-                    >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="h-2 w-2 rounded-full bg-ai-500 shrink-0" />
+                    <span className="text-xs font-semibold text-text-primary truncate">
                       {stage.label}
                     </span>
                   </div>
@@ -287,7 +285,7 @@ function SpiderWatcherConfig({
                         });
                       }}
                       disabled={!stage.duration || stage.duration < 1}
-                      className="h-7 w-7 text-text-secondary disabled:opacity-40"
+                      className="h-7 w-7 disabled:opacity-40"
                       aria-label={`Decrement time period for ${stage.label}`}
                     >
                       <Minus className="h-3 w-3" />
@@ -326,7 +324,7 @@ function SpiderWatcherConfig({
                           stage.duration && stage.duration >= 1 ? stage.duration : 0;
                         updateLeadStage(stage.id, { duration: currentVal + 1 });
                       }}
-                      className="h-7 w-7 text-text-secondary"
+                      className="h-7 w-7"
                       aria-label={`Increment time period for ${stage.label}`}
                     >
                       <Plus className="h-3 w-3" />
@@ -340,14 +338,14 @@ function SpiderWatcherConfig({
                       }
                     >
                       <SelectTrigger
-                        className="w-24 h-7 text-xs font-semibold px-2 py-0.5"
+                        className="w-24 h-7 px-2 py-0.5"
                         aria-label={`Time unit for ${stage.label}`}
                       >
                         <SelectValue placeholder={stage.unit} />
                       </SelectTrigger>
                       <SelectContent>
                         {TIME_UNITS.map((unit) => (
-                          <SelectItem key={unit} value={unit} className="text-xs">
+                          <SelectItem key={unit} value={unit}>
                             {unit}
                           </SelectItem>
                         ))}
@@ -472,7 +470,7 @@ function SpiderWatcherConfig({
                     </div>
 
                     <Avatar className="h-7 w-7 shrink-0">
-                      <AvatarFallback tone="subtle" className="text-[11px] font-bold">
+                      <AvatarFallback tone="subtle">
                         {customer.name[0]}
                       </AvatarFallback>
                     </Avatar>
@@ -525,7 +523,7 @@ function SpiderWatcherConfig({
                             expandedCustomerId === customer.id ? null : customer.id
                           );
                         }}
-                        className="h-6 w-6 p-0 text-text-soft hover:text-text-primary"
+                        className="h-6 w-6 p-0"
                       >
                         <ChevronDown
                           className={cn(
@@ -856,7 +854,6 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
                   <AvatarFallback
                     tone="custom"
                     style={{ backgroundColor: agent.avatarColor }}
-                    className="text-lg font-bold"
                   >
                     {agent.name[0]}
                   </AvatarFallback>
@@ -952,13 +949,9 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
                       <Button
                         type="button"
                         variant="solid"
+                        tone={isSaved ? 'business' : 'ai'}
                         onClick={handleSave}
-                        className={cn(
-                          'flex-[1] min-w-0 transition-all shadow-xs flex items-center justify-center gap-1.5',
-                          isSaved
-                            ? 'bg-success-600 hover:bg-success-700 text-on-fill'
-                            : 'bg-ai-600 hover:bg-ai-700 text-on-fill'
-                        )}
+                        className="flex-[1] min-w-0"
                         style={{ width: '20%' }}
                         aria-label="Save configured Spider agent settings"
                       >

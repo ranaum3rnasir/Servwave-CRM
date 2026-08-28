@@ -92,9 +92,7 @@ export function SpiderNotificationPopup() {
         }
         aria-expanded={isWindowOpen}
         className={cn(
-          'relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-ai-500 to-ai-600 text-on-fill',
-          'shadow-card transition-transform hover:scale-110 active:scale-95 p-0',
-          'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ai-200',
+          'relative flex h-14 w-14 items-center justify-center p-0 transition-transform hover:scale-110 active:scale-95',
           !isWindowOpen && unreadCount > 0 && 'animate-bounce',
         )}
         style={!isWindowOpen && unreadCount > 0 ? { animationDuration: '1.4s' } : undefined}
@@ -134,7 +132,7 @@ export function SpiderNotificationPopup() {
               variant="ghost"
               size="icon"
               onClick={() => setIsWindowOpen(false)}
-              className="h-6 w-6 text-text-soft hover:bg-background-light hover:text-text-primary transition-colors"
+              className="h-6 w-6 transition-colors"
               title="Close"
             >
               <X className="h-4 w-4" />
@@ -152,7 +150,7 @@ export function SpiderNotificationPopup() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="mt-2 text-xs"
+                  className="mt-2"
                   onClick={() => {
                     setInAppNotification(true);
                     toast({ title: 'Enabled Spider In-App Notifications', duration: 2000 });
@@ -176,7 +174,7 @@ export function SpiderNotificationPopup() {
                   )}
                 >
                   <Avatar className="h-8 w-8 shrink-0 mt-0.5">
-                    <AvatarFallback tone="subtle" className="text-xs font-bold">
+                    <AvatarFallback tone="subtle">
                       {n.contactName[0]}
                     </AvatarFallback>
                   </Avatar>
