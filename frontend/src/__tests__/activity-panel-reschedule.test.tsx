@@ -4,6 +4,7 @@ import { format } from 'date-fns';
 import api from '@/lib/axios';
 import { renderWithProviders } from './helpers';
 import { ActivityPanel } from '@/components/crm/ActivityPanel';
+import { DEFAULT_SCHEDULE_TIMEZONE, toWallClock } from '@/lib/schedule-tz';
 
 const mockApi = vi.mocked(api);
 
@@ -13,7 +14,8 @@ const RESCHED_1_TO = '2026-05-12T16:30:00.000Z';
 const RESCHED_2_FROM = '2026-05-12T16:30:00.000Z';
 const RESCHED_2_TO = '2026-05-15T13:00:00.000Z';
 
-const fmt = (iso: string) => format(new Date(iso), 'MMM d, yyyy h:mm a');
+const fmt = (iso: string) =>
+  format(toWallClock(new Date(iso), DEFAULT_SCHEDULE_TIMEZONE), 'MMM d, yyyy h:mm a');
 
 const JOB_TIMELINE_EVENTS = [
   {
