@@ -20,6 +20,9 @@ import { ServWaveMark } from '@/components/brand/ServWaveMark';
 import { AiCenterModal } from '@/components/ai-center/AiCenterModal';
 import CopilotProvider from '@/components/copilot/CopilotProvider';
 import { OfficeSoftphoneWarmup } from '@/components/communication/phone/OfficeSoftphoneWarmup';
+import { SpiderNotificationPopup } from '@/components/notifications/SpiderNotificationPopup';
+import { BrowserAutomationIndicator } from '@/components/notifications/BrowserAutomationIndicator';
+import { useSyncSpiderWatcherLive } from '@/stores/spiderWatcherStore';
 
 // Legacy components with no kit counterpart. The kit ships chrome for these -
 // an inert search input, an icon that can carry a badge - but not the surfaces
@@ -124,6 +127,7 @@ function PageLoading() {
  * so all five are carried across verbatim.
  */
 export default function V2AppLayout() {
+  useSyncSpiderWatcherLive();
   const ability = useAppAbility();
   const navigate = useNavigate();
   const { pathname } = useLocation();
@@ -397,6 +401,12 @@ export default function V2AppLayout() {
           <Outlet />
         </Suspense>
       </AppShell>
+
+      {/* Visual Browser Automation Indicator (Ambient Glowing Viewport Border + Live Status Banner) */}
+      <BrowserAutomationIndicator />
+
+      {/* Spider persistent notification pop-up box in lower section */}
+      <SpiderNotificationPopup />
 
       {/* Global AI Agentic Farm modal - opened from the action bar above. */}
       <AiCenterModal />
