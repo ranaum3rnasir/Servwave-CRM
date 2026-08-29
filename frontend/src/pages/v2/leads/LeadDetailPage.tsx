@@ -129,17 +129,28 @@ export default function LeadDetailPage() {
   const [preselectEstimateId, setPreselectEstimateId] = useState<string | null>(
     () => searchParams.get('createJob'),
   );
-  const [activeTab, setActiveTab] = useState(
-    () => (searchParams.get('tab') === 'walkthrough' ? 'walkthrough' : 'overview'),
-  );
+  const [activeTab, setActiveTab] = useState(() => {
+    const tab = searchParams.get('tab');
+    return tab && ['overview', 'communication', 'walkthrough', 'tasks', 'attachments', 'estimates'].includes(tab)
+      ? tab
+      : 'overview';
+  });
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && ['overview', 'communication', 'walkthrough', 'tasks', 'attachments', 'estimates'].includes(tabParam)) {
+      setActiveTab(tabParam);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     const hasCreateJob = searchParams.has('createJob');
-    const hasTab = searchParams.get('tab') === 'walkthrough';
-    if (!hasCreateJob && !hasTab) return;
+    const tabParam = searchParams.get('tab');
+    const hasWalkthroughTab = tabParam === 'walkthrough';
+    if (!hasCreateJob && !hasWalkthroughTab) return;
     const next = new URLSearchParams(searchParams);
     if (hasCreateJob) next.delete('createJob');
-    if (hasTab) next.delete('tab');
+    if (hasWalkthroughTab) next.delete('tab');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
