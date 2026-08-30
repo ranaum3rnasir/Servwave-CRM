@@ -194,11 +194,18 @@ export function SpiderNotificationPopup() {
                       {n.contactName[0]}
                     </AvatarFallback>
                   </Avatar>
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-xs font-bold text-text-primary truncate group-hover:text-ai-strong transition-colors">
-                        {n.companyName}
-                      </p>
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <p className="text-xs font-bold text-text-primary truncate group-hover:text-ai-strong transition-colors">
+                          {n.contactName}
+                        </p>
+                        {n.leadStage && (
+                          <span className="shrink-0 rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
+                            {formatCurrentStageName(n.leadStage)}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className="text-[10px] text-text-soft">{n.timeAgo}</span>
                         {!n.read && (
@@ -206,18 +213,10 @@ export function SpiderNotificationPopup() {
                         )}
                       </div>
                     </div>
-                    <p className="text-xs font-medium text-text-secondary truncate">{n.contactName}</p>
-                    {n.leadStage && (
-                      <div className="flex items-center gap-1">
-                        <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
-                          {formatCurrentStageName(n.leadStage)}
-                        </span>
-                      </div>
-                    )}
                     <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
                       {n.message}
                     </p>
-                    <div className="pt-1.5 flex items-center justify-between">
+                    <div className="pt-1 flex items-center justify-between">
                       <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
                         Threshold Exceeded
                       </span>

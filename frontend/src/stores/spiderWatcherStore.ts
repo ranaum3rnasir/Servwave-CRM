@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import api from '@/lib/axios';
@@ -18,7 +19,8 @@ export interface LeadStageConfig {
 export interface WatcherLead {
   id: string;
   leadNumber: string;
-  serviceRequest: string;
+  serviceRequest?: string;
+  serviceLocation?: string;
   stageId: string;
   stageLabel: string;
   elapsedValue: number;
@@ -108,17 +110,20 @@ export function resolveLeadStageAndElapsedTime(lead: {
   elapsedUnit?: TimeUnit;
   stageId?: string;
   stageLabel?: string;
+  contactedAt?: string | Date | null;
 }): {
   stageId: string;
   stageLabel: string;
   elapsedSeconds: number;
   elapsedValue: number;
   elapsedUnit: TimeUnit;
+  contactedAt?: string | null;
 } {
   const now = Date.now();
 
   const createdAt = lead.created_at ? new Date(lead.created_at).getTime() : now;
-  const contactedAt = lead.contacted_at ? new Date(lead.contacted_at).getTime() : null;
+  const rawContactedAt = lead.contacted_at || lead.contactedAt;
+  const contactedAt = rawContactedAt ? new Date(rawContactedAt).getTime() : null;
   const scheduledAt = lead.walkthrough_scheduled_at
     ? new Date(lead.walkthrough_scheduled_at).getTime()
     : null;
@@ -149,6 +154,7 @@ export function resolveLeadStageAndElapsedTime(lead: {
   } else if (contactedAt || status === 'CONTACTED') {
     stageId = 'contacted-walkthrough-scheduled';
     stageLabel = 'Contacted → Walkthrough Scheduled';
+    // For leads in the Contacted stage, elapsed time strictly begins from the last communication / contacted timestamp
     stageStartTime =
       contactedAt || (lead.updated_at ? new Date(lead.updated_at).getTime() : createdAt);
   } else {
@@ -166,6 +172,7 @@ export function resolveLeadStageAndElapsedTime(lead: {
       elapsedSeconds,
       elapsedValue: lead.elapsedValue,
       elapsedUnit: lead.elapsedUnit,
+      contactedAt: rawContactedAt ? String(rawContactedAt) : null,
     };
   }
 
@@ -195,6 +202,7 @@ export function resolveLeadStageAndElapsedTime(lead: {
     elapsedSeconds,
     elapsedValue,
     elapsedUnit,
+    contactedAt: rawContactedAt ? String(rawContactedAt) : null,
   };
 }
 
@@ -259,6 +267,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l1',
         leadNumber: 'LD-101',
         serviceRequest: 'Main Line Leak & Pipe Replacement',
+        serviceLocation: '9462 Highland Ave, Suite 414 Paterson, NJ 07501',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 4,
@@ -270,6 +279,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l2',
         leadNumber: 'LD-102',
         serviceRequest: 'Commercial Water Heater Installation',
+        serviceLocation: '1048 Industrial Pkwy, Suite 300 Portland, OR 97201',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
@@ -282,6 +292,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l3',
         leadNumber: 'LD-103',
         serviceRequest: 'Backflow Valve Annual Testing',
+        serviceLocation: '520 Commercial St, Suite 100 Salem, OR 97301',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 12,
@@ -303,6 +314,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l4',
         leadNumber: 'LD-201',
         serviceRequest: 'Central AC Rooftop Unit Overhaul',
+        serviceLocation: '880 Skyline Blvd, Suite 200 Denver, CO 80202',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 8,
@@ -315,6 +327,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l5',
         leadNumber: 'LD-202',
         serviceRequest: 'Ductwork System Sanitization & Sealing',
+        serviceLocation: '4120 Enterprise Way, Suite 150 Aurora, CO 80011',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 3,
@@ -336,6 +349,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l6',
         leadNumber: 'LD-301',
         serviceRequest: '400A Main Electrical Panel Upgrade',
+        serviceLocation: '1500 Market St, Suite 400 Austin, TX 78701',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 5,
@@ -347,6 +361,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l7',
         leadNumber: 'LD-302',
         serviceRequest: 'Level 3 Dual EV Charger Installation',
+        serviceLocation: '2301 Congress Ave, Suite 250 Austin, TX 78704',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 2,
@@ -368,6 +383,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l8',
         leadNumber: 'LD-401',
         serviceRequest: 'Custom Home Framing Structural Inspection',
+        serviceLocation: '920 Mountain View Rd Boulder, CO 80302',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 4,
@@ -380,6 +396,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l9',
         leadNumber: 'LD-402',
         serviceRequest: 'Multi-Level Deck Construction',
+        serviceLocation: '345 Pinecrest Dr, Suite 50 Boulder, CO 80304',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 5,
@@ -400,6 +417,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l10',
         leadNumber: 'LD-501',
         serviceRequest: 'Multi-Unit HVAC & Boiler Seasonal Assessment',
+        serviceLocation: '1200 Grand Ave, Suite 310 Phoenix, AZ 85007',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
@@ -411,6 +429,142 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
     ],
   },
 ];
+
+/** Format a timestamp into human-readable relative time (e.g., '6 Days ago', '2 Hours ago') */
+export function formatLastCommunicationTimestamp(
+  contactedAt?: string | Date | null
+): string | null {
+  if (!contactedAt) return null;
+  const timeMs = new Date(contactedAt).getTime();
+  if (isNaN(timeMs)) return null;
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - timeMs) / 1000));
+
+  if (elapsedSeconds >= 86400) {
+    const days = Math.floor(elapsedSeconds / 86400);
+    return `${days} Day${days === 1 ? '' : 's'} ago`;
+  }
+  if (elapsedSeconds >= 3600) {
+    const hours = Math.floor(elapsedSeconds / 3600);
+    return `${hours} Hour${hours === 1 ? '' : 's'} ago`;
+  }
+  if (elapsedSeconds >= 60) {
+    const mins = Math.floor(elapsedSeconds / 60);
+    return `${mins} Minute${mins === 1 ? '' : 's'} ago`;
+  }
+  return `${Math.max(1, elapsedSeconds)}s ago`;
+}
+
+/** Helper to format address components into a clean single-line address */
+function formatAddressParts(
+  line1?: string | null,
+  line2?: string | null,
+  city?: string | null,
+  state?: string | null,
+  zip?: string | null
+): string | null {
+  const street = [line1?.trim(), line2?.trim()].filter(Boolean).join(', ');
+  const stateZip = [state?.trim(), zip?.trim()].filter(Boolean).join(' ');
+  const cityStateZip = [city?.trim(), stateZip].filter(Boolean).join(', ');
+  const full = [street, cityStateZip].filter(Boolean).join(' ');
+  return full.trim() || null;
+}
+
+/** Extract complete formatted service location string (street address, unit, city, state, zip) from lead data */
+export function formatLeadServiceLocation(rawLead: any): string {
+  if (!rawLead) return 'Service location not specified';
+
+  // 1. Check nested service_location relation with street address
+  const loc = rawLead.service_location;
+  if (loc && typeof loc === 'object') {
+    const fromLoc = formatAddressParts(
+      loc.address_line1,
+      loc.address_line2,
+      loc.city,
+      loc.state,
+      loc.zip
+    );
+    if (fromLoc && loc.address_line1) return fromLoc;
+  }
+
+  // 2. Check lead address scalars with street address
+  const fromScalars = formatAddressParts(
+    rawLead.service_address_line1,
+    rawLead.service_address_line2,
+    rawLead.service_city,
+    rawLead.service_state,
+    rawLead.service_zip
+  );
+  if (fromScalars && rawLead.service_address_line1) return fromScalars;
+
+  // 3. Check customer's primary or first service location with street address
+  const custLocs = rawLead.customer?.service_locations;
+  if (Array.isArray(custLocs) && custLocs.length > 0) {
+    const primary = custLocs.find((l: any) => l.is_primary) || custLocs[0];
+    if (primary) {
+      const fromCustLoc = formatAddressParts(
+        primary.address_line1,
+        primary.address_line2,
+        primary.city,
+        primary.state,
+        primary.zip
+      );
+      if (fromCustLoc && primary.address_line1) return fromCustLoc;
+    }
+  }
+
+  // 4. Check customer's billing address if street exists
+  const cust = rawLead.customer;
+  if (cust && typeof cust === 'object') {
+    const fromBilling = formatAddressParts(
+      cust.billing_address_line1,
+      cust.billing_address_line2,
+      cust.billing_city,
+      cust.billing_state,
+      cust.billing_zip
+    );
+    if (fromBilling && cust.billing_address_line1) return fromBilling;
+  }
+
+  // 5. If explicit serviceLocation string exists with complete details
+  if (typeof rawLead.serviceLocation === 'string' && rawLead.serviceLocation.trim()) {
+    return rawLead.serviceLocation.trim();
+  }
+
+  // 6. Partial fallback from relation / scalars / customer
+  if (loc && typeof loc === 'object') {
+    const fromLoc = formatAddressParts(
+      loc.address_line1,
+      loc.address_line2,
+      loc.city,
+      loc.state,
+      loc.zip
+    );
+    if (fromLoc) return fromLoc;
+    if (loc.name) return loc.name;
+  }
+  if (fromScalars) return fromScalars;
+
+  if (Array.isArray(custLocs) && custLocs.length > 0) {
+    const primary = custLocs.find((l: any) => l.is_primary) || custLocs[0];
+    if (primary) {
+      const fromCustLoc = formatAddressParts(
+        primary.address_line1,
+        primary.address_line2,
+        primary.city,
+        primary.state,
+        primary.zip
+      );
+      if (fromCustLoc) return fromCustLoc;
+      if (primary.name) return primary.name;
+    }
+  }
+
+  if (typeof rawLead.service_location_name === 'string' && rawLead.service_location_name.trim()) {
+    return rawLead.service_location_name.trim();
+  }
+
+  return 'Service location not specified';
+}
 
 /** Build customer + leads structure from live API records */
 export function buildWatcherCustomersFromLive(
@@ -427,18 +581,20 @@ export function buildWatcherCustomersFromLive(
     for (const rawLead of apiLeads) {
       const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
       const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
+      const contactedTimestamp = rawLead.contacted_at || rawLead.contactedAt || null;
 
       const watcherLead: WatcherLead = {
         id: rawLead.id,
         leadNumber: rawLead.lead_number || `LD-${String(rawLead.id).slice(-4)}`,
         serviceRequest: rawLead.service_request || 'General Service Request',
+        serviceLocation: formatLeadServiceLocation(rawLead),
         stageId: stageMetrics.stageId,
         stageLabel: stageMetrics.stageLabel,
         elapsedValue: stageMetrics.elapsedValue,
         elapsedUnit: stageMetrics.elapsedUnit,
         elapsedSeconds: stageMetrics.elapsedSeconds,
         createdAt: rawLead.created_at,
-        contactedAt: rawLead.contacted_at,
+        contactedAt: contactedTimestamp,
         walkthroughScheduledAt: rawLead.walkthrough_scheduled_at,
         walkthroughCompletedAt: rawLead.walkthrough_completed_at,
         status: rawLead.status,
@@ -537,261 +693,286 @@ interface SpiderWatcherState {
   getComputedNotifications: () => InAppNotification[];
 }
 
-export const useSpiderWatcherStore = create<SpiderWatcherState>((set, get) => ({
-  notifications: {
-    email: true,
-    sms: true,
-    inApp: true,
-    redFrame: true,
-  },
-  days: '',
-  leadStages: DEFAULT_LEAD_STAGES,
-  customers: DEFAULT_WATCHER_CUSTOMERS,
-  selectedCustomerIds: ALL_CUSTOMER_IDS,
-  selectedLeadIds: ALL_LEAD_IDS,
-  hasUserModifiedSelection: false,
-  inAppNotifications: [],
-  readNotificationIds: [],
-  isRedBorderActive: false,
-  activeNotificationId: null,
-  isWindowOpen: false,
+export const useSpiderWatcherStore = create<SpiderWatcherState>()(
+  persist(
+    (set, get) => ({
+      notifications: {
+        email: true,
+        sms: true,
+        inApp: true,
+        redFrame: true,
+      },
+      days: '',
+      leadStages: DEFAULT_LEAD_STAGES,
+      customers: DEFAULT_WATCHER_CUSTOMERS,
+      selectedCustomerIds: ALL_CUSTOMER_IDS,
+      selectedLeadIds: ALL_LEAD_IDS,
+      hasUserModifiedSelection: false,
+      inAppNotifications: [],
+      readNotificationIds: [],
+      isRedBorderActive: false,
+      activeNotificationId: null,
+      isWindowOpen: false,
 
-  setNotifications: (updater) =>
-    set((state) => ({
-      notifications: typeof updater === 'function' ? updater(state.notifications) : updater,
-    })),
+      setNotifications: (updater) =>
+        set((state) => ({
+          notifications: typeof updater === 'function' ? updater(state.notifications) : updater,
+        })),
 
-  setInAppNotification: (enabled) =>
-    set((state) => ({
-      notifications: { ...state.notifications, inApp: enabled },
-    })),
+      setInAppNotification: (enabled) =>
+        set((state) => ({
+          notifications: { ...state.notifications, inApp: enabled },
+        })),
 
-  setRedFrameNotification: (enabled) =>
-    set((state) => ({
-      notifications: { ...state.notifications, redFrame: enabled },
-    })),
+      setRedFrameNotification: (enabled) =>
+        set((state) => ({
+          notifications: { ...state.notifications, redFrame: enabled },
+        })),
 
-  setDays: (days) => set({ days }),
+      setDays: (days) => set({ days }),
 
-  setLeadStages: (stages) => set({ leadStages: stages }),
+      setLeadStages: (stages) => set({ leadStages: stages }),
 
-  updateLeadStage: (id, updates) =>
-    set((state) => {
-      const updatedStages = state.leadStages.map((stage) =>
-        stage.id === id ? { ...stage, ...updates } : stage
-      );
-      const firstStage = updatedStages[0];
-      const newDays = firstStage && firstStage.duration !== undefined ? String(firstStage.duration) : '';
-      return { leadStages: updatedStages, days: newDays };
-    }),
-
-  setCustomers: (customers) =>
-    set((state) => {
-      const allCustomerIds = customers.map((c) => c.id);
-      const allLeadIds = customers.flatMap((c) => c.leads.map((l) => l.id));
-
-      // If user has not manually customized selection, select ALL customers and ALL nested leads by default
-      if (!state.hasUserModifiedSelection) {
-        return {
-          customers,
-          selectedCustomerIds: allCustomerIds,
-          selectedLeadIds: allLeadIds,
-        };
-      }
-
-      // Preserve valid customer and lead selections if customized by the user
-      const validCustomerIds = state.selectedCustomerIds.filter((id) =>
-        allCustomerIds.includes(id)
-      );
-      const validLeadIds = state.selectedLeadIds.filter((id) =>
-        allLeadIds.includes(id)
-      );
-
-      return {
-        customers,
-        selectedCustomerIds: validCustomerIds,
-        selectedLeadIds: validLeadIds,
-      };
-    }),
-
-  toggleCustomerSelection: (customerId, leadIdsForCustomer) =>
-    set((state) => {
-      const allLeadsSelected =
-        leadIdsForCustomer.length > 0 &&
-        leadIdsForCustomer.every((id) => state.selectedLeadIds.includes(id));
-      const isSelected =
-        state.selectedCustomerIds.includes(customerId) &&
-        (leadIdsForCustomer.length === 0 || allLeadsSelected);
-
-      let newCustomerIds: string[];
-      let newLeadIds: string[];
-
-      if (isSelected) {
-        newCustomerIds = state.selectedCustomerIds.filter((id) => id !== customerId);
-        newLeadIds = state.selectedLeadIds.filter((id) => !leadIdsForCustomer.includes(id));
-      } else {
-        newCustomerIds = Array.from(new Set([...state.selectedCustomerIds, customerId]));
-        newLeadIds = Array.from(new Set([...state.selectedLeadIds, ...leadIdsForCustomer]));
-      }
-
-      return {
-        hasUserModifiedSelection: true,
-        selectedCustomerIds: newCustomerIds,
-        selectedLeadIds: newLeadIds,
-      };
-    }),
-
-  toggleLeadSelection: (leadId, customerId, allLeadIdsForCustomer) =>
-    set((state) => {
-      const isLeadSelected = state.selectedLeadIds.includes(leadId);
-      let newLeadIds: string[];
-
-      if (isLeadSelected) {
-        newLeadIds = state.selectedLeadIds.filter((id) => id !== leadId);
-      } else {
-        newLeadIds = [...state.selectedLeadIds, leadId];
-      }
-
-      const hasAnySelectedLead = allLeadIdsForCustomer.some((id) => newLeadIds.includes(id));
-      let newCustomerIds = state.selectedCustomerIds;
-
-      if (hasAnySelectedLead && !state.selectedCustomerIds.includes(customerId)) {
-        newCustomerIds = [...state.selectedCustomerIds, customerId];
-      } else if (!hasAnySelectedLead && state.selectedCustomerIds.includes(customerId)) {
-        newCustomerIds = state.selectedCustomerIds.filter((id) => id !== customerId);
-      }
-
-      return {
-        hasUserModifiedSelection: true,
-        selectedLeadIds: newLeadIds,
-        selectedCustomerIds: newCustomerIds,
-      };
-    }),
-
-  selectAllCustomers: () =>
-    set((state) => ({
-      hasUserModifiedSelection: true,
-      selectedCustomerIds: state.customers.map((c) => c.id),
-      selectedLeadIds: state.customers.flatMap((c) => c.leads.map((l) => l.id)),
-    })),
-
-  deselectAllCustomers: () =>
-    set({
-      hasUserModifiedSelection: true,
-      selectedCustomerIds: [],
-      selectedLeadIds: [],
-    }),
-
-  markRead: (id) =>
-    set((state) => {
-      const plainId = id.replace(/^notif-/, '');
-      const fullNotifId = `notif-${plainId}`;
-      return {
-        readNotificationIds: Array.from(
-          new Set([...state.readNotificationIds, id, fullNotifId, plainId])
-        ),
-      };
-    }),
-
-  markAllRead: () =>
-    set((state) => {
-      const allIds = get().getComputedNotifications().map((n) => n.id);
-      const allPlainIds = allIds.map((id) => id.replace(/^notif-/, ''));
-      return {
-        readNotificationIds: Array.from(
-          new Set([...state.readNotificationIds, ...allIds, ...allPlainIds])
-        ),
-      };
-    }),
-
-  markLeadNotificationsRead: (leadId) =>
-    set((state) => {
-      const plainId = leadId.replace(/^notif-/, '');
-      const fullNotifId = `notif-${plainId}`;
-      return {
-        readNotificationIds: Array.from(
-          new Set([...state.readNotificationIds, leadId, fullNotifId, plainId])
-        ),
-      };
-    }),
-
-  selectNotification: (id) =>
-    set({
-      activeNotificationId: id,
-      isRedBorderActive: true,
-      // Note: Clicking or opening a notification does NOT mark it as read.
-      // Notifications are only marked as read when a message is successfully dispatched to the lead.
-    }),
-
-  setIsRedBorderActive: (active) => set({ isRedBorderActive: active }),
-  setIsWindowOpen: (open) => set({ isWindowOpen: open }),
-  toggleRedBorder: () => set((state) => ({ isRedBorderActive: !state.isRedBorderActive })),
-  clearRedBorder: () => set({ isRedBorderActive: false }),
-
-  getComputedNotifications: () => {
-    const state = get();
-    const result: InAppNotification[] = [];
-
-    // Strictly return empty if no customer or lead is selected or no customers exist
-    if (
-      !state.customers ||
-      state.customers.length === 0 ||
-      !state.selectedLeadIds ||
-      state.selectedLeadIds.length === 0
-    ) {
-      return result;
-    }
-
-    // Evaluate real-time stage notifications dynamically from monitored customers and selected leads
-    // Read notifications are filtered out so clicked/read notifications disappear from the list
-    for (const customer of state.customers) {
-      if (!customer.leads || customer.leads.length === 0) continue;
-      for (const lead of customer.leads) {
-        const isSelected = state.selectedLeadIds.includes(lead.id);
-        if (!isSelected) continue;
-
-        const overdue = isLeadOverdue(lead, state.leadStages);
-        const notifId = `notif-${lead.id}`;
-        const isRead =
-          state.readNotificationIds.includes(notifId) ||
-          state.readNotificationIds.includes(lead.id);
-
-        if (overdue && !isRead) {
-          const config = state.leadStages.find(
-            (s) => s.id === lead.stageId || s.label === lead.stageLabel
+      updateLeadStage: (id, updates) =>
+        set((state) => {
+          const updatedStages = state.leadStages.map((stage) =>
+            stage.id === id ? { ...stage, ...updates } : stage
           );
+          const firstStage = updatedStages[0];
+          const newDays = firstStage && firstStage.duration !== undefined ? String(firstStage.duration) : '';
+          return { leadStages: updatedStages, days: newDays };
+        }),
 
-          const leadSecs =
-            lead.elapsedSeconds !== undefined
-              ? lead.elapsedSeconds
-              : timeUnitToSeconds(lead.elapsedValue, lead.elapsedUnit);
+      setCustomers: (customers) =>
+        set((state) => {
+          if (!customers || customers.length === 0) return {};
+          const allCustomerIds = customers.map((c) => c.id);
+          const allLeadIds = customers.flatMap((c) => c.leads.map((l) => l.id));
 
-          const currentStage = formatCurrentStageName(
-            lead.stageLabel || lead.stageId || config?.fromStage
-          );
+          // If user has not manually customized selection, select ALL customers and ALL nested leads by default
+          if (!state.hasUserModifiedSelection) {
+            return {
+              customers,
+              selectedCustomerIds: allCustomerIds,
+              selectedLeadIds: allLeadIds,
+            };
+          }
 
-          const thresholdDuration = config?.duration ?? 0;
-          result.push({
-            id: notifId,
-            contactName: customer.name,
-            companyName: customer.company || customer.name,
-            inactiveDays: Math.max(1, Math.round(leadSecs / 86400)),
-            message: `Lead ${lead.leadNumber} (${lead.serviceRequest}) in stage "${currentStage}" for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${thresholdDuration} ${config?.unit || 'Second'}${thresholdDuration > 1 ? 's' : ''}).`,
-            timeAgo: `${lead.elapsedValue} ${lead.elapsedUnit.toLowerCase()}${lead.elapsedValue > 1 ? 's' : ''} in stage`,
-            read: false,
-            contactId: customer.id,
-            leadId: lead.id,
-            leadStage: currentStage,
-            serviceRequest: lead.serviceRequest,
-            isTriggered: true,
-          });
+          // Preserve valid customer and lead selections if customized by the user
+          const validCustomerIds =
+            state.selectedCustomerIds.length > 0
+              ? state.selectedCustomerIds
+              : allCustomerIds;
+          const validLeadIds =
+            state.selectedLeadIds.length > 0
+              ? state.selectedLeadIds
+              : allLeadIds;
+
+          return {
+            customers,
+            selectedCustomerIds: validCustomerIds,
+            selectedLeadIds: validLeadIds,
+          };
+        }),
+
+      toggleCustomerSelection: (customerId, leadIdsForCustomer) =>
+        set((state) => {
+          const allLeadsSelected =
+            leadIdsForCustomer.length > 0 &&
+            leadIdsForCustomer.every((id) => state.selectedLeadIds.includes(id));
+          const isSelected =
+            state.selectedCustomerIds.includes(customerId) &&
+            (leadIdsForCustomer.length === 0 || allLeadsSelected);
+
+          let newCustomerIds: string[];
+          let newLeadIds: string[];
+
+          if (isSelected) {
+            newCustomerIds = state.selectedCustomerIds.filter((id) => id !== customerId);
+            newLeadIds = state.selectedLeadIds.filter((id) => !leadIdsForCustomer.includes(id));
+          } else {
+            newCustomerIds = Array.from(new Set([...state.selectedCustomerIds, customerId]));
+            newLeadIds = Array.from(new Set([...state.selectedLeadIds, ...leadIdsForCustomer]));
+          }
+
+          return {
+            hasUserModifiedSelection: true,
+            selectedCustomerIds: newCustomerIds,
+            selectedLeadIds: newLeadIds,
+          };
+        }),
+
+      toggleLeadSelection: (leadId, customerId, allLeadIdsForCustomer) =>
+        set((state) => {
+          const isLeadSelected = state.selectedLeadIds.includes(leadId);
+          let newLeadIds: string[];
+
+          if (isLeadSelected) {
+            newLeadIds = state.selectedLeadIds.filter((id) => id !== leadId);
+          } else {
+            newLeadIds = [...state.selectedLeadIds, leadId];
+          }
+
+          const hasAnySelectedLead = allLeadIdsForCustomer.some((id) => newLeadIds.includes(id));
+          let newCustomerIds = state.selectedCustomerIds;
+
+          if (hasAnySelectedLead && !state.selectedCustomerIds.includes(customerId)) {
+            newCustomerIds = [...state.selectedCustomerIds, customerId];
+          } else if (!hasAnySelectedLead && state.selectedCustomerIds.includes(customerId)) {
+            newCustomerIds = state.selectedCustomerIds.filter((id) => id !== customerId);
+          }
+
+          return {
+            hasUserModifiedSelection: true,
+            selectedLeadIds: newLeadIds,
+            selectedCustomerIds: newCustomerIds,
+          };
+        }),
+
+      selectAllCustomers: () =>
+        set((state) => ({
+          hasUserModifiedSelection: true,
+          selectedCustomerIds: state.customers.map((c) => c.id),
+          selectedLeadIds: state.customers.flatMap((c) => c.leads.map((l) => l.id)),
+        })),
+
+      deselectAllCustomers: () =>
+        set({
+          hasUserModifiedSelection: true,
+          selectedCustomerIds: [],
+          selectedLeadIds: [],
+        }),
+
+      markRead: (id) =>
+        set((state) => {
+          const plainId = id.replace(/^notif-/, '');
+          const fullNotifId = `notif-${plainId}`;
+          return {
+            readNotificationIds: Array.from(
+              new Set([...state.readNotificationIds, id, fullNotifId, plainId])
+            ),
+          };
+        }),
+
+      markAllRead: () =>
+        set((state) => {
+          const allIds = get().getComputedNotifications().map((n) => n.id);
+          const allPlainIds = allIds.map((id) => id.replace(/^notif-/, ''));
+          return {
+            readNotificationIds: Array.from(
+              new Set([...state.readNotificationIds, ...allIds, ...allPlainIds])
+            ),
+          };
+        }),
+
+      markLeadNotificationsRead: (leadId) =>
+        set((state) => {
+          const plainId = leadId.replace(/^notif-/, '');
+          const fullNotifId = `notif-${plainId}`;
+          return {
+            readNotificationIds: Array.from(
+              new Set([...state.readNotificationIds, leadId, fullNotifId, plainId])
+            ),
+          };
+        }),
+
+      selectNotification: (id) =>
+        set({
+          activeNotificationId: id,
+          isRedBorderActive: true,
+        }),
+
+      setIsRedBorderActive: (active) => set({ isRedBorderActive: active }),
+      setIsWindowOpen: (open) => set({ isWindowOpen: open }),
+      toggleRedBorder: () => set((state) => ({ isRedBorderActive: !state.isRedBorderActive })),
+      clearRedBorder: () => set({ isRedBorderActive: false }),
+
+      getComputedNotifications: () => {
+        const state = get();
+        const result: InAppNotification[] = [];
+
+        if (
+          !state.customers ||
+          state.customers.length === 0 ||
+          !state.selectedLeadIds ||
+          state.selectedLeadIds.length === 0
+        ) {
+          return result;
         }
-      }
-    }
 
-    return result;
-  },
-}));
+        for (const customer of state.customers) {
+          if (!customer.leads || customer.leads.length === 0) continue;
+          for (const lead of customer.leads) {
+            const isSelected = state.selectedLeadIds.includes(lead.id);
+            if (!isSelected) continue;
+
+            const overdue = isLeadOverdue(lead, state.leadStages);
+            const notifId = `notif-${lead.id}`;
+            const isRead =
+              state.readNotificationIds.includes(notifId) ||
+              state.readNotificationIds.includes(lead.id);
+
+            if (overdue && !isRead) {
+              const config = state.leadStages.find(
+                (s) => s.id === lead.stageId || s.label === lead.stageLabel
+              );
+
+              const leadSecs =
+                lead.elapsedSeconds !== undefined
+                  ? lead.elapsedSeconds
+                  : timeUnitToSeconds(lead.elapsedValue, lead.elapsedUnit);
+
+              let timeAgoStr = `${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''}`;
+              if (leadSecs >= 86400) {
+                timeAgoStr = `${Math.floor(leadSecs / 86400)}d ago`;
+              } else if (leadSecs >= 3600) {
+                timeAgoStr = `${Math.floor(leadSecs / 3600)}h ago`;
+              } else if (leadSecs >= 60) {
+                timeAgoStr = `${Math.floor(leadSecs / 60)}m ago`;
+              } else {
+                timeAgoStr = `${leadSecs}s ago`;
+              }
+
+              const stageName = formatCurrentStageName(lead.stageLabel || lead.stageId);
+              result.push({
+                id: notifId,
+                contactName: customer.name,
+                companyName: customer.company || customer.name,
+                inactiveDays: Math.floor(leadSecs / 86400),
+                message: `Lead ${lead.leadNumber} has been in "${stageName}" stage for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${config?.duration || 0} ${config?.unit || 'Second'}s)`,
+                timeAgo: timeAgoStr,
+                read: false,
+                contactId: customer.id,
+                leadId: lead.id,
+                leadStage: stageName,
+                serviceRequest: lead.serviceRequest,
+                isTriggered: true,
+              });
+            }
+          }
+        }
+
+        return result;
+      },
+    }),
+    {
+      name: 'servwave_spider_watcher_settings',
+      partialize: (state) => ({
+        notifications: state.notifications,
+        leadStages: state.leadStages,
+        customers: state.customers,
+        selectedCustomerIds: state.selectedCustomerIds,
+        selectedLeadIds: state.selectedLeadIds,
+        hasUserModifiedSelection: state.hasUserModifiedSelection,
+        days: state.days,
+        inAppNotifications: state.inAppNotifications,
+        readNotificationIds: state.readNotificationIds,
+        activeNotificationId: state.activeNotificationId,
+        isRedBorderActive: state.isRedBorderActive,
+      }),
+    }
+  )
+);
 
 /** Hook to sync real live API customers and leads into the Spider Watcher store */
 export function useSyncSpiderWatcherLive() {
@@ -824,9 +1005,11 @@ export function useSyncSpiderWatcherLive() {
   });
 
   useEffect(() => {
-    if (leads || customers) {
+    if ((leads && leads.length > 0) || (customers && customers.length > 0)) {
       const live = buildWatcherCustomersFromLive(leads || [], customers || []);
-      setCustomers(live);
+      if (live && live.length > 0 && live !== DEFAULT_WATCHER_CUSTOMERS) {
+        setCustomers(live);
+      }
     }
   }, [leads, customers, setCustomers]);
 }

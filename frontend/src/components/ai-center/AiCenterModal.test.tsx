@@ -11,6 +11,15 @@ import {
 } from '@/stores/spiderWatcherStore';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual('react-router-dom');
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  };
+});
+
 const mockUseOrganization = vi.fn();
 vi.mock('@/lib/api/organization', () => ({
   useOrganization: () => mockUseOrganization(),
@@ -30,6 +39,7 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         id: 'l1',
         leadNumber: 'LD-101',
         serviceRequest: 'Main Line Leak & Pipe Replacement',
+        serviceLocation: '9462 Highland Ave, Suite 414 Paterson, NJ 07501',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 4,
@@ -40,11 +50,13 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         id: 'l2',
         leadNumber: 'LD-102',
         serviceRequest: 'Commercial Water Heater Installation',
+        serviceLocation: '1048 Industrial Pkwy, Suite 300 Portland, OR 97201',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
         elapsedUnit: 'Day',
         elapsedSeconds: 6 * 86400,
+        contactedAt: new Date(Date.now() - 6 * 24 * 3600 * 1000).toISOString(),
       },
     ],
   },
@@ -74,14 +86,49 @@ function renderSpiderDetail() {
 
 describe('AiCenterModal', () => {
   beforeEach(() => {
+    mockNavigate.mockReset();
     mockUseOrganization.mockReturnValue({
       data: { is_demo: false },
     });
     useAiCenterStore.setState({ open: true, focusAgentId: null });
     useSpiderWatcherStore.setState({
+      notifications: {
+        email: true,
+        sms: true,
+        inApp: true,
+        redFrame: true,
+      },
+      days: '',
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: undefined,
+          unit: 'Second',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: undefined,
+          unit: 'Second',
+        },
+        {
+          id: 'walkthrough-scheduled-estimate',
+          label: 'Walkthrough Scheduled → Estimate',
+          fromStage: 'Walkthrough Scheduled',
+          toStage: 'Estimate',
+          duration: undefined,
+          unit: 'Second',
+        },
+      ],
       customers: TEST_CUSTOMERS,
       selectedCustomerIds: ['c1'],
       selectedLeadIds: ['l1', 'l2'],
+      hasUserModifiedSelection: false,
     });
   });
 
@@ -189,8 +236,18 @@ describe('AiCenterModal', () => {
     // Dropdown shows customer's multiple leads
     expect(screen.getByText('Leads for John Smith')).toBeInTheDocument();
     expect(screen.getByText('LD-101')).toBeInTheDocument();
-    expect(screen.getByText('Main Line Leak & Pipe Replacement')).toBeInTheDocument();
+    // Complete address with suite, city, state, zip is displayed
+    expect(screen.getByText('9462 Highland Ave, Suite 414 Paterson, NJ 07501')).toBeInTheDocument();
+    expect(screen.queryByText('Main Line Leak & Pipe Replacement')).toBeNull();
     expect(screen.getByText('LD-102')).toBeInTheDocument();
+    expect(screen.getByText('1048 Industrial Pkwy, Suite 300 Portland, OR 97201')).toBeInTheDocument();
+
+    // Stage elapsed time is rendered between Lead ID and Stage
+    expect(screen.getByText('4 Days in stage')).toBeInTheDocument();
+    expect(screen.getByText('6 Days in stage')).toBeInTheDocument();
+
+    // Last Communication Time is rendered before threshold value for Contacted lead
+    expect(screen.getByText(/Last Comm:\s*6 Days ago/i)).toBeInTheDocument();
 
     // With blank stage threshold (default), displays 'none threshold set'
     expect(screen.getAllByText('none threshold set').length).toBeGreaterThan(0);
@@ -202,6 +259,27 @@ describe('AiCenterModal', () => {
     // Lead stage badge in Contact Watcher displays single stage ("New", "Contacted", "Walkthrough")
     expect(screen.getAllByText('New').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Contacted').length).toBeGreaterThan(0);
+
+    // Clicking a lead redirects to Lead Overview
+    const leadLink = screen.getByRole('button', { name: /Open Lead Overview for LD-101/i });
+    expect(leadLink).toBeInTheDocument();
+    fireEvent.click(leadLink);
+    expect(mockNavigate).toHaveBeenCalledWith('/leads/l1');
+  });
+
+  it('redirects to Lead Overview when clicking on lead service location in Contact Watcher', () => {
+    renderSpiderDetail();
+
+    // Expand customer
+    const dropdownBtn = screen.getByLabelText(/Toggle leads for John Smith/i);
+    fireEvent.click(dropdownBtn);
+
+    // Click service location
+    const locationEl = screen.getByText('9462 Highland Ave, Suite 414 Paterson, NJ 07501');
+    fireEvent.click(locationEl);
+
+    expect(mockNavigate).toHaveBeenCalledWith('/leads/l1');
+    expect(useAiCenterStore.getState().open).toBe(false);
   });
 
   it('calculates real lead stage and actual elapsed time accurately', () => {
@@ -430,5 +508,151 @@ describe('AiCenterModal', () => {
     // Now store has been updated!
     expect(useSpiderWatcherStore.getState().selectedCustomerIds).toEqual([]);
     expect(useSpiderWatcherStore.getState().selectedLeadIds).toEqual([]);
+  });
+
+  it('triggers notification alerts for Contacted stage leads based on the last communication timestamp', () => {
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 10,
+          unit: 'Day',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 5,
+          unit: 'Day',
+        },
+        {
+          id: 'walkthrough-scheduled-estimate',
+          label: 'Walkthrough Scheduled → Estimate',
+          fromStage: 'Walkthrough Scheduled',
+          toStage: 'Estimate',
+          duration: undefined,
+          unit: 'Second',
+        },
+      ],
+      readNotificationIds: [],
+    });
+
+    const notifs = useSpiderWatcherStore.getState().getComputedNotifications();
+    // LD-102 has 6 days since contacted, exceeding 5 Day threshold -> triggers alert
+    expect(notifs.some((n) => n.leadId === 'l2')).toBe(true);
+
+    // LD-101 has 4 days in New stage, below 10 Day threshold -> no alert
+    expect(notifs.some((n) => n.leadId === 'l1')).toBe(false);
+  });
+
+  it('persists Spider settings to localStorage across reload', () => {
+    localStorage.clear();
+
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+      hasUserModifiedSelection: false,
+    });
+
+    renderSpiderDetail();
+
+    // Change redFrame and stage duration
+    const redFrameOption = screen.getByText('Red Frame').closest('div[class*="cursor-pointer"]');
+    fireEvent.click(redFrameOption!);
+
+    const durationInputs = screen.getAllByLabelText(/^Time period for/i);
+    fireEvent.change(durationInputs[0]!, { target: { value: '14' } });
+
+    // Click Save
+    const saveBtn = screen.getByRole('button', { name: /Save/i });
+    fireEvent.click(saveBtn);
+
+    // Verify localStorage has persisted settings
+    const stored = localStorage.getItem('servwave_spider_watcher_settings');
+    expect(stored).not.toBeNull();
+    const parsed = JSON.parse(stored!);
+    expect(parsed.state.notifications.redFrame).toBe(false);
+    expect(parsed.state.leadStages[0].duration).toBe(14);
+    expect(parsed.state.hasUserModifiedSelection).toBe(true);
+    expect(parsed.state.customers.length).toBeGreaterThan(0);
+  });
+
+  it('persists Spider notifications across page refresh so active alerts remain visible', () => {
+    localStorage.clear();
+
+    // Setup active overdue lead
+    useSpiderWatcherStore.setState({
+      customers: TEST_CUSTOMERS,
+      selectedCustomerIds: ['c1'],
+      selectedLeadIds: ['l1', 'l2'],
+      leadStages: [
+        {
+          id: 'new-contacted',
+          label: 'New → Contacted',
+          fromStage: 'New',
+          toStage: 'Contacted',
+          duration: 1,
+          unit: 'Day',
+        },
+        {
+          id: 'contacted-walkthrough-scheduled',
+          label: 'Contacted → Walkthrough Scheduled',
+          fromStage: 'Contacted',
+          toStage: 'Walkthrough Scheduled',
+          duration: 1,
+          unit: 'Day',
+        },
+        {
+          id: 'walkthrough-scheduled-estimate',
+          label: 'Walkthrough Scheduled → Estimate',
+          fromStage: 'Walkthrough Scheduled',
+          toStage: 'Estimate',
+          duration: undefined,
+          unit: 'Second',
+        },
+      ],
+      notifications: {
+        email: true,
+        sms: true,
+        inApp: true,
+        redFrame: true,
+      },
+      readNotificationIds: [],
+      hasUserModifiedSelection: true,
+    });
+
+    const activeBeforeReload = useSpiderWatcherStore.getState().getComputedNotifications();
+    expect(activeBeforeReload.length).toBeGreaterThan(0);
+
+    // Simulate page refresh by reading persisted state from localStorage and rehydrating
+    const persistedRaw = localStorage.getItem('servwave_spider_watcher_settings');
+    expect(persistedRaw).not.toBeNull();
+    const persistedObj = JSON.parse(persistedRaw!).state;
+
+    // Reset store in memory to simulate fresh app start
+    useSpiderWatcherStore.setState({
+      customers: [],
+      selectedCustomerIds: [],
+      selectedLeadIds: [],
+      readNotificationIds: [],
+    });
+    expect(useSpiderWatcherStore.getState().getComputedNotifications()).toEqual([]);
+
+    // Rehydrate from persisted state (as zustand/persist does on reload)
+    useSpiderWatcherStore.setState({
+      ...persistedObj,
+    });
+
+    const activeAfterReload = useSpiderWatcherStore.getState().getComputedNotifications();
+    expect(activeAfterReload.length).toBe(activeBeforeReload.length);
+    expect(activeAfterReload.map((n) => n.id)).toEqual(activeBeforeReload.map((n) => n.id));
   });
 });

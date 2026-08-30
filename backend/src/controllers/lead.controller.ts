@@ -75,8 +75,23 @@ const leadListSelect = {
   job_type: true,
   scheduled_start: true,
   scheduled_end: true,
+  service_address_line1: true,
+  service_address_line2: true,
   service_city: true,
   service_state: true,
+  service_zip: true,
+  service_location_id: true,
+  service_location: {
+    select: {
+      id: true,
+      name: true,
+      address_line1: true,
+      address_line2: true,
+      city: true,
+      state: true,
+      zip: true,
+    },
+  },
   notes: true,
   created_at: true,
   updated_at: true,
@@ -93,7 +108,32 @@ const leadListSelect = {
   visits: { select: { ...walkthroughSnapshotSelect, assignees: { select: { user: { select: { id: true, first_name: true, last_name: true } } } } } },
   contacted_at: true,
   // email: see the job list select - the walkthrough composer needs it too (SRVW-243).
-  customer: { select: { id: true, customer_number: true, first_name: true, last_name: true, company_name: true, phone: true, email: true, ad_source: true, service_locations: { where: { is_primary: true }, take: 1, select: { city: true, state: true } } } },
+  customer: {
+    select: {
+      id: true,
+      customer_number: true,
+      first_name: true,
+      last_name: true,
+      company_name: true,
+      phone: true,
+      email: true,
+      ad_source: true,
+      service_locations: {
+        where: { is_primary: true },
+        take: 1,
+        select: {
+          id: true,
+          name: true,
+          address_line1: true,
+          address_line2: true,
+          city: true,
+          state: true,
+          zip: true,
+          is_primary: true,
+        },
+      },
+    },
+  },
   // Scheduler redesign: the SINGLE owner (commission_owner) + the MULTI performer set.
   commission_owner: { select: { id: true, first_name: true, last_name: true } },
   lead_assignees: { select: { user_id: true, user: { select: { id: true, first_name: true, last_name: true } } } },
@@ -117,6 +157,18 @@ const leadDetailSelect = {
   service_city: true,
   service_state: true,
   service_zip: true,
+  service_location_id: true,
+  service_location: {
+    select: {
+      id: true,
+      name: true,
+      address_line1: true,
+      address_line2: true,
+      city: true,
+      state: true,
+      zip: true,
+    },
+  },
   // Walkthrough-as-entity redesign, PR-B2: every walkthrough_* field below is no longer a raw
   // legacy column read - projectLeadWalkthroughFields (called from withTags) sources them from
   // this relation, resolving D15's "current visit" so they stay coherent under multiple visits

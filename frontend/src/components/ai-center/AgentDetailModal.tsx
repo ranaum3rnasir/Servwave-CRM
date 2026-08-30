@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Play,
   Check,
@@ -16,6 +17,7 @@ import {
   Plus,
   Minus,
   Square,
+  MapPin,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
@@ -38,6 +40,7 @@ import { customerDisplayName } from '@/lib/customer-name';
 import type { AIAgent } from '@/lib/ai-center/agents';
 import { comingSoonPillCls } from './comingSoonPill';
 import { TranscriberModal } from '@/components/transcriber/TranscriberModal';
+import { useAiCenterStore } from '@/stores/aiCenterStore';
 import {
   useSpiderWatcherStore,
   type TimeUnit,
@@ -49,6 +52,8 @@ import {
   isLeadOverdue,
   resolveLeadStageAndElapsedTime,
   formatCurrentStageName,
+  formatLastCommunicationTimestamp,
+  formatLeadServiceLocation,
   buildWatcherCustomersFromLive,
 } from '@/stores/spiderWatcherStore';
 
@@ -67,7 +72,7 @@ interface SpiderWatcherConfigProps {
   updateLeadStage: (id: string, updates: Partial<LeadStageConfig>) => void;
   selectedCustomerIds: string[];
   selectedLeadIds: string[];
-  toggleCustomerSelection: (customerId: string, leadIdsForCustomer: string[]) => void;
+  toggleCustomerSelection: (customerId: string, allLeadIdsForCustomer: string[]) => void;
   toggleLeadSelection: (
     leadId: string,
     customerId: string,
@@ -76,6 +81,7 @@ interface SpiderWatcherConfigProps {
   selectAllCustomers: () => void;
   deselectAllCustomers: () => void;
   storeCustomers: WatcherCustomer[];
+  onCloseModal?: () => void;
 }
 
 /** Dedicated UI for Spider (AI Lead Manager) Watcher configuration */
@@ -91,9 +97,20 @@ function SpiderWatcherConfig({
   selectAllCustomers,
   deselectAllCustomers,
   storeCustomers,
+  onCloseModal,
 }: SpiderWatcherConfigProps) {
+  const navigate = useNavigate();
+  const setAiCenterOpen = useAiCenterStore((s) => s.setOpen);
   const [search, setSearch] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
+
+  const handleLeadClick = (leadId: string) => {
+    if (onCloseModal) {
+      onCloseModal();
+    }
+    setAiCenterOpen(false);
+    navigate(`/leads/${leadId}`);
+  };
 
   // Use live store customers
   const customersList: WatcherCustomer[] = useMemo(() => {
@@ -101,13 +118,20 @@ function SpiderWatcherConfig({
       ...c,
       leads: (c.leads || []).map((l) => {
         const m = resolveLeadStageAndElapsedTime(l);
+        const resolvedLocation =
+          formatLeadServiceLocation(l) !== 'Service location not specified'
+            ? formatLeadServiceLocation(l)
+            : (l.serviceLocation || 'Service location not specified');
+
         return {
           ...l,
+          serviceLocation: resolvedLocation,
           stageId: m.stageId,
           stageLabel: m.stageLabel,
           elapsedValue: m.elapsedValue,
           elapsedUnit: m.elapsedUnit,
           elapsedSeconds: m.elapsedSeconds,
+          contactedAt: l.contactedAt || (l as any).contacted_at || m.contactedAt || null,
         };
       }),
     }));
@@ -127,7 +151,8 @@ function SpiderWatcherConfig({
       const matchLeads = c.leads.some(
         (l) =>
           l.leadNumber.toLowerCase().includes(q) ||
-          l.serviceRequest.toLowerCase().includes(q) ||
+          (l.serviceLocation && l.serviceLocation.toLowerCase().includes(q)) ||
+          (l.serviceRequest && l.serviceRequest.toLowerCase().includes(q)) ||
           l.stageLabel.toLowerCase().includes(q)
       );
 
@@ -578,36 +603,65 @@ function SpiderWatcherConfig({
                                     : 'border-border/60 bg-surface-light/60 opacity-65 hover:opacity-100'
                                 )}
                               >
-                                {/* Left: Lead Checkbox, Number & Service description */}
+                                {/* Left: Lead Checkbox, Clickable Lead ID, Stage Time, Stage badge & Service Location */}
                                 <div className="flex items-center gap-2.5 min-w-0">
-                                  <Checkbox
-                                    checked={isLeadChecked}
-                                    onCheckedChange={() =>
-                                      toggleLeadSelection(lead.id, customer.id, allCustomerLeadIds)
-                                    }
-                                    aria-label={`Select lead ${lead.leadNumber} for notifications`}
-                                  />
+                                  <div
+                                    className="shrink-0"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <Checkbox
+                                      checked={isLeadChecked}
+                                      onCheckedChange={() =>
+                                        toggleLeadSelection(lead.id, customer.id, allCustomerLeadIds)
+                                      }
+                                      aria-label={`Select lead ${lead.leadNumber} for notifications`}
+                                    />
+                                  </div>
                                   <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-mono text-xs font-bold text-text-primary">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleLeadClick(lead.id);
+                                        }}
+                                        className="font-mono text-xs font-bold text-text-primary hover:underline hover:text-ai-600 transition-colors text-left cursor-pointer"
+                                        title={`View Lead Overview for ${lead.leadNumber}`}
+                                        aria-label={`Open Lead Overview for ${lead.leadNumber}`}
+                                      >
                                         {lead.leadNumber}
+                                      </button>
+                                      <span className="text-[10px] font-medium text-text-soft">
+                                        {lead.elapsedValue} {lead.elapsedUnit}
+                                        {lead.elapsedValue > 1 ? 's' : ''} in stage
                                       </span>
                                       <span className="rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
                                         {formatCurrentStageName(lead.stageLabel || lead.stageId)}
                                       </span>
                                     </div>
-                                    <p className="truncate text-[11px] text-text-secondary font-medium">
-                                      {lead.serviceRequest}
-                                    </p>
+                                    <div
+                                      className="truncate text-[11px] text-text-secondary font-medium flex items-center gap-1 mt-0.5 cursor-pointer hover:text-text-primary transition-colors"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleLeadClick(lead.id);
+                                      }}
+                                      title={lead.serviceLocation || 'No service location specified'}
+                                    >
+                                      <MapPin className="h-3 w-3 text-text-soft shrink-0" />
+                                      <span className="truncate">
+                                        {lead.serviceLocation || 'No service location specified'}
+                                      </span>
+                                    </div>
                                   </div>
                                 </div>
 
-                                {/* Right: Stage Duration & Notification Trigger Status */}
+                                {/* Right: Last Communication Time & Notification Trigger Status */}
                                 <div className="flex items-center gap-2 shrink-0 pl-6 sm:pl-0">
-                                  <span className="text-[10px] font-medium text-text-soft">
-                                    {lead.elapsedValue} {lead.elapsedUnit}
-                                    {lead.elapsedValue > 1 ? 's' : ''} in stage
-                                  </span>
+                                  {lead.contactedAt && (
+                                    <span className="text-[10px] font-medium text-text-secondary">
+                                      Last Comm: {formatLastCommunicationTimestamp(lead.contactedAt)}
+                                    </span>
+                                  )}
 
                                   {isLeadChecked && !hasThreshold ? (
                                     <span className="rounded-full bg-surface-light border border-border px-2 py-0.5 text-[10px] font-medium text-text-soft">
@@ -704,7 +758,9 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
       (Array.isArray(apiCustomers) && apiCustomers.length > 0)
     ) {
       const live = buildWatcherCustomersFromLive(apiLeads || [], apiCustomers || []);
-      setStoreCustomers(live);
+      if (live && live.length > 0 && live !== DEFAULT_WATCHER_CUSTOMERS) {
+        setStoreCustomers(live);
+      }
     }
   }, [apiLeads, apiCustomers, setStoreCustomers]);
 
@@ -893,6 +949,7 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
                     selectAllCustomers={selectAllCustomers}
                     deselectAllCustomers={deselectAllCustomers}
                     storeCustomers={storeCustomers}
+                    onCloseModal={() => onOpenChange(false)}
                   />
                 ) : (
                   <>

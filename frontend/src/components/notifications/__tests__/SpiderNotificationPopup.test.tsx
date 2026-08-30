@@ -98,13 +98,13 @@ describe('SpiderNotificationPopup', () => {
     // Dialog renders
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('Spider Notifications')).toBeInTheDocument();
-    expect(screen.getAllByText('Apex Plumbing Co.').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('John Smith').length).toBe(3); // one per notification item at the top row only
 
     // "Mark all read" and "Send Message" buttons are removed
     expect(screen.queryByText('Mark all read')).toBeNull();
     expect(screen.queryByText('Send Message')).toBeNull();
 
-    // Displays only current stage name (e.g. 'New', 'Contacted', 'Walkthrough')
+    // Displays only current stage name (e.g. 'New', 'Contacted', 'Walkthrough') parallel to the name
     expect(screen.getAllByText('New').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Contacted').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Walkthrough').length).toBeGreaterThan(0);
@@ -138,7 +138,7 @@ describe('SpiderNotificationPopup', () => {
     expect(initialNotifs.length).toBeGreaterThan(0);
     const targetNotif = initialNotifs[0]!;
 
-    const card = screen.getAllByText(targetNotif.companyName)[0]?.closest('div[class*="cursor-pointer"]');
+    const card = screen.getAllByText(targetNotif.contactName)[0]?.closest('div[class*="cursor-pointer"]');
     expect(card).not.toBeNull();
     fireEvent.click(card!);
 
