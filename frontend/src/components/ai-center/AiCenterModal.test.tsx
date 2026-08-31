@@ -7,6 +7,9 @@ import { useAiCenterStore } from '@/stores/aiCenterStore';
 import {
   useSpiderWatcherStore,
   resolveLeadStageAndElapsedTime,
+  formatLeadServiceLocation,
+  formatAddressParts,
+  buildWatcherCustomersFromLive,
   type WatcherCustomer,
 } from '@/stores/spiderWatcherStore';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -654,5 +657,149 @@ describe('AiCenterModal', () => {
     const activeAfterReload = useSpiderWatcherStore.getState().getComputedNotifications();
     expect(activeAfterReload.length).toBe(activeBeforeReload.length);
     expect(activeAfterReload.map((n) => n.id)).toEqual(activeBeforeReload.map((n) => n.id));
+  });
+
+  describe('Service Location Resolution for Customer Leads', () => {
+    it('formatAddressParts formats full street address, unit, city, state, zip cleanly', () => {
+      expect(
+        formatAddressParts('1888 Main St', null, 'Clifton', 'NJ', '07011')
+      ).toBe('1888 Main St, Clifton, NJ 07011');
+
+      expect(
+        formatAddressParts('9462 Highland Ave', 'Suite 414', 'Paterson', 'NJ', '07501')
+      ).toBe('9462 Highland Ave, Suite 414, Paterson, NJ 07501');
+
+      expect(
+        formatAddressParts(null, null, 'Clifton', 'NJ', null)
+      ).toBe('Clifton, NJ');
+    });
+
+    it('formatLeadServiceLocation extracts complete address from service_location relation', () => {
+      const lead = {
+        id: 'l-test-1',
+        service_location: {
+          address_line1: '1888 Main St',
+          address_line2: null,
+          city: 'Clifton',
+          state: 'NJ',
+          zip: '07011',
+        },
+      };
+      expect(formatLeadServiceLocation(lead)).toBe('1888 Main St, Clifton, NJ 07011');
+    });
+
+    it('formatLeadServiceLocation extracts complete address matching customer service_locations', () => {
+      const lead = {
+        id: 'l-test-2',
+        service_location_id: 'loc-primary',
+        service_city: 'Clifton',
+        service_state: 'NJ',
+      };
+      const customer = {
+        id: 'c-test',
+        service_locations: [
+          {
+            id: 'loc-primary',
+            address_line1: '1888 Main St',
+            city: 'Clifton',
+            state: 'NJ',
+            zip: '07011',
+            is_primary: true,
+          },
+        ],
+      };
+      expect(formatLeadServiceLocation(lead, customer)).toBe('1888 Main St, Clifton, NJ 07011');
+    });
+
+    it('buildWatcherCustomersFromLive links live API customers and leads with complete service locations', () => {
+      const apiLeads = [
+        {
+          id: 'lead-87',
+          lead_number: 'L00087',
+          customer_id: 'cust-12',
+          service_request: 'Automatic slide gate stuck halfway, motor humming',
+          service_location_id: 'loc-1',
+          created_at: new Date(Date.now() - 20 * 86400 * 1000).toISOString(),
+          status: 'CONTACTED',
+          contacted_at: new Date(Date.now() - 20 * 86400 * 1000).toISOString(),
+        },
+      ];
+
+      const apiCustomers = [
+        {
+          id: 'cust-12',
+          first_name: 'Steven',
+          last_name: 'Nguyen',
+          email: 'steven.nguyen@example.com',
+          phone: '+15552012571',
+          service_locations: [
+            {
+              id: 'loc-1',
+              address_line1: '1888 Main St',
+              city: 'Clifton',
+              state: 'NJ',
+              zip: '07011',
+              is_primary: true,
+            },
+          ],
+        },
+      ];
+
+      const customers = buildWatcherCustomersFromLive(apiLeads, apiCustomers);
+      expect(customers).toHaveLength(1);
+      expect(customers[0].name).toBe('Steven Nguyen');
+      expect(customers[0].leads).toHaveLength(1);
+      expect(customers[0].leads[0].serviceLocation).toBe('1888 Main St, Clifton, NJ 07011');
+    });
+
+    it('renders complete service location in Spider Contact Watchers dropdown', () => {
+      const customersWithFullAddress: WatcherCustomer[] = [
+        {
+          id: 'c-steven',
+          name: 'Steven Nguyen',
+          email: 'steven.nguyen@example.com',
+          service_locations: [
+            {
+              id: 'loc-1',
+              address_line1: '1888 Main St',
+              city: 'Clifton',
+              state: 'NJ',
+              zip: '07011',
+              is_primary: true,
+            },
+          ],
+          leads: [
+            {
+              id: 'l-87',
+              leadNumber: 'L00087',
+              serviceRequest: 'Automatic slide gate stuck halfway, motor humming',
+              serviceLocation: '1888 Main St, Clifton, NJ 07011',
+              stageId: 'contacted-walkthrough-scheduled',
+              stageLabel: 'Contacted → Walkthrough Scheduled',
+              elapsedValue: 20,
+              elapsedUnit: 'Day',
+              elapsedSeconds: 20 * 86400,
+            },
+          ],
+        },
+      ];
+
+      useSpiderWatcherStore.setState({
+        customers: customersWithFullAddress,
+        selectedCustomerIds: ['c-steven'],
+        selectedLeadIds: ['l-87'],
+      });
+
+      renderSpiderDetail();
+
+      // Expand Steven Nguyen's lead dropdown
+      const stevenRow = screen.getByText('Steven Nguyen').closest('div[class*="rounded-lg"]');
+      const expandBtn = stevenRow!.querySelector('button[aria-label="Toggle leads for Steven Nguyen"]');
+      fireEvent.click(expandBtn!);
+
+      // Complete service location is visible
+      expect(screen.getByText('1888 Main St, Clifton, NJ 07011')).toBeInTheDocument();
+      expect(screen.getByTitle('1888 Main St, Clifton, NJ 07011')).toBeInTheDocument();
+    });
   });
 });

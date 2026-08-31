@@ -431,21 +431,13 @@ export async function list(req: Request, res: Response) {
 
     const where = await buildCustomerListWhere(req);
 
-    // Always include primary location for address column; expand when searching
-    const locationSelect = search
-      ? {
-          service_locations: {
-            select: { id: true, address_line1: true, address_line2: true, city: true, state: true, zip: true, is_primary: true },
-            orderBy: { is_primary: 'desc' as const },
-          },
-        }
-      : {
-          service_locations: {
-            where: { is_primary: true },
-            select: { address_line1: true, city: true, state: true, zip: true },
-            take: 1,
-          },
-        };
+    // Always include primary location and full service locations for address display
+    const locationSelect = {
+      service_locations: {
+        select: { id: true, name: true, address_line1: true, address_line2: true, city: true, state: true, zip: true, is_primary: true },
+        orderBy: { is_primary: 'desc' as const },
+      },
+    };
 
     const [customers, total] = await Promise.all([
       prisma.customer.findMany({

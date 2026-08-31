@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Sparkles, BellOff, X } from 'lucide-react';
+import { Sparkles, BellOff, X, MapPin } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Heading } from '@/components/ui/heading';
@@ -9,6 +9,7 @@ import { useToast } from '@/components/ui/use-toast';
 import {
   useSpiderWatcherStore,
   formatCurrentStageName,
+  formatLeadLastCommunication,
   type InAppNotification,
 } from '@/stores/spiderWatcherStore';
 
@@ -180,50 +181,81 @@ export function SpiderNotificationPopup() {
                 No Spider lead watcher alerts currently active.
               </p>
             ) : (
-              activeNotifications.map((n) => (
-                <div
-                  key={n.id}
-                  onClick={() => handleNotificationClick(n)}
-                  className={cn(
-                    'flex gap-3 p-3.5 transition-colors cursor-pointer hover:bg-background-light group',
-                    !n.read ? 'bg-ai-50/40' : 'bg-surface-light'
-                  )}
-                >
-                  <Avatar className="h-8 w-8 shrink-0 mt-0.5">
-                    <AvatarFallback tone="subtle">
-                      {n.contactName[0]}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0 flex-1 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <p className="text-xs font-bold text-text-primary truncate group-hover:text-ai-strong transition-colors">
-                          {n.contactName}
-                        </p>
-                        {n.leadStage && (
-                          <span className="shrink-0 rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-bold text-ai-strong">
-                            {formatCurrentStageName(n.leadStage)}
-                          </span>
-                        )}
+              activeNotifications.map((n) => {
+                const commDetails =
+                  n.lastCommunication ||
+                  formatLeadLastCommunication(n.contactedAt, n.createdAt);
+
+                const isLegacyStageAlert =
+                  !n.message ||
+                  /(?:Lead\s+[A-Za-z0-9_-]+\s+)?(?:Has\s+been|In)\s+in\s+.*stage/i.test(n.message);
+
+                const messageText = isLegacyStageAlert ? commDetails : n.message;
+
+                return (
+                  <div
+                    key={n.id}
+                    onClick={() => handleNotificationClick(n)}
+                    className={cn(
+                      'flex gap-3 p-3.5 transition-colors cursor-pointer hover:bg-background-light group',
+                      !n.read ? 'bg-ai-50/40' : 'bg-surface-light'
+                    )}
+                  >
+                    <Avatar className="h-8 w-8 shrink-0 mt-0.5">
+                      <AvatarFallback tone="subtle">
+                        {n.contactName[0]}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                          <p className="text-xs font-bold text-text-primary truncate group-hover:text-ai-strong transition-colors">
+                            {n.contactName}
+                          </p>
+                          {(n.leadNumber || n.leadId) && (
+                            <span className="shrink-0 rounded bg-ai-50 border border-ai-200 px-1.5 py-0.5 text-[10px] font-mono font-bold text-ai-strong">
+                              {n.leadNumber || n.leadId}
+                            </span>
+                          )}
+                          {n.leadStage && (
+                            <span className="shrink-0 rounded bg-primary-subtle/70 border border-border px-1.5 py-0.5 text-[10px] font-semibold text-text-secondary">
+                              {formatCurrentStageName(n.leadStage)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[10px] text-text-soft">{n.timeAgo}</span>
+                          {!n.read && (
+                            <span className="h-2 w-2 rounded-full bg-notify shrink-0 animate-pulse" />
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="text-[10px] text-text-soft">{n.timeAgo}</span>
-                        {!n.read && (
-                          <span className="h-2 w-2 rounded-full bg-notify shrink-0 animate-pulse" />
-                        )}
+
+                      {/* Lead complete service location */}
+                      {n.serviceLocation && n.serviceLocation !== 'Service location not specified' && (
+                        <div
+                          className="flex items-center gap-1 text-[11px] text-text-secondary font-medium truncate"
+                          title={n.serviceLocation}
+                        >
+                          <MapPin className="h-3 w-3 text-text-soft shrink-0" />
+                          <span className="truncate">{n.serviceLocation}</span>
+                        </div>
+                      )}
+
+                      {/* Lead Last Communication Details */}
+                      <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
+                        {messageText}
+                      </p>
+
+                      <div className="pt-1 flex items-center justify-between">
+                        <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
+                          Threshold Exceeded
+                        </span>
                       </div>
-                    </div>
-                    <p className="text-xs text-text-secondary line-clamp-2 leading-relaxed">
-                      {n.message}
-                    </p>
-                    <div className="pt-1 flex items-center justify-between">
-                      <span className="rounded-full bg-danger-surface border border-danger-border px-2 py-0.5 text-[10px] font-semibold text-danger-strong">
-                        Threshold Exceeded
-                      </span>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

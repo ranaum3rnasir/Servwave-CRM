@@ -14,6 +14,7 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         id: 'l1',
         leadNumber: 'LD-101',
         serviceRequest: 'Main Line Leak',
+        serviceLocation: '9462 Highland Ave, Suite 414, Paterson, NJ 07501',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 4,
@@ -24,6 +25,7 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         id: 'l2',
         leadNumber: 'LD-102',
         serviceRequest: 'Water Heater',
+        serviceLocation: '1048 Industrial Pkwy, Suite 300, Portland, OR 97201',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
@@ -34,6 +36,7 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         id: 'l3',
         leadNumber: 'LD-103',
         serviceRequest: 'Valve Testing',
+        serviceLocation: '520 Commercial St, Suite 100, Salem, OR 97301',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 12,
@@ -104,11 +107,23 @@ describe('SpiderNotificationPopup', () => {
     expect(screen.queryByText('Mark all read')).toBeNull();
     expect(screen.queryByText('Send Message')).toBeNull();
 
-    // Displays only current stage name (e.g. 'New', 'Contacted', 'Walkthrough') parallel to the name
+    // Displays Lead ID (e.g. 'LD-101', 'LD-102', 'LD-103') next to the contact name
+    expect(screen.getByText('LD-101')).toBeInTheDocument();
+    expect(screen.getByText('LD-102')).toBeInTheDocument();
+    expect(screen.getByText('LD-103')).toBeInTheDocument();
+
+    // Displays Stage (e.g. 'New', 'Contacted', 'Walkthrough') after the Lead ID
     expect(screen.getAllByText('New').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Contacted').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Walkthrough').length).toBeGreaterThan(0);
-    expect(screen.queryByText('New → Contacted')).toBeNull();
+
+    // Displays complete service address for the lead
+    expect(screen.getByText('9462 Highland Ave, Suite 414, Paterson, NJ 07501')).toBeInTheDocument();
+    expect(screen.getByText('1048 Industrial Pkwy, Suite 300, Portland, OR 97201')).toBeInTheDocument();
+    expect(screen.getByText('520 Commercial St, Suite 100, Salem, OR 97301')).toBeInTheDocument();
+
+    // Message shows last communication details instead of stage threshold alert
+    expect(screen.getAllByText(/Last communication|No communication recorded yet/i).length).toBe(3);
   });
 
   it('displays empty notification state when no customer or lead is selected', () => {

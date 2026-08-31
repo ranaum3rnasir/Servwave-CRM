@@ -21,6 +21,13 @@ export interface WatcherLead {
   leadNumber: string;
   serviceRequest?: string;
   serviceLocation?: string;
+  service_location_id?: string | null;
+  service_location?: any;
+  service_address_line1?: string | null;
+  service_address_line2?: string | null;
+  service_city?: string | null;
+  service_state?: string | null;
+  service_zip?: string | null;
   stageId: string;
   stageLabel: string;
   elapsedValue: number;
@@ -39,6 +46,7 @@ export interface WatcherCustomer {
   company?: string;
   email?: string;
   phone?: string;
+  service_locations?: any[];
   leads: WatcherLead[];
 }
 
@@ -59,8 +67,13 @@ export interface InAppNotification {
   read: boolean;
   contactId: string;
   leadId?: string;
+  leadNumber?: string;
   leadStage?: string;
   serviceRequest?: string;
+  serviceLocation?: string;
+  contactedAt?: string | null;
+  createdAt?: string | null;
+  lastCommunication?: string | null;
   isTriggered?: boolean;
 }
 
@@ -267,7 +280,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l1',
         leadNumber: 'LD-101',
         serviceRequest: 'Main Line Leak & Pipe Replacement',
-        serviceLocation: '9462 Highland Ave, Suite 414 Paterson, NJ 07501',
+        serviceLocation: '9462 Highland Ave, Suite 414, Paterson, NJ 07501',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 4,
@@ -279,7 +292,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l2',
         leadNumber: 'LD-102',
         serviceRequest: 'Commercial Water Heater Installation',
-        serviceLocation: '1048 Industrial Pkwy, Suite 300 Portland, OR 97201',
+        serviceLocation: '1048 Industrial Pkwy, Suite 300, Portland, OR 97201',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
@@ -292,7 +305,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l3',
         leadNumber: 'LD-103',
         serviceRequest: 'Backflow Valve Annual Testing',
-        serviceLocation: '520 Commercial St, Suite 100 Salem, OR 97301',
+        serviceLocation: '520 Commercial St, Suite 100, Salem, OR 97301',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 12,
@@ -314,7 +327,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l4',
         leadNumber: 'LD-201',
         serviceRequest: 'Central AC Rooftop Unit Overhaul',
-        serviceLocation: '880 Skyline Blvd, Suite 200 Denver, CO 80202',
+        serviceLocation: '880 Skyline Blvd, Suite 200, Denver, CO 80202',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 8,
@@ -327,7 +340,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l5',
         leadNumber: 'LD-202',
         serviceRequest: 'Ductwork System Sanitization & Sealing',
-        serviceLocation: '4120 Enterprise Way, Suite 150 Aurora, CO 80011',
+        serviceLocation: '4120 Enterprise Way, Suite 150, Aurora, CO 80011',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 3,
@@ -349,7 +362,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l6',
         leadNumber: 'LD-301',
         serviceRequest: '400A Main Electrical Panel Upgrade',
-        serviceLocation: '1500 Market St, Suite 400 Austin, TX 78701',
+        serviceLocation: '1500 Market St, Suite 400, Austin, TX 78701',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 5,
@@ -361,7 +374,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l7',
         leadNumber: 'LD-302',
         serviceRequest: 'Level 3 Dual EV Charger Installation',
-        serviceLocation: '2301 Congress Ave, Suite 250 Austin, TX 78704',
+        serviceLocation: '2301 Congress Ave, Suite 250, Austin, TX 78704',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 2,
@@ -383,7 +396,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l8',
         leadNumber: 'LD-401',
         serviceRequest: 'Custom Home Framing Structural Inspection',
-        serviceLocation: '920 Mountain View Rd Boulder, CO 80302',
+        serviceLocation: '920 Mountain View Rd, Boulder, CO 80302',
         stageId: 'walkthrough-scheduled-estimate',
         stageLabel: 'Walkthrough Scheduled → Estimate',
         elapsedValue: 4,
@@ -396,7 +409,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l9',
         leadNumber: 'LD-402',
         serviceRequest: 'Multi-Level Deck Construction',
-        serviceLocation: '345 Pinecrest Dr, Suite 50 Boulder, CO 80304',
+        serviceLocation: '345 Pinecrest Dr, Suite 50, Boulder, CO 80304',
         stageId: 'new-contacted',
         stageLabel: 'New → Contacted',
         elapsedValue: 5,
@@ -417,7 +430,7 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         id: 'l10',
         leadNumber: 'LD-501',
         serviceRequest: 'Multi-Unit HVAC & Boiler Seasonal Assessment',
-        serviceLocation: '1200 Grand Ave, Suite 310 Phoenix, AZ 85007',
+        serviceLocation: '1200 Grand Ave, Suite 310, Phoenix, AZ 85007',
         stageId: 'contacted-walkthrough-scheduled',
         stageLabel: 'Contacted → Walkthrough Scheduled',
         elapsedValue: 6,
@@ -454,27 +467,45 @@ export function formatLastCommunicationTimestamp(
   return `${Math.max(1, elapsedSeconds)}s ago`;
 }
 
+/** Format lead communication status string (e.g. 'Last communication: 6 Days ago') */
+export function formatLeadLastCommunication(
+  contactedAt?: string | Date | null,
+  createdAt?: string | Date | null
+): string {
+  const commStr = formatLastCommunicationTimestamp(contactedAt);
+  if (commStr) {
+    return `Last communication: ${commStr}`;
+  }
+  const createdStr = formatLastCommunicationTimestamp(createdAt);
+  if (createdStr) {
+    return `No communication recorded yet (Lead created ${createdStr})`;
+  }
+  return 'No communication recorded yet';
+}
+
 /** Helper to format address components into a clean single-line address */
-function formatAddressParts(
+export function formatAddressParts(
   line1?: string | null,
   line2?: string | null,
   city?: string | null,
   state?: string | null,
   zip?: string | null
 ): string | null {
-  const street = [line1?.trim(), line2?.trim()].filter(Boolean).join(', ');
+  const streetParts = [line1?.trim(), line2?.trim()].filter(Boolean);
+  const street = streetParts.join(', ');
   const stateZip = [state?.trim(), zip?.trim()].filter(Boolean).join(' ');
   const cityStateZip = [city?.trim(), stateZip].filter(Boolean).join(', ');
-  const full = [street, cityStateZip].filter(Boolean).join(' ');
+  const fullParts = [street, cityStateZip].filter(Boolean);
+  const full = fullParts.join(', ');
   return full.trim() || null;
 }
 
 /** Extract complete formatted service location string (street address, unit, city, state, zip) from lead data */
-export function formatLeadServiceLocation(rawLead: any): string {
-  if (!rawLead) return 'Service location not specified';
+export function formatLeadServiceLocation(rawLead: any, rawCustomer?: any): string {
+  if (!rawLead && !rawCustomer) return 'Service location not specified';
 
-  // 1. Check nested service_location relation with street address
-  const loc = rawLead.service_location;
+  // 1. Check nested service_location relation object with street address
+  const loc = rawLead?.service_location || rawLead?.serviceLocation;
   if (loc && typeof loc === 'object') {
     const fromLoc = formatAddressParts(
       loc.address_line1,
@@ -488,32 +519,62 @@ export function formatLeadServiceLocation(rawLead: any): string {
 
   // 2. Check lead address scalars with street address
   const fromScalars = formatAddressParts(
-    rawLead.service_address_line1,
-    rawLead.service_address_line2,
-    rawLead.service_city,
-    rawLead.service_state,
-    rawLead.service_zip
+    rawLead?.service_address_line1,
+    rawLead?.service_address_line2,
+    rawLead?.service_city,
+    rawLead?.service_state,
+    rawLead?.service_zip
   );
-  if (fromScalars && rawLead.service_address_line1) return fromScalars;
+  if (fromScalars && rawLead?.service_address_line1) return fromScalars;
 
-  // 3. Check customer's primary or first service location with street address
-  const custLocs = rawLead.customer?.service_locations;
+  // 3. Check customer service locations (from rawLead.customer or rawCustomer)
+  const cust = rawLead?.customer || rawCustomer;
+  const custLocs = cust?.service_locations || rawCustomer?.service_locations || rawLead?.customer_service_locations;
   if (Array.isArray(custLocs) && custLocs.length > 0) {
+    // 3a. Matching service_location_id if present
+    if (rawLead?.service_location_id) {
+      const match = custLocs.find((l: any) => l.id === rawLead.service_location_id);
+      if (match && match.address_line1) {
+        const fromMatch = formatAddressParts(
+          match.address_line1,
+          match.address_line2,
+          match.city,
+          match.state,
+          match.zip
+        );
+        if (fromMatch) return fromMatch;
+      }
+    }
+
+    // 3b. Primary service location with street address
     const primary = custLocs.find((l: any) => l.is_primary) || custLocs[0];
-    if (primary) {
-      const fromCustLoc = formatAddressParts(
+    if (primary && primary.address_line1) {
+      const fromPrimary = formatAddressParts(
         primary.address_line1,
         primary.address_line2,
         primary.city,
         primary.state,
         primary.zip
       );
-      if (fromCustLoc && primary.address_line1) return fromCustLoc;
+      if (fromPrimary) return fromPrimary;
+    }
+
+    // 3c. Any location with address_line1
+    for (const l of custLocs) {
+      if (l && l.address_line1) {
+        const fromAny = formatAddressParts(
+          l.address_line1,
+          l.address_line2,
+          l.city,
+          l.state,
+          l.zip
+        );
+        if (fromAny) return fromAny;
+      }
     }
   }
 
-  // 4. Check customer's billing address if street exists
-  const cust = rawLead.customer;
+  // 4. Check customer billing address if street exists
   if (cust && typeof cust === 'object') {
     const fromBilling = formatAddressParts(
       cust.billing_address_line1,
@@ -525,12 +586,19 @@ export function formatLeadServiceLocation(rawLead: any): string {
     if (fromBilling && cust.billing_address_line1) return fromBilling;
   }
 
-  // 5. If explicit serviceLocation string exists with complete details
-  if (typeof rawLead.serviceLocation === 'string' && rawLead.serviceLocation.trim()) {
-    return rawLead.serviceLocation.trim();
+  // 5. If explicit serviceLocation string exists with complete street details (contains street numbers)
+  if (typeof rawLead?.serviceLocation === 'string' && rawLead.serviceLocation.trim()) {
+    const trimmed = rawLead.serviceLocation.trim();
+    if (
+      trimmed !== 'Service location not specified' &&
+      trimmed !== 'No service location specified' &&
+      /\d+/.test(trimmed)
+    ) {
+      return trimmed;
+    }
   }
 
-  // 6. Partial fallback from relation / scalars / customer
+  // 6. Partial fallbacks if street address was not found anywhere
   if (loc && typeof loc === 'object') {
     const fromLoc = formatAddressParts(
       loc.address_line1,
@@ -559,7 +627,14 @@ export function formatLeadServiceLocation(rawLead: any): string {
     }
   }
 
-  if (typeof rawLead.service_location_name === 'string' && rawLead.service_location_name.trim()) {
+  if (typeof rawLead?.serviceLocation === 'string' && rawLead.serviceLocation.trim()) {
+    const trimmed = rawLead.serviceLocation.trim();
+    if (trimmed !== 'Service location not specified' && trimmed !== 'No service location specified') {
+      return trimmed;
+    }
+  }
+
+  if (typeof rawLead?.service_location_name === 'string' && rawLead.service_location_name.trim()) {
     return rawLead.service_location_name.trim();
   }
 
@@ -577,9 +652,20 @@ export function buildWatcherCustomersFromLive(
 
   const customerMap = new Map<string, WatcherCustomer>();
 
+  // Map of full customer records for enriched location lookup
+  const customersById = new Map<string, any>();
+  if (Array.isArray(apiCustomers)) {
+    for (const c of apiCustomers) {
+      if (c && c.id) {
+        customersById.set(c.id, c);
+      }
+    }
+  }
+
   if (Array.isArray(apiLeads) && apiLeads.length > 0) {
     for (const rawLead of apiLeads) {
       const custId = rawLead.customer?.id || rawLead.customer_id || `cust-${rawLead.id}`;
+      const matchedCustomer = customersById.get(custId) || rawLead.customer;
       const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
       const contactedTimestamp = rawLead.contacted_at || rawLead.contactedAt || null;
 
@@ -587,7 +673,14 @@ export function buildWatcherCustomersFromLive(
         id: rawLead.id,
         leadNumber: rawLead.lead_number || `LD-${String(rawLead.id).slice(-4)}`,
         serviceRequest: rawLead.service_request || 'General Service Request',
-        serviceLocation: formatLeadServiceLocation(rawLead),
+        serviceLocation: formatLeadServiceLocation(rawLead, matchedCustomer),
+        service_location_id: rawLead.service_location_id || null,
+        service_location: rawLead.service_location || matchedCustomer?.service_locations?.[0] || null,
+        service_address_line1: rawLead.service_address_line1 || null,
+        service_address_line2: rawLead.service_address_line2 || null,
+        service_city: rawLead.service_city || null,
+        service_state: rawLead.service_state || null,
+        service_zip: rawLead.service_zip || null,
         stageId: stageMetrics.stageId,
         stageLabel: stageMetrics.stageLabel,
         elapsedValue: stageMetrics.elapsedValue,
@@ -601,17 +694,30 @@ export function buildWatcherCustomersFromLive(
       };
 
       if (!customerMap.has(custId)) {
-        const cust = rawLead.customer || {};
+        const cust = matchedCustomer || rawLead.customer || {};
         customerMap.set(custId, {
           id: custId,
           name: customerDisplayName(cust, cust.company_name || 'Customer'),
           company: cust.company_name,
           email: cust.email,
           phone: cust.phone,
+          service_locations: cust.service_locations || [],
           leads: [watcherLead],
         });
       } else {
-        customerMap.get(custId)!.leads.push(watcherLead);
+        const existing = customerMap.get(custId)!;
+        existing.leads.push(watcherLead);
+        if (matchedCustomer) {
+          if (existing.name === 'Customer' || !existing.email || !existing.company) {
+            existing.name = customerDisplayName(matchedCustomer, matchedCustomer.company_name || existing.name);
+            existing.company = matchedCustomer.company_name || existing.company;
+            existing.email = matchedCustomer.email || existing.email;
+            existing.phone = matchedCustomer.phone || existing.phone;
+          }
+          if ((!existing.service_locations || existing.service_locations.length === 0) && matchedCustomer.service_locations) {
+            existing.service_locations = matchedCustomer.service_locations;
+          }
+        }
       }
     }
   }
@@ -625,6 +731,7 @@ export function buildWatcherCustomersFromLive(
           company: cust.company_name,
           email: cust.email,
           phone: cust.phone,
+          service_locations: cust.service_locations || [],
           leads: [],
         });
       } else {
@@ -634,6 +741,9 @@ export function buildWatcherCustomersFromLive(
           existing.company = cust.company_name || existing.company;
           existing.email = cust.email || existing.email;
           existing.phone = cust.phone || existing.phone;
+        }
+        if ((!existing.service_locations || existing.service_locations.length === 0) && cust.service_locations) {
+          existing.service_locations = cust.service_locations;
         }
       }
     }
@@ -934,18 +1044,30 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
               }
 
               const stageName = formatCurrentStageName(lead.stageLabel || lead.stageId);
+              const dynamicLocation = formatLeadServiceLocation(lead, customer);
+              const resolvedLoc =
+                dynamicLocation && dynamicLocation !== 'Service location not specified'
+                  ? dynamicLocation
+                  : (lead.serviceLocation || 'Service location not specified');
+              const lastCommMessage = formatLeadLastCommunication(lead.contactedAt, lead.createdAt);
+
               result.push({
                 id: notifId,
                 contactName: customer.name,
                 companyName: customer.company || customer.name,
                 inactiveDays: Math.floor(leadSecs / 86400),
-                message: `Lead ${lead.leadNumber} has been in "${stageName}" stage for ${lead.elapsedValue} ${lead.elapsedUnit}${lead.elapsedValue > 1 ? 's' : ''} (threshold: ${config?.duration || 0} ${config?.unit || 'Second'}s)`,
+                message: lastCommMessage,
                 timeAgo: timeAgoStr,
                 read: false,
                 contactId: customer.id,
                 leadId: lead.id,
+                leadNumber: lead.leadNumber,
                 leadStage: stageName,
                 serviceRequest: lead.serviceRequest,
+                serviceLocation: resolvedLoc,
+                contactedAt: lead.contactedAt || null,
+                createdAt: lead.createdAt || null,
+                lastCommunication: lastCommMessage,
                 isTriggered: true,
               });
             }

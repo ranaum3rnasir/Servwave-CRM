@@ -119,8 +119,8 @@ const leadListSelect = {
       email: true,
       ad_source: true,
       service_locations: {
-        where: { is_primary: true },
-        take: 1,
+        orderBy: { is_primary: 'desc' as const },
+        take: 5,
         select: {
           id: true,
           name: true,

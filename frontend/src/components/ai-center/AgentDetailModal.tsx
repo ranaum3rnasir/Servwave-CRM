@@ -119,8 +119,8 @@ function SpiderWatcherConfig({
       leads: (c.leads || []).map((l) => {
         const m = resolveLeadStageAndElapsedTime(l);
         const resolvedLocation =
-          formatLeadServiceLocation(l) !== 'Service location not specified'
-            ? formatLeadServiceLocation(l)
+          formatLeadServiceLocation(l, c) !== 'Service location not specified'
+            ? formatLeadServiceLocation(l, c)
             : (l.serviceLocation || 'Service location not specified');
 
         return {
