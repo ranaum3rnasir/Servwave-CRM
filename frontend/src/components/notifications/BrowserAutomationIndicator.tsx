@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useSpiderWatcherStore } from '@/stores/spiderWatcherStore';
+import { useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
 
 interface BrowserAutomationIndicatorProps {
@@ -18,8 +19,10 @@ interface BrowserAutomationIndicatorProps {
 export function BrowserAutomationIndicator({ className }: BrowserAutomationIndicatorProps) {
   const [tick, setTick] = useState(0);
 
+  const currentUser = useAuthStore((s) => s.user);
   // Subscribe to reactive store slices so changes immediately re-evaluate alerts
   const redFrameEnabled = useSpiderWatcherStore((s) => s.notifications.redFrame ?? true);
+  const assignments = useSpiderWatcherStore((s) => s.assignments);
   const customers = useSpiderWatcherStore((s) => s.customers);
   const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
   const leadStages = useSpiderWatcherStore((s) => s.leadStages);
@@ -35,8 +38,8 @@ export function BrowserAutomationIndicator({ className }: BrowserAutomationIndic
   }, []);
 
   const activeNotifs = useMemo(() => {
-    return redFrameEnabled ? getComputedNotifications() : [];
-  }, [redFrameEnabled, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
+    return redFrameEnabled ? getComputedNotifications(currentUser) : [];
+  }, [redFrameEnabled, currentUser, assignments, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
 
   const unreadCount = activeNotifs.filter((n) => !n.read).length;
 

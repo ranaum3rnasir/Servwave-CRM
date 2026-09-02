@@ -352,6 +352,34 @@ export function resolveRecipients(ctx: ResolveContext): RecipientSpec[] {
       break;
     }
 
+    // ── SPIDER AGENT WATCHER ───────────────────────────────────────────────────
+    case 'spider.lead_inactive':
+    case 'spider.alert': {
+      // The Assignment section controls who receives Spider alerts:
+      // 1. If Admin roles are selected, alerts go to those roles
+      // 2. If Owner is selected, alerts go to the lead's owner
+      // 3. If both Admin roles and Owner are selected, alerts go to both (union & deduped)
+      const selectedAdminRoles = strArr('admin_roles');
+      for (const roleKey of selectedAdminRoles) {
+        if (roleKey === 'ADMIN') raw.push(...forRole(ADMIN, INTERRUPT));
+        else if (roleKey === 'SALES' && roleHolders.SALES) raw.push(...forRole(roleHolders.SALES, INTERRUPT));
+        else if (roleKey === 'DISPATCHER') raw.push(...forRole(DISPATCHER, INTERRUPT));
+        else if (roleKey === 'TECHNICIAN') raw.push(...forRole(TECHNICIAN, INTERRUPT));
+      }
+
+      const explicitUsers = strArr('user_ids');
+      explicitUsers.forEach(id => raw.push(spec(id, INTERRUPT)));
+
+      const includeOwner = entity['owner'] === true || entity['notify_owner'] === true;
+      if (includeOwner) {
+        const leadOwner = str('lead_owner_id') || str('commission_owner_id') || str('assigned_to') || str('assigned_to_user_id');
+        if (leadOwner) {
+          raw.push(spec(leadOwner, INTERRUPT));
+        }
+      }
+      break;
+    }
+
     // ── BILLING ─────────────────────────────────────────────────────────────────
     case 'billing.payment_received': {
       // Admin FEED + Dispatcher FEED + customer_owner FEED

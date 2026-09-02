@@ -6,12 +6,8 @@ import { Heading } from '@/components/ui/heading';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
-import {
-  useSpiderWatcherStore,
-  formatCurrentStageName,
-  formatLeadLastCommunication,
-  type InAppNotification,
-} from '@/stores/spiderWatcherStore';
+import { useSpiderWatcherStore, formatCurrentStageName, formatLeadLastCommunication, type InAppNotification } from '@/stores/spiderWatcherStore';
+import { useAuthStore } from '@/stores/auth.store';
 
 export function SpiderNotificationPopup() {
   const navigate = useNavigate();
@@ -19,7 +15,9 @@ export function SpiderNotificationPopup() {
   const panelRef = useRef<HTMLDivElement>(null);
   const [tick, setTick] = useState(0);
 
+  const currentUser = useAuthStore((s) => s.user);
   const inAppEnabled = useSpiderWatcherStore((s) => s.notifications.inApp);
+  const assignments = useSpiderWatcherStore((s) => s.assignments);
   const customers = useSpiderWatcherStore((s) => s.customers);
   const selectedLeadIds = useSpiderWatcherStore((s) => s.selectedLeadIds);
   const leadStages = useSpiderWatcherStore((s) => s.leadStages);
@@ -38,8 +36,8 @@ export function SpiderNotificationPopup() {
   }, []);
 
   const activeNotifications = useMemo(() => {
-    return inAppEnabled ? getComputedNotifications() : [];
-  }, [inAppEnabled, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
+    return inAppEnabled ? getComputedNotifications(currentUser) : [];
+  }, [inAppEnabled, currentUser, assignments, customers, selectedLeadIds, leadStages, readNotificationIds, getComputedNotifications, tick]);
 
   const unreadCount = inAppEnabled
     ? activeNotifications.filter((n) => !n.read).length

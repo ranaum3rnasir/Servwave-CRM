@@ -18,6 +18,10 @@ import {
   Minus,
   Square,
   MapPin,
+  UserCheck,
+  Shield,
+  Briefcase,
+  User,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
@@ -41,6 +45,8 @@ import type { AIAgent } from '@/lib/ai-center/agents';
 import { comingSoonPillCls } from './comingSoonPill';
 import { TranscriberModal } from '@/components/transcriber/TranscriberModal';
 import { useAiCenterStore } from '@/stores/aiCenterStore';
+import { useRoles } from '@/lib/api/roles';
+import { useUsers } from '@/lib/api/users';
 import {
   useSpiderWatcherStore,
   type TimeUnit,
@@ -48,6 +54,13 @@ import {
   type WatcherLead,
   type SpiderNotificationsConfig,
   type LeadStageConfig,
+  type SpiderAssignmentsConfig,
+  type SystemRoleItem,
+  type AssignmentUserItem,
+  DEFAULT_SYSTEM_ROLES,
+  DEFAULT_ASSIGNMENT_USERS,
+  DEFAULT_ASSIGNMENTS_CONFIG,
+  normalizeAssignments,
   DEFAULT_WATCHER_CUSTOMERS,
   isLeadOverdue,
   resolveLeadStageAndElapsedTime,
@@ -68,6 +81,8 @@ const TIME_UNITS: TimeUnit[] = ['Second', 'Minute', 'Hour', 'Day'];
 interface SpiderWatcherConfigProps {
   notifications: SpiderNotificationsConfig;
   setNotifications: React.Dispatch<React.SetStateAction<SpiderNotificationsConfig>>;
+  assignments: SpiderAssignmentsConfig;
+  setAssignments: React.Dispatch<React.SetStateAction<SpiderAssignmentsConfig>>;
   leadStages: LeadStageConfig[];
   updateLeadStage: (id: string, updates: Partial<LeadStageConfig>) => void;
   selectedCustomerIds: string[];
@@ -81,6 +96,8 @@ interface SpiderWatcherConfigProps {
   selectAllCustomers: () => void;
   deselectAllCustomers: () => void;
   storeCustomers: WatcherCustomer[];
+  availableRoles: SystemRoleItem[];
+  availableUsers: AssignmentUserItem[];
   onCloseModal?: () => void;
 }
 
@@ -88,6 +105,8 @@ interface SpiderWatcherConfigProps {
 function SpiderWatcherConfig({
   notifications,
   setNotifications,
+  assignments,
+  setAssignments,
   leadStages,
   updateLeadStage,
   selectedCustomerIds,
@@ -97,12 +116,126 @@ function SpiderWatcherConfig({
   selectAllCustomers,
   deselectAllCustomers,
   storeCustomers,
+  availableRoles,
+  availableUsers,
   onCloseModal,
 }: SpiderWatcherConfigProps) {
   const navigate = useNavigate();
   const setAiCenterOpen = useAiCenterStore((s) => s.setOpen);
   const [search, setSearch] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
+  const [expandedSections, setExpandedSections] = useState<{ adminRoles: boolean; users: boolean }>({
+    adminRoles: false,
+    users: false,
+  });
+
+  const allRoles = availableRoles && availableRoles.length > 0 ? availableRoles : DEFAULT_SYSTEM_ROLES;
+  const allUsers = availableUsers && availableUsers.length > 0 ? availableUsers : DEFAULT_ASSIGNMENT_USERS;
+
+  // Dynamically filter users by currently selected Admin roles
+  const visibleUsers = useMemo(() => {
+    return allUsers.filter((u) => assignments.adminRoles.includes(u.role));
+  }, [allUsers, assignments.adminRoles]);
+
+  // Admin role selection helpers
+  const allAdminRolesSelected =
+    allRoles.length > 0 && allRoles.every((r) => assignments.adminRoles.includes(r.id));
+  const someAdminRolesSelected =
+    assignments.adminRoles.length > 0 && !allAdminRolesSelected;
+
+  const toggleAllAdminRoles = () => {
+    const allRoleIds = allRoles.map((r) => r.id);
+    const isAllSelected =
+      allRoleIds.length > 0 && allRoleIds.every((id) => assignments.adminRoles.includes(id));
+    const newAdminRoles = isAllSelected ? [] : allRoleIds;
+    // When selecting all Admin roles, automatically select all matching users by default
+    const matchingUserIds = allUsers
+      .filter((u) => newAdminRoles.includes(u.role))
+      .map((u) => u.id);
+
+    setAssignments((prev) => ({
+      ...prev,
+      adminRoles: newAdminRoles,
+      users: matchingUserIds,
+    }));
+    if (!isAllSelected) {
+      setExpandedSections((prev) => ({ ...prev, adminRoles: true }));
+    }
+  };
+
+  const toggleAdminRole = (roleId: string) => {
+    setAssignments((prev) => {
+      const isSelected = prev.adminRoles.includes(roleId);
+      const newRoles = isSelected
+        ? prev.adminRoles.filter((id) => id !== roleId)
+        : [...prev.adminRoles, roleId];
+
+      const usersForThisRole = allUsers.filter((u) => u.role === roleId).map((u) => u.id);
+
+      let newUsers: string[];
+      if (isSelected) {
+        // If unchecking this role, remove its users from selected users
+        newUsers = prev.users.filter((id) => !usersForThisRole.includes(id));
+      } else {
+        // If selecting this role, automatically select all users belonging to this role by default
+        newUsers = Array.from(new Set([...prev.users, ...usersForThisRole]));
+      }
+
+      return {
+        ...prev,
+        adminRoles: newRoles,
+        users: newUsers,
+      };
+    });
+  };
+
+  // Owner toggle helper (single checkbox row)
+  const toggleOwner = () => {
+    setAssignments((prev) => ({
+      ...prev,
+      owner: !prev.owner,
+    }));
+  };
+
+  // User selection helpers
+  const selectedVisibleUserCount = assignments.users.filter((id) =>
+    visibleUsers.some((u) => u.id === id)
+  ).length;
+  const allVisibleUsersSelected =
+    visibleUsers.length > 0 && selectedVisibleUserCount === visibleUsers.length;
+  const someVisibleUsersSelected =
+    selectedVisibleUserCount > 0 && selectedVisibleUserCount < visibleUsers.length;
+
+  const toggleAllUsers = () => {
+    if (visibleUsers.length === 0) return;
+    const visibleIds = visibleUsers.map((u) => u.id);
+    const allSelected = visibleIds.every((id) => assignments.users.includes(id));
+    setAssignments((prev) => {
+      const newUsers = allSelected
+        ? prev.users.filter((id) => !visibleIds.includes(id))
+        : Array.from(new Set([...prev.users, ...visibleIds]));
+      return {
+        ...prev,
+        users: newUsers,
+      };
+    });
+    if (!allSelected) {
+      setExpandedSections((prev) => ({ ...prev, users: true }));
+    }
+  };
+
+  const toggleUser = (userId: string) => {
+    setAssignments((prev) => {
+      const isSelected = prev.users.includes(userId);
+      const newUsers = isSelected
+        ? prev.users.filter((id) => id !== userId)
+        : [...prev.users, userId];
+      return {
+        ...prev,
+        users: newUsers,
+      };
+    });
+  };
 
   const handleLeadClick = (leadId: string) => {
     if (onCloseModal) {
@@ -148,15 +281,16 @@ function SpiderWatcherConfig({
         (c.company && c.company.toLowerCase().includes(q)) ||
         (c.email && c.email.toLowerCase().includes(q));
 
-      const matchLeads = c.leads.some(
-        (l) =>
+      const matchLead = c.leads.some((l) => {
+        const loc = l.serviceLocation || '';
+        return (
           l.leadNumber.toLowerCase().includes(q) ||
-          (l.serviceLocation && l.serviceLocation.toLowerCase().includes(q)) ||
           (l.serviceRequest && l.serviceRequest.toLowerCase().includes(q)) ||
-          l.stageLabel.toLowerCase().includes(q)
-      );
+          loc.toLowerCase().includes(q)
+        );
+      });
 
-      return matchCustomer || matchLeads;
+      return matchCustomer || matchLead;
     });
   }, [customersList, search]);
 
@@ -182,7 +316,7 @@ function SpiderWatcherConfig({
 
   return (
     <div className="space-y-4">
-      {/* Top Section — Notifications (Left: 4 cols) & Distance / Lead Stages (Right: 8 cols) */}
+      {/* Top Section — Notifications (Left: 4 cols) & Assignment (Right: 8 cols) */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Left Section — Notifications */}
         <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card lg:col-span-4">
@@ -267,125 +401,416 @@ function SpiderWatcherConfig({
           </div>
         </div>
 
-        {/* Right Section — Distance (Lead Stages & Parallel Time Periods with Expanded Width) */}
+        {/* Right Section — Assignment (Admin role, Owner, User) */}
         <div className="flex flex-col rounded-card border border-border bg-surface-light p-4 shadow-card lg:col-span-8">
           <div className="mb-3 border-b border-border/60 pb-2 flex items-center justify-between">
             <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-ai-600 shrink-0" />
-              Distance
+              <UserCheck className="h-4 w-4 text-ai-600 shrink-0" />
+              Assignment
             </Heading>
             <span className="text-[11px] text-text-secondary">
-              Set threshold per stage to trigger watcher leads
+              Assign watcher alerts to specific roles and team members
             </span>
           </div>
 
-          {/* Lead Stages rows — spacious and fully visible without cutting off long names */}
           <div className="flex flex-col justify-between flex-1 space-y-2">
             <div className="space-y-2">
-              {leadStages.map((stage) => (
-                <div
-                  key={stage.id}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-surface-light p-2 transition-colors hover:border-border"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="h-2 w-2 rounded-full bg-ai-500 shrink-0" />
-                    <span className="text-xs font-semibold text-text-primary truncate">
-                      {stage.label}
-                    </span>
+              {/* 1. Admin role Section (Roles from Settings > Roles & Permissions) */}
+              <div className="rounded-lg border border-border/60 bg-surface-light transition-colors hover:border-border overflow-hidden">
+                <div className="flex items-center justify-between p-2.5 gap-2 select-none">
+                  <div
+                    className="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1"
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest('button[role="checkbox"]')) return;
+                      toggleAllAdminRoles();
+                    }}
+                  >
+                    <Checkbox
+                      checked={
+                        someAdminRolesSelected ? 'indeterminate' : allAdminRolesSelected
+                      }
+                      onCheckedChange={toggleAllAdminRoles}
+                      aria-label="Select all Admin roles"
+                    />
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
+                      <span className="text-xs font-bold text-text-primary">
+                        Admin role
+                      </span>
+                      <span className="text-[11px] text-text-soft hidden sm:inline truncate">
+                        (Settings &gt; Roles &amp; Permissions)
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Parallel Time Period Stepper & Unit Inputs */}
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Decrement Button */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className={cn(
+                        'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
+                        assignments.adminRoles.length > 0
+                          ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                          : 'bg-surface-light text-text-soft border border-border'
+                      )}
+                    >
+                      {assignments.adminRoles.length}/{allRoles.length} selected
+                    </span>
+
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="ghost"
                       size="icon"
-                      onClick={() => {
-                        const currentVal =
-                          stage.duration && stage.duration >= 1 ? stage.duration : 0;
-                        const nextVal = currentVal - 1;
-                        updateLeadStage(stage.id, {
-                          duration: nextVal >= 1 ? nextVal : undefined,
-                        });
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedSections((prev) => ({
+                          ...prev,
+                          adminRoles: !prev.adminRoles,
+                        }));
                       }}
-                      disabled={!stage.duration || stage.duration < 1}
-                      className="h-7 w-7 disabled:opacity-40"
-                      aria-label={`Decrement time period for ${stage.label}`}
+                      className="h-6 w-6 text-text-soft hover:text-text-primary"
+                      aria-label="Toggle Admin role options"
+                      aria-expanded={expandedSections.adminRoles}
                     >
-                      <Minus className="h-3 w-3" />
+                      <ChevronDown
+                        className={cn(
+                          'h-3.5 w-3.5 transition-transform duration-200',
+                          expandedSections.adminRoles ? 'rotate-180' : ''
+                        )}
+                      />
                     </Button>
-
-                    {/* Numeric Input */}
-                    <input
-                      type="number"
-                      min="1"
-                      value={stage.duration && stage.duration >= 1 ? stage.duration : ''}
-                      onChange={(e) => {
-                        const raw = e.target.value.trim();
-                        if (raw === '') {
-                          updateLeadStage(stage.id, { duration: undefined });
-                          return;
-                        }
-                        const val = parseInt(raw, 10);
-                        if (!isNaN(val) && val >= 1) {
-                          updateLeadStage(stage.id, { duration: val });
-                        } else {
-                          updateLeadStage(stage.id, { duration: undefined });
-                        }
-                      }}
-                      className="w-12 h-7 rounded-md border border-border bg-surface-light px-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
-                      placeholder=""
-                      aria-label={`Time period for ${stage.label}`}
-                    />
-
-                    {/* Increment Button */}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      onClick={() => {
-                        const currentVal =
-                          stage.duration && stage.duration >= 1 ? stage.duration : 0;
-                        updateLeadStage(stage.id, { duration: currentVal + 1 });
-                      }}
-                      className="h-7 w-7"
-                      aria-label={`Increment time period for ${stage.label}`}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </Button>
-
-                    {/* Unit Select */}
-                    <Select
-                      value={stage.unit}
-                      onValueChange={(val) =>
-                        updateLeadStage(stage.id, { unit: val as TimeUnit })
-                      }
-                    >
-                      <SelectTrigger
-                        className="w-24 h-7 px-2 py-0.5"
-                        aria-label={`Time unit for ${stage.label}`}
-                      >
-                        <SelectValue placeholder={stage.unit} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {TIME_UNITS.map((unit) => (
-                          <SelectItem key={unit} value={unit}>
-                            {unit}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                   </div>
                 </div>
-              ))}
+
+                {/* Nested Roles List */}
+                {expandedSections.adminRoles && (
+                  <div className="border-t border-border/40 bg-background-light/50 px-3 py-2 space-y-1.5 animate-in slide-in-from-top-1 duration-150">
+                    {allRoles.map((role) => {
+                      const isChecked = assignments.adminRoles.includes(role.id);
+                      return (
+                        <div
+                          key={role.id}
+                          onClick={(e) => {
+                            if ((e.target as HTMLElement).closest('button[role="checkbox"]')) return;
+                            toggleAdminRole(role.id);
+                          }}
+                          className={cn(
+                            'flex items-center justify-between gap-2.5 rounded-md p-1.5 pl-6 transition-colors cursor-pointer',
+                            isChecked
+                              ? 'bg-ai-50/40 hover:bg-ai-50/70'
+                              : 'hover:bg-background-light'
+                          )}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <Checkbox
+                              checked={isChecked}
+                              onCheckedChange={() => toggleAdminRole(role.id)}
+                              aria-label={role.label}
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-text-primary truncate">
+                                {role.label}
+                              </p>
+                              {role.description && (
+                                <p className="text-[10px] text-text-soft truncate">
+                                  {role.description}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <span className="rounded bg-surface-light border border-border px-1.5 py-0.5 text-[9px] font-mono text-text-secondary shrink-0">
+                            {role.id}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* 2. User Section (Dynamically filtered by selected Admin roles) */}
+              <div className="rounded-lg border border-border/60 bg-surface-light transition-colors hover:border-border overflow-hidden">
+                <div className="flex items-center justify-between p-2.5 gap-2 select-none">
+                  <div
+                    className="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1"
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest('button[role="checkbox"]')) return;
+                      toggleAllUsers();
+                    }}
+                  >
+                    <Checkbox
+                      checked={
+                        someVisibleUsersSelected
+                          ? 'indeterminate'
+                          : allVisibleUsersSelected
+                      }
+                      onCheckedChange={toggleAllUsers}
+                      disabled={visibleUsers.length === 0}
+                      aria-label="Select all matching users"
+                    />
+                    <div className="flex items-center gap-2 min-w-0">
+                      <User className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                      <span className="text-xs font-bold text-text-primary">
+                        User
+                      </span>
+                      <span className="text-[11px] text-text-soft hidden sm:inline truncate">
+                        ({visibleUsers.length} team member{visibleUsers.length === 1 ? '' : 's'} matching selected Admin roles)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className={cn(
+                        'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
+                        selectedVisibleUserCount > 0
+                          ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                          : 'bg-surface-light text-text-soft border border-border'
+                      )}
+                    >
+                      {selectedVisibleUserCount}/{visibleUsers.length} selected
+                    </span>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedSections((prev) => ({
+                          ...prev,
+                          users: !prev.users,
+                        }));
+                      }}
+                      className="h-6 w-6 text-text-soft hover:text-text-primary"
+                      aria-label="Toggle User options"
+                      aria-expanded={expandedSections.users}
+                    >
+                      <ChevronDown
+                        className={cn(
+                          'h-3.5 w-3.5 transition-transform duration-200',
+                          expandedSections.users ? 'rotate-180' : ''
+                        )}
+                      />
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Nested Users List */}
+                {expandedSections.users && (
+                  <div className="border-t border-border/40 bg-background-light/50 px-3 py-2 space-y-1.5 animate-in slide-in-from-top-1 duration-150 max-h-56 overflow-y-auto">
+                    {visibleUsers.length === 0 ? (
+                      <div className="py-4 text-center text-xs text-text-soft">
+                        No users match the selected Admin roles. Select roles above to show team members.
+                      </div>
+                    ) : (
+                      visibleUsers.map((user) => {
+                        const isChecked = assignments.users.includes(user.id);
+                        return (
+                          <div
+                            key={user.id}
+                            onClick={(e) => {
+                              if ((e.target as HTMLElement).closest('button[role="checkbox"]')) return;
+                              toggleUser(user.id);
+                            }}
+                            className={cn(
+                              'flex items-center justify-between gap-2.5 rounded-md p-1.5 pl-6 transition-colors cursor-pointer',
+                              isChecked
+                                ? 'bg-ai-50/40 hover:bg-ai-50/70'
+                                : 'hover:bg-background-light'
+                            )}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <Checkbox
+                                checked={isChecked}
+                                onCheckedChange={() => toggleUser(user.id)}
+                                aria-label={user.name}
+                              />
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-text-primary truncate">
+                                  {user.name}
+                                </p>
+                                {user.email && (
+                                  <p className="text-[10px] text-text-soft truncate">
+                                    {user.email}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                            <span className="rounded bg-surface-light border border-border px-1.5 py-0.5 text-[9px] font-semibold text-ai-700 shrink-0">
+                              {user.roleLabel || user.role}
+                            </span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* 3. Owner Section (Direct single toggle - placed below User) */}
+              <div
+                className="rounded-lg border border-border/60 bg-surface-light transition-colors hover:border-border p-2.5 flex items-center justify-between gap-2 cursor-pointer select-none"
+                onClick={(e) => {
+                  if ((e.target as HTMLElement).closest('button[role="checkbox"]')) return;
+                  toggleOwner();
+                }}
+              >
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <Checkbox
+                    checked={assignments.owner}
+                    onCheckedChange={toggleOwner}
+                    aria-label="Notify Lead Owner"
+                  />
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Briefcase className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                    <span className="text-xs font-bold text-text-primary">
+                      Owner
+                    </span>
+                    <span className="text-[11px] text-text-soft hidden sm:inline truncate">
+                      (Directly notify the assigned lead &amp; account owner)
+                    </span>
+                  </div>
+                </div>
+
+                <span
+                  className={cn(
+                    'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
+                    assignments.owner
+                      ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                      : 'bg-surface-light text-text-soft border border-border'
+                  )}
+                >
+                  {assignments.owner ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
             </div>
 
             <div className="pt-2 border-t border-border/40">
               <p className="text-[11px] text-text-soft leading-tight">
-                Spider watches for leads remaining in each stage longer than the configured period.
+                Alerts will notify all active team members matching the selected roles and users.
               </p>
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Middle Section — Distance (Lead Stages & Parallel Time Periods) */}
+      <div className="rounded-card border border-border bg-surface-light p-4 shadow-card">
+        <div className="mb-3 border-b border-border/60 pb-2 flex items-center justify-between">
+          <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-ai-600 shrink-0" />
+            Distance
+          </Heading>
+          <span className="text-[11px] text-text-secondary">
+            Set threshold per stage to trigger watcher leads
+          </span>
+        </div>
+
+        {/* Lead Stages rows — spacious and fully visible without cutting off long names */}
+        <div className="flex flex-col justify-between flex-1 space-y-2">
+          <div className="space-y-2">
+            {leadStages.map((stage) => (
+              <div
+                key={stage.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-surface-light p-2 transition-colors hover:border-border"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="h-2 w-2 rounded-full bg-ai-500 shrink-0" />
+                  <span className="text-xs font-semibold text-text-primary truncate">
+                    {stage.label}
+                  </span>
+                </div>
+
+                {/* Parallel Time Period Stepper & Unit Inputs */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {/* Decrement Button */}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => {
+                      const currentVal =
+                        stage.duration && stage.duration >= 1 ? stage.duration : 0;
+                      const nextVal = currentVal - 1;
+                      updateLeadStage(stage.id, {
+                        duration: nextVal >= 1 ? nextVal : undefined,
+                      });
+                    }}
+                    disabled={!stage.duration || stage.duration < 1}
+                    className="h-7 w-7 disabled:opacity-40"
+                    aria-label={`Decrement time period for ${stage.label}`}
+                  >
+                    <Minus className="h-3 w-3" />
+                  </Button>
+
+                  {/* Numeric Input */}
+                  <input
+                    type="number"
+                    min="1"
+                    value={stage.duration && stage.duration >= 1 ? stage.duration : ''}
+                    onChange={(e) => {
+                      const raw = e.target.value.trim();
+                      if (raw === '') {
+                        updateLeadStage(stage.id, { duration: undefined });
+                        return;
+                      }
+                      const val = parseInt(raw, 10);
+                      if (!isNaN(val) && val >= 1) {
+                        updateLeadStage(stage.id, { duration: val });
+                      } else {
+                        updateLeadStage(stage.id, { duration: undefined });
+                      }
+                    }}
+                    className="w-12 h-7 rounded-md border border-border bg-surface-light px-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
+                    placeholder=""
+                    aria-label={`Time period for ${stage.label}`}
+                  />
+
+                  {/* Increment Button */}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => {
+                      const currentVal =
+                        stage.duration && stage.duration >= 1 ? stage.duration : 0;
+                      updateLeadStage(stage.id, { duration: currentVal + 1 });
+                    }}
+                    className="h-7 w-7"
+                    aria-label={`Increment time period for ${stage.label}`}
+                  >
+                    <Plus className="h-3 w-3" />
+                  </Button>
+
+                  {/* Unit Select */}
+                  <Select
+                    value={stage.unit}
+                    onValueChange={(val) =>
+                      updateLeadStage(stage.id, { unit: val as TimeUnit })
+                    }
+                  >
+                    <SelectTrigger
+                      className="w-24 h-7 px-2 py-0.5"
+                      aria-label={`Time unit for ${stage.label}`}
+                    >
+                      <SelectValue placeholder={stage.unit} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {TIME_UNITS.map((unit) => (
+                        <SelectItem key={unit} value={unit}>
+                          {unit}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="pt-2 border-t border-border/40">
+            <p className="text-[11px] text-text-soft leading-tight">
+              Spider watches for leads remaining in each stage longer than the configured period.
+            </p>
           </div>
         </div>
       </div>
@@ -708,8 +1133,45 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
   const { toast } = useToast();
   const [isSaved, setIsSaved] = useState(false);
 
+  // Fetch live system roles from /api/roles
+  const { data: apiRoles } = useRoles();
+
+  // Fetch live users from /api/users
+  const { data: apiUsers } = useUsers();
+
+  const availableRoles: SystemRoleItem[] = useMemo(() => {
+    if (Array.isArray(apiRoles) && apiRoles.length > 0) {
+      return apiRoles.map((r) => ({
+        id: r.role,
+        label: r.label,
+        description:
+          r.description ||
+          (DEFAULT_SYSTEM_ROLES.find((d) => d.id === r.role)?.description ?? `${r.label} role`),
+      }));
+    }
+    return DEFAULT_SYSTEM_ROLES;
+  }, [apiRoles]);
+
+  const availableUsers: AssignmentUserItem[] = useMemo(() => {
+    if (Array.isArray(apiUsers) && apiUsers.length > 0) {
+      return apiUsers.map((u) => {
+        const roleMatch = availableRoles.find((r) => r.id === u.role);
+        return {
+          id: u.id,
+          name: `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email,
+          email: u.email,
+          role: u.role,
+          roleLabel: roleMatch?.label || u.role,
+          avatar_url: u.avatar_url,
+        };
+      });
+    }
+    return DEFAULT_ASSIGNMENT_USERS;
+  }, [apiUsers, availableRoles]);
+
   // Read store state for initial draft
   const storeNotifications = useSpiderWatcherStore((s) => s.notifications);
+  const storeAssignments = useSpiderWatcherStore((s) => s.assignments);
   const storeLeadStages = useSpiderWatcherStore((s) => s.leadStages);
   const storeCustomers = useSpiderWatcherStore((s) => s.customers);
   const storeSelectedCustomerIds = useSpiderWatcherStore((s) => s.selectedCustomerIds);
@@ -718,6 +1180,7 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
 
   // Local draft state for Spider Watcher settings
   const [draftNotifications, setDraftNotifications] = useState<SpiderNotificationsConfig>(storeNotifications);
+  const [draftAssignments, setDraftAssignments] = useState<SpiderAssignmentsConfig>(normalizeAssignments(storeAssignments));
   const [draftLeadStages, setDraftLeadStages] = useState<LeadStageConfig[]>(storeLeadStages);
   const [draftSelectedCustomerIds, setDraftSelectedCustomerIds] = useState<string[]>(storeSelectedCustomerIds);
   const [draftSelectedLeadIds, setDraftSelectedLeadIds] = useState<string[]>(storeSelectedLeadIds);
@@ -769,6 +1232,7 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
     if (agent && isSpider) {
       const storeState = useSpiderWatcherStore.getState();
       setDraftNotifications({ ...storeState.notifications });
+      setDraftAssignments(normalizeAssignments(storeState.assignments));
       setDraftLeadStages(storeState.leadStages.map((s) => ({ ...s })));
       setDraftSelectedCustomerIds([...storeState.selectedCustomerIds]);
       setDraftSelectedLeadIds([...storeState.selectedLeadIds]);
@@ -863,6 +1327,7 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
   const handleSave = () => {
     useSpiderWatcherStore.setState({
       notifications: draftNotifications,
+      assignments: draftAssignments,
       leadStages: draftLeadStages,
       selectedCustomerIds: draftSelectedCustomerIds,
       selectedLeadIds: draftSelectedLeadIds,
@@ -877,7 +1342,7 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
     toast({
       title: 'Spider Agent Settings Saved',
       description:
-        'Notification preferences, distance thresholds, and contact watchers have been successfully applied.',
+        'Notification preferences, assignments, distance thresholds, and contact watchers have been successfully applied.',
       duration: 3000,
     });
     setTimeout(() => setIsSaved(false), 2000);
@@ -940,6 +1405,8 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
                   <SpiderWatcherConfig
                     notifications={draftNotifications}
                     setNotifications={setDraftNotifications}
+                    assignments={draftAssignments}
+                    setAssignments={setDraftAssignments}
                     leadStages={draftLeadStages}
                     updateLeadStage={updateDraftLeadStage}
                     selectedCustomerIds={draftSelectedCustomerIds}
@@ -949,6 +1416,8 @@ export function AgentDetailModal({ agent, onOpenChange, onBook }: AgentDetailMod
                     selectAllCustomers={selectAllCustomers}
                     deselectAllCustomers={deselectAllCustomers}
                     storeCustomers={storeCustomers}
+                    availableRoles={availableRoles}
+                    availableUsers={availableUsers}
                     onCloseModal={() => onOpenChange(false)}
                   />
                 ) : (

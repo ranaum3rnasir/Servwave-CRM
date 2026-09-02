@@ -50,6 +50,27 @@ export interface WatcherCustomer {
   leads: WatcherLead[];
 }
 
+export interface SystemRoleItem {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface AssignmentUserItem {
+  id: string;
+  name: string;
+  email?: string;
+  role: string;
+  roleLabel?: string;
+  avatar_url?: string | null;
+}
+
+export interface SpiderAssignmentsConfig {
+  adminRoles: string[];
+  owner: boolean;
+  users: string[];
+}
+
 export interface SpiderNotificationsConfig {
   email: boolean;
   sms: boolean;
@@ -262,6 +283,192 @@ export const DEFAULT_LEAD_STAGES: LeadStageConfig[] = [
     unit: 'Second',
   },
 ];
+
+// Default System Roles from Settings > Roles & Permissions
+export const DEFAULT_SYSTEM_ROLES: SystemRoleItem[] = [
+  {
+    id: 'ADMIN',
+    label: 'Administrator (Owner)',
+    description: 'Full access to system and alert management',
+  },
+  {
+    id: 'SALES',
+    label: 'Sales',
+    description: 'Lead pipelines, estimates, and customer communications',
+  },
+  {
+    id: 'DISPATCHER',
+    label: 'Dispatcher',
+    description: 'Scheduling, job dispatch, and technician routing',
+  },
+  {
+    id: 'TECHNICIAN',
+    label: 'Technician',
+    description: 'Field service execution and job completion',
+  },
+];
+
+// Fallback users for local tests and initial hydration
+export const DEFAULT_ASSIGNMENT_USERS: AssignmentUserItem[] = [
+  {
+    id: 'u-admin-1',
+    name: 'Alex Morgan',
+    email: 'alex@example.com',
+    role: 'ADMIN',
+    roleLabel: 'Administrator (Owner)',
+  },
+  {
+    id: 'u-admin-2',
+    name: 'Sarah Connor',
+    email: 'sarah@example.com',
+    role: 'ADMIN',
+    roleLabel: 'Administrator (Owner)',
+  },
+  {
+    id: 'u-sales-1',
+    name: 'Michael Scott',
+    email: 'michael@example.com',
+    role: 'SALES',
+    roleLabel: 'Sales',
+  },
+  {
+    id: 'u-sales-2',
+    name: 'Jim Halpert',
+    email: 'jim@example.com',
+    role: 'SALES',
+    roleLabel: 'Sales',
+  },
+  {
+    id: 'u-disp-1',
+    name: 'Pam Beesly',
+    email: 'pam@example.com',
+    role: 'DISPATCHER',
+    roleLabel: 'Dispatcher',
+  },
+  {
+    id: 'u-tech-1',
+    name: 'Dwight Schrute',
+    email: 'dwight@example.com',
+    role: 'TECHNICIAN',
+    roleLabel: 'Technician',
+  },
+];
+
+export const DEFAULT_ASSIGNMENTS_CONFIG: SpiderAssignmentsConfig = {
+  adminRoles: ['ADMIN', 'SALES', 'DISPATCHER', 'TECHNICIAN'],
+  owner: true,
+  users: ['u-admin-1', 'u-admin-2', 'u-sales-1', 'u-sales-2', 'u-disp-1', 'u-tech-1'],
+};
+
+export function normalizeAssignments(raw: any): SpiderAssignmentsConfig {
+  if (!raw || typeof raw !== 'object') return DEFAULT_ASSIGNMENTS_CONFIG;
+  if (Array.isArray(raw.adminRoles)) {
+    return {
+      adminRoles: Array.isArray(raw.adminRoles) ? raw.adminRoles : DEFAULT_ASSIGNMENTS_CONFIG.adminRoles,
+      owner: typeof raw.owner === 'boolean' ? raw.owner : true,
+      users: Array.isArray(raw.users) ? raw.users : DEFAULT_ASSIGNMENTS_CONFIG.users,
+    };
+  }
+  return DEFAULT_ASSIGNMENTS_CONFIG;
+}
+
+/**
+ * Resolves recipients for a Spider Alert based on Assignment rules:
+ * 1. If Admin roles are selected, alerts are sent only to those selected roles.
+ * 2. If Owner is selected, alerts are sent to the owner of the lead selected in the Watcher section.
+ * 3. If both Admin roles and Owner are selected, alerts are sent to both (union & de-duplicated).
+ */
+export function resolveSpiderAlertRecipients(params: {
+  assignments: SpiderAssignmentsConfig;
+  lead: Partial<WatcherLead>;
+  allUsers?: AssignmentUserItem[];
+}): string[] {
+  const { assignments, lead, allUsers = DEFAULT_ASSIGNMENT_USERS } = params;
+  const recipients = new Set<string>();
+
+  // 1. Admin roles: Include all users matching the selected Admin roles
+  if (Array.isArray(assignments.adminRoles) && assignments.adminRoles.length > 0) {
+    const matchingUsers = allUsers.filter((u) => assignments.adminRoles.includes(u.role));
+    matchingUsers.forEach((u) => recipients.add(u.id));
+  }
+
+  // Explicit user IDs if any
+  if (Array.isArray(assignments.users) && assignments.users.length > 0) {
+    assignments.users.forEach((userId) => recipients.add(userId));
+  }
+
+  // 2. Owner: Include the owner of the lead
+  if (assignments.owner) {
+    const ownerId =
+      lead.assigned_to ||
+      lead.assigned_to_user_id ||
+      lead.owner_id ||
+      lead.commission_owner_id ||
+      (lead.owner && lead.owner.id);
+
+    if (ownerId) {
+      recipients.add(ownerId);
+    }
+  }
+
+  // 3. Union & de-duplicated
+  return Array.from(recipients);
+}
+
+/**
+ * Check if a given user is an assigned recipient for a lead alert based on Assignment settings:
+ * 1. If Admin roles are selected, users holding those roles receive alerts.
+ * 2. If Owner is selected, the owner of the lead receives alerts.
+ * 3. If both Admin roles and Owner are selected, both receive alerts.
+ * 4. If nothing is selected (or no role/owner matches the user), the user receives NO alert.
+ */
+export function isUserAssignedToSpiderAlert(
+  assignments: SpiderAssignmentsConfig | undefined | null,
+  lead: Partial<WatcherLead>,
+  user?: { id?: string; role?: string } | null
+): boolean {
+  if (!assignments) return false;
+
+  const hasAdminRoles = Array.isArray(assignments.adminRoles) && assignments.adminRoles.length > 0;
+  const hasUsers = Array.isArray(assignments.users) && assignments.users.length > 0;
+  const hasOwner = !!assignments.owner;
+
+  // If nothing is selected in Admin role, User, or Owner, NO alert is sent to anyone
+  if (!hasAdminRoles && !hasUsers && !hasOwner) {
+    return false;
+  }
+
+  // If no user context is passed (e.g. general count/server view), return true as long as there is an active target configuration
+  if (!user) {
+    return hasAdminRoles || hasUsers || hasOwner;
+  }
+
+  // 1. Check if user's role is in the selected Admin roles
+  if (user.role && hasAdminRoles && assignments.adminRoles.includes(user.role)) {
+    return true;
+  }
+
+  // 2. Check if user is explicitly in the selected users list
+  if (user.id && hasUsers && assignments.users.includes(user.id)) {
+    return true;
+  }
+
+  // 3. Check if Owner is enabled and user is the owner of this lead
+  if (hasOwner && user.id) {
+    const leadOwnerId =
+      lead.assigned_to ||
+      lead.assigned_to_user_id ||
+      lead.owner_id ||
+      lead.commission_owner_id ||
+      (lead.owner && lead.owner.id);
+
+    if (leadOwnerId && leadOwnerId === user.id) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 const NOW = Date.now();
 const MIN = 60 * 1000;
@@ -758,6 +965,7 @@ const ALL_LEAD_IDS = DEFAULT_WATCHER_CUSTOMERS.flatMap((c) => c.leads.map((l) =>
 
 interface SpiderWatcherState {
   notifications: SpiderNotificationsConfig;
+  assignments: SpiderAssignmentsConfig;
   days: string;
   leadStages: LeadStageConfig[];
   customers: WatcherCustomer[];
@@ -774,6 +982,11 @@ interface SpiderWatcherState {
     updater:
       | SpiderNotificationsConfig
       | ((prev: SpiderNotificationsConfig) => SpiderNotificationsConfig)
+  ) => void;
+  setAssignments: (
+    updater:
+      | SpiderAssignmentsConfig
+      | ((prev: SpiderAssignmentsConfig) => SpiderAssignmentsConfig)
   ) => void;
   setInAppNotification: (enabled: boolean) => void;
   setRedFrameNotification: (enabled: boolean) => void;
@@ -800,7 +1013,7 @@ interface SpiderWatcherState {
   toggleRedBorder: () => void;
   clearRedBorder: () => void;
 
-  getComputedNotifications: () => InAppNotification[];
+  getComputedNotifications: (user?: { id?: string; role?: string } | null) => InAppNotification[];
 }
 
 export const useSpiderWatcherStore = create<SpiderWatcherState>()(
@@ -812,6 +1025,7 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
         inApp: true,
         redFrame: true,
       },
+      assignments: DEFAULT_ASSIGNMENTS_CONFIG,
       days: '',
       leadStages: DEFAULT_LEAD_STAGES,
       customers: DEFAULT_WATCHER_CUSTOMERS,
@@ -827,6 +1041,11 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
       setNotifications: (updater) =>
         set((state) => ({
           notifications: typeof updater === 'function' ? updater(state.notifications) : updater,
+        })),
+
+      setAssignments: (updater) =>
+        set((state) => ({
+          assignments: typeof updater === 'function' ? updater(state.assignments) : updater,
         })),
 
       setInAppNotification: (enabled) =>
@@ -997,7 +1216,7 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
       toggleRedBorder: () => set((state) => ({ isRedBorderActive: !state.isRedBorderActive })),
       clearRedBorder: () => set({ isRedBorderActive: false }),
 
-      getComputedNotifications: () => {
+      getComputedNotifications: (user) => {
         const state = get();
         const result: InAppNotification[] = [];
 
@@ -1010,11 +1229,25 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
           return result;
         }
 
+        const assignments = state.assignments;
+        const hasAdminRoles = Array.isArray(assignments?.adminRoles) && assignments.adminRoles.length > 0;
+        const hasUsers = Array.isArray(assignments?.users) && assignments.users.length > 0;
+        const hasOwner = !!assignments?.owner;
+
+        // If nothing is selected in Admin role, User, or Owner, NO notifications are generated
+        if (!hasAdminRoles && !hasUsers && !hasOwner) {
+          return result;
+        }
+
         for (const customer of state.customers) {
           if (!customer.leads || customer.leads.length === 0) continue;
           for (const lead of customer.leads) {
             const isSelected = state.selectedLeadIds.includes(lead.id);
             if (!isSelected) continue;
+
+            // Check if user is an assigned recipient for this lead's notification
+            const isAssigned = isUserAssignedToSpiderAlert(assignments, lead, user);
+            if (!isAssigned) continue;
 
             const overdue = isLeadOverdue(lead, state.leadStages);
             const notifId = `notif-${lead.id}`;
@@ -1081,6 +1314,7 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
       name: 'servwave_spider_watcher_settings',
       partialize: (state) => ({
         notifications: state.notifications,
+        assignments: state.assignments,
         leadStages: state.leadStages,
         customers: state.customers,
         selectedCustomerIds: state.selectedCustomerIds,
