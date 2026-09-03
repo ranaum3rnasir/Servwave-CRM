@@ -372,9 +372,16 @@ export function resolveRecipients(ctx: ResolveContext): RecipientSpec[] {
 
       const includeOwner = entity['owner'] === true || entity['notify_owner'] === true;
       if (includeOwner) {
-        const leadOwner = str('lead_owner_id') || str('commission_owner_id') || str('assigned_to') || str('assigned_to_user_id');
+        const leadOwner =
+          str('lead_owner_id') ||
+          str('commission_owner_id') ||
+          str('assigned_to') ||
+          str('assigned_to_user_id') ||
+          (typeof entity['commission_owner'] === 'object' && (entity['commission_owner'] as any)?.id) ||
+          (typeof entity['assigned_to_user'] === 'object' && (entity['assigned_to_user'] as any)?.id) ||
+          (typeof entity['owner_user'] === 'object' && (entity['owner_user'] as any)?.id);
         if (leadOwner) {
-          raw.push(spec(leadOwner, INTERRUPT));
+          raw.push(spec(String(leadOwner), INTERRUPT));
         }
       }
       break;

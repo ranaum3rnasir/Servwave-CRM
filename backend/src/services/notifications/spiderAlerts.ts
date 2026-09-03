@@ -16,10 +16,13 @@ export interface SpiderAssignmentSettings {
 
 export interface SpiderLeadEntity {
   id: string;
-  assigned_to?: string | null;
+  assigned_to?: string | null | { id: string };
   assigned_to_user_id?: string | null;
+  assigned_to_user?: { id: string } | null;
   owner_id?: string | null;
   commission_owner_id?: string | null;
+  commission_owner?: { id: string } | null;
+  owner?: { id: string } | null;
   lead_number?: string | null;
 }
 
@@ -35,6 +38,23 @@ export interface ResolveSpiderRecipientsOptions {
   assignments: SpiderAssignmentSettings;
   lead: SpiderLeadEntity;
   roleHolders: SpiderRoleHolders;
+}
+
+/**
+ * Resolves the lead owner ID from a lead record (e.g. commission_owner, assigned_to user)
+ */
+export function getSpiderLeadOwnerId(lead: SpiderLeadEntity | Record<string, any> | undefined | null): string | null {
+  if (!lead) return null;
+  return (
+    lead.commission_owner_id ||
+    (typeof lead.commission_owner === 'object' && lead.commission_owner?.id) ||
+    lead.assigned_to_user_id ||
+    (typeof lead.assigned_to_user === 'object' && lead.assigned_to_user?.id) ||
+    (typeof lead.owner === 'object' && lead.owner?.id) ||
+    lead.owner_id ||
+    (typeof lead.assigned_to === 'string' ? lead.assigned_to : (lead.assigned_to?.id || null)) ||
+    null
+  );
 }
 
 /**
@@ -63,12 +83,7 @@ export function resolveSpiderAlertRecipients(options: ResolveSpiderRecipientsOpt
 
   // 2. Owner: Include the owner of the lead
   if (assignments.owner) {
-    const ownerId =
-      lead.assigned_to ||
-      lead.assigned_to_user_id ||
-      lead.owner_id ||
-      lead.commission_owner_id;
-
+    const ownerId = getSpiderLeadOwnerId(lead);
     if (ownerId) {
       recipients.add(ownerId);
     }

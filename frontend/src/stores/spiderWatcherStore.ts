@@ -38,6 +38,15 @@ export interface WatcherLead {
   walkthroughScheduledAt?: string | null;
   walkthroughCompletedAt?: string | null;
   status?: string;
+  // Lead Owner (Assigned To)
+  assigned_to?: string | null;
+  assigned_to_user_id?: string | null;
+  owner_id?: string | null;
+  commission_owner_id?: string | null;
+  commission_owner?: any;
+  assigned_to_user?: any;
+  owner?: any;
+  assignedToName?: string | null;
 }
 
 export interface WatcherCustomer {
@@ -96,6 +105,8 @@ export interface InAppNotification {
   createdAt?: string | null;
   lastCommunication?: string | null;
   isTriggered?: boolean;
+  assignedTo?: string | null;
+  assignedToId?: string | null;
 }
 
 /** Convert a duration + unit to seconds for comparison */
@@ -373,10 +384,47 @@ export function normalizeAssignments(raw: any): SpiderAssignmentsConfig {
 }
 
 /**
+ * Resolves the lead owner ID from a lead record (e.g. commission_owner, assigned_to user)
+ */
+export function getSpiderLeadOwnerId(lead: Partial<WatcherLead> | Record<string, any> | undefined | null): string | null {
+  if (!lead) return null;
+  return (
+    lead.commission_owner_id ||
+    (typeof lead.commission_owner === 'object' && lead.commission_owner?.id) ||
+    lead.assigned_to_user_id ||
+    (typeof lead.assigned_to_user === 'object' && lead.assigned_to_user?.id) ||
+    (typeof lead.owner === 'object' && lead.owner?.id) ||
+    lead.owner_id ||
+    (typeof lead.assigned_to === 'string' ? lead.assigned_to : (lead.assigned_to?.id || null)) ||
+    null
+  );
+}
+
+/**
+ * Resolves the lead owner display name from a lead record
+ */
+export function getSpiderLeadOwnerName(lead: Partial<WatcherLead> | Record<string, any> | undefined | null): string | null {
+  if (!lead) return null;
+  if (lead.assignedToName) return lead.assignedToName;
+  const ownerObj =
+    lead.commission_owner ||
+    lead.assigned_to_user ||
+    lead.owner ||
+    (typeof lead.assigned_to === 'object' ? lead.assigned_to : null);
+  if (ownerObj) {
+    const fullName = `${ownerObj.first_name || ''} ${ownerObj.last_name || ''}`.trim();
+    if (fullName) return fullName;
+    if (ownerObj.name) return ownerObj.name;
+    if (ownerObj.email) return ownerObj.email;
+  }
+  return null;
+}
+
+/**
  * Resolves recipients for a Spider Alert based on Assignment rules:
- * 1. If Admin roles are selected, alerts are sent only to those selected roles.
- * 2. If Owner is selected, alerts are sent to the owner of the lead selected in the Watcher section.
- * 3. If both Admin roles and Owner are selected, alerts are sent to both (union & de-duplicated).
+ * 1. If Admin roles are selected, alerts are sent to those selected roles.
+ * 2. If User is selected, alerts are sent directly to those specific users.
+ * 3. If Owner is selected, alerts are sent strictly to the owner of that specific lead.
  */
 export function resolveSpiderAlertRecipients(params: {
   assignments: SpiderAssignmentsConfig;
@@ -392,40 +440,34 @@ export function resolveSpiderAlertRecipients(params: {
     matchingUsers.forEach((u) => recipients.add(u.id));
   }
 
-  // Explicit user IDs if any
+  // 2. Explicit user IDs if any
   if (Array.isArray(assignments.users) && assignments.users.length > 0) {
     assignments.users.forEach((userId) => recipients.add(userId));
   }
 
-  // 2. Owner: Include the owner of the lead
+  // 3. Lead Owner: If Owner is checked, strictly include the owner of this specific lead
   if (assignments.owner) {
-    const ownerId =
-      lead.assigned_to ||
-      lead.assigned_to_user_id ||
-      lead.owner_id ||
-      lead.commission_owner_id ||
-      (lead.owner && lead.owner.id);
-
+    const ownerId = getSpiderLeadOwnerId(lead);
     if (ownerId) {
       recipients.add(ownerId);
     }
   }
 
-  // 3. Union & de-duplicated
+  // Union & de-duplicated
   return Array.from(recipients);
 }
 
 /**
  * Check if a given user is an assigned recipient for a lead alert based on Assignment settings:
  * 1. If Admin roles are selected, users holding those roles receive alerts.
- * 2. If Owner is selected, the owner of the lead receives alerts.
- * 3. If both Admin roles and Owner are selected, both receive alerts.
- * 4. If nothing is selected (or no role/owner matches the user), the user receives NO alert.
+ * 2. If specific users are selected, those users receive alerts.
+ * 3. If Owner is selected, the owner of this specific lead strictly receives alerts.
+ * 4. If nothing is selected (or no role/user/owner matches the user), the user receives NO alert.
  */
 export function isUserAssignedToSpiderAlert(
   assignments: SpiderAssignmentsConfig | undefined | null,
   lead: Partial<WatcherLead>,
-  user?: { id?: string; role?: string } | null
+  user?: { id?: string; role?: string; email?: string; first_name?: string; last_name?: string } | null
 ): boolean {
   if (!assignments) return false;
 
@@ -453,17 +495,22 @@ export function isUserAssignedToSpiderAlert(
     return true;
   }
 
-  // 3. Check if Owner is enabled and user is the owner of this lead
-  if (hasOwner && user.id) {
-    const leadOwnerId =
-      lead.assigned_to ||
-      lead.assigned_to_user_id ||
-      lead.owner_id ||
-      lead.commission_owner_id ||
-      (lead.owner && lead.owner.id);
-
-    if (leadOwnerId && leadOwnerId === user.id) {
+  // 3. Check if Owner is enabled and user is the assigned lead owner of this specific lead
+  if (hasOwner) {
+    const leadOwnerId = getSpiderLeadOwnerId(lead);
+    if (leadOwnerId && user.id && (leadOwnerId === user.id || String(leadOwnerId) === String(user.id))) {
       return true;
+    }
+
+    // Also match by email or name if commission_owner object is attached
+    const ownerObj = lead.commission_owner || lead.assigned_to_user || lead.owner;
+    if (ownerObj) {
+      if (ownerObj.id && user.id && String(ownerObj.id) === String(user.id)) {
+        return true;
+      }
+      if (ownerObj.email && user.email && ownerObj.email.toLowerCase() === user.email.toLowerCase()) {
+        return true;
+      }
     }
   }
 
@@ -494,6 +541,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedUnit: 'Day',
         elapsedSeconds: 4 * 86400,
         createdAt: new Date(NOW - 4 * DAY).toISOString(),
+        assigned_to: 'u-admin-1',
+        commission_owner_id: 'u-admin-1',
+        assignedToName: 'Alex Morgan',
+        commission_owner: { id: 'u-admin-1', first_name: 'Alex', last_name: 'Morgan', email: 'alex@example.com' },
       },
       {
         id: 'l2',
@@ -507,6 +558,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 6 * 86400,
         createdAt: new Date(NOW - 10 * DAY).toISOString(),
         contactedAt: new Date(NOW - 6 * DAY).toISOString(),
+        assigned_to: 'u-sales-1',
+        commission_owner_id: 'u-sales-1',
+        assignedToName: 'Michael Scott',
+        commission_owner: { id: 'u-sales-1', first_name: 'Michael', last_name: 'Scott', email: 'michael@example.com' },
       },
       {
         id: 'l3',
@@ -520,6 +575,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 12 * 3600,
         createdAt: new Date(NOW - 5 * DAY).toISOString(),
         walkthroughScheduledAt: new Date(NOW - 12 * HOUR).toISOString(),
+        assigned_to: 'u-disp-1',
+        commission_owner_id: 'u-disp-1',
+        assignedToName: 'Pam Beesly',
+        commission_owner: { id: 'u-disp-1', first_name: 'Pam', last_name: 'Beesly', email: 'pam@example.com' },
       },
     ],
   },
@@ -542,6 +601,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 8 * 86400,
         createdAt: new Date(NOW - 12 * DAY).toISOString(),
         contactedAt: new Date(NOW - 8 * DAY).toISOString(),
+        assigned_to: 'u-tech-1',
+        commission_owner_id: 'u-tech-1',
+        assignedToName: 'Dwight Schrute',
+        commission_owner: { id: 'u-tech-1', first_name: 'Dwight', last_name: 'Schrute', email: 'dwight@example.com' },
       },
       {
         id: 'l5',
@@ -555,6 +618,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 3 * 86400,
         createdAt: new Date(NOW - 7 * DAY).toISOString(),
         walkthroughScheduledAt: new Date(NOW - 3 * DAY).toISOString(),
+        assigned_to: 'u-sales-2',
+        commission_owner_id: 'u-sales-2',
+        assignedToName: 'Jim Halpert',
+        commission_owner: { id: 'u-sales-2', first_name: 'Jim', last_name: 'Halpert', email: 'jim@example.com' },
       },
     ],
   },
@@ -576,6 +643,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedUnit: 'Hour',
         elapsedSeconds: 5 * 3600,
         createdAt: new Date(NOW - 5 * HOUR).toISOString(),
+        assigned_to: 'u-admin-2',
+        commission_owner_id: 'u-admin-2',
+        assignedToName: 'Sarah Connor',
+        commission_owner: { id: 'u-admin-2', first_name: 'Sarah', last_name: 'Connor', email: 'sarah@example.com' },
       },
       {
         id: 'l7',
@@ -589,6 +660,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 2 * 86400,
         createdAt: new Date(NOW - 4 * DAY).toISOString(),
         walkthroughScheduledAt: new Date(NOW - 2 * DAY).toISOString(),
+        assigned_to: 'u-admin-1',
+        commission_owner_id: 'u-admin-1',
+        assignedToName: 'Alex Morgan',
+        commission_owner: { id: 'u-admin-1', first_name: 'Alex', last_name: 'Morgan', email: 'alex@example.com' },
       },
     ],
   },
@@ -611,6 +686,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedSeconds: 4 * 86400,
         createdAt: new Date(NOW - 6 * DAY).toISOString(),
         walkthroughScheduledAt: new Date(NOW - 4 * DAY).toISOString(),
+        assigned_to: 'u-sales-1',
+        commission_owner_id: 'u-sales-1',
+        assignedToName: 'Michael Scott',
+        commission_owner: { id: 'u-sales-1', first_name: 'Michael', last_name: 'Scott', email: 'michael@example.com' },
       },
       {
         id: 'l9',
@@ -623,6 +702,10 @@ export const DEFAULT_WATCHER_CUSTOMERS: WatcherCustomer[] = [
         elapsedUnit: 'Day',
         elapsedSeconds: 5 * 86400,
         createdAt: new Date(NOW - 5 * DAY).toISOString(),
+        assigned_to: 'u-tech-1',
+        commission_owner_id: 'u-tech-1',
+        assignedToName: 'Dwight Schrute',
+        commission_owner: { id: 'u-tech-1', first_name: 'Dwight', last_name: 'Schrute', email: 'dwight@example.com' },
       },
     ],
   },
@@ -876,6 +959,25 @@ export function buildWatcherCustomersFromLive(
       const stageMetrics = resolveLeadStageAndElapsedTime(rawLead);
       const contactedTimestamp = rawLead.contacted_at || rawLead.contactedAt || null;
 
+      const ownerObj =
+        rawLead.commission_owner ||
+        rawLead.assigned_to_user ||
+        rawLead.owner ||
+        (typeof rawLead.assigned_to === 'object' ? rawLead.assigned_to : null);
+
+      const ownerId =
+        rawLead.commission_owner_id ||
+        (rawLead.commission_owner && typeof rawLead.commission_owner === 'object' ? rawLead.commission_owner.id : null) ||
+        rawLead.assigned_to_user_id ||
+        (rawLead.assigned_to_user && typeof rawLead.assigned_to_user === 'object' ? rawLead.assigned_to_user.id : null) ||
+        rawLead.owner_id ||
+        (typeof rawLead.assigned_to === 'string' ? rawLead.assigned_to : null) ||
+        null;
+
+      const ownerName = ownerObj
+        ? `${ownerObj.first_name || ''} ${ownerObj.last_name || ''}`.trim() || ownerObj.name || ownerObj.email || null
+        : null;
+
       const watcherLead: WatcherLead = {
         id: rawLead.id,
         leadNumber: rawLead.lead_number || `LD-${String(rawLead.id).slice(-4)}`,
@@ -898,6 +1000,13 @@ export function buildWatcherCustomersFromLive(
         walkthroughScheduledAt: rawLead.walkthrough_scheduled_at,
         walkthroughCompletedAt: rawLead.walkthrough_completed_at,
         status: rawLead.status,
+        assigned_to: ownerId,
+        assigned_to_user_id: ownerId,
+        commission_owner_id: ownerId,
+        commission_owner: ownerObj,
+        assigned_to_user: ownerObj,
+        owner: ownerObj,
+        assignedToName: ownerName,
       };
 
       if (!customerMap.has(custId)) {
@@ -1302,6 +1411,8 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
                 createdAt: lead.createdAt || null,
                 lastCommunication: lastCommMessage,
                 isTriggered: true,
+                assignedTo: lead.assignedToName || getSpiderLeadOwnerName(lead) || null,
+                assignedToId: getSpiderLeadOwnerId(lead) || null,
               });
             }
           }

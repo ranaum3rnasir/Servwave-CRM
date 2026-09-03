@@ -68,6 +68,7 @@ import {
   formatLastCommunicationTimestamp,
   formatLeadServiceLocation,
   buildWatcherCustomersFromLive,
+  getSpiderLeadOwnerName,
 } from '@/stores/spiderWatcherStore';
 
 interface AgentDetailModalProps {
@@ -132,12 +133,7 @@ function SpiderWatcherConfig({
   const allRoles = availableRoles && availableRoles.length > 0 ? availableRoles : DEFAULT_SYSTEM_ROLES;
   const allUsers = availableUsers && availableUsers.length > 0 ? availableUsers : DEFAULT_ASSIGNMENT_USERS;
 
-  // Dynamically filter users by currently selected Admin roles
-  const visibleUsers = useMemo(() => {
-    return allUsers.filter((u) => assignments.adminRoles.includes(u.role));
-  }, [allUsers, assignments.adminRoles]);
-
-  // Admin role selection helpers
+  // Admin role selection helpers (Independent: selects/deselects roles for alert distribution)
   const allAdminRolesSelected =
     allRoles.length > 0 && allRoles.every((r) => assignments.adminRoles.includes(r.id));
   const someAdminRolesSelected =
@@ -148,15 +144,10 @@ function SpiderWatcherConfig({
     const isAllSelected =
       allRoleIds.length > 0 && allRoleIds.every((id) => assignments.adminRoles.includes(id));
     const newAdminRoles = isAllSelected ? [] : allRoleIds;
-    // When selecting all Admin roles, automatically select all matching users by default
-    const matchingUserIds = allUsers
-      .filter((u) => newAdminRoles.includes(u.role))
-      .map((u) => u.id);
 
     setAssignments((prev) => ({
       ...prev,
       adminRoles: newAdminRoles,
-      users: matchingUserIds,
     }));
     if (!isAllSelected) {
       setExpandedSections((prev) => ({ ...prev, adminRoles: true }));
@@ -170,26 +161,14 @@ function SpiderWatcherConfig({
         ? prev.adminRoles.filter((id) => id !== roleId)
         : [...prev.adminRoles, roleId];
 
-      const usersForThisRole = allUsers.filter((u) => u.role === roleId).map((u) => u.id);
-
-      let newUsers: string[];
-      if (isSelected) {
-        // If unchecking this role, remove its users from selected users
-        newUsers = prev.users.filter((id) => !usersForThisRole.includes(id));
-      } else {
-        // If selecting this role, automatically select all users belonging to this role by default
-        newUsers = Array.from(new Set([...prev.users, ...usersForThisRole]));
-      }
-
       return {
         ...prev,
         adminRoles: newRoles,
-        users: newUsers,
       };
     });
   };
 
-  // Owner toggle helper (single checkbox row)
+  // Owner toggle helper (Independent: assigns alerts to the lead owner)
   const toggleOwner = () => {
     setAssignments((prev) => ({
       ...prev,
@@ -197,28 +176,23 @@ function SpiderWatcherConfig({
     }));
   };
 
-  // User selection helpers
-  const selectedVisibleUserCount = assignments.users.filter((id) =>
-    visibleUsers.some((u) => u.id === id)
+  // User selection helpers (Independent: lists all available users and assigns directly to specific users)
+  const selectedUserCount = assignments.users.filter((id) =>
+    allUsers.some((u) => u.id === id)
   ).length;
-  const allVisibleUsersSelected =
-    visibleUsers.length > 0 && selectedVisibleUserCount === visibleUsers.length;
-  const someVisibleUsersSelected =
-    selectedVisibleUserCount > 0 && selectedVisibleUserCount < visibleUsers.length;
+  const allUsersSelected =
+    allUsers.length > 0 && selectedUserCount === allUsers.length;
+  const someUsersSelected =
+    selectedUserCount > 0 && selectedUserCount < allUsers.length;
 
   const toggleAllUsers = () => {
-    if (visibleUsers.length === 0) return;
-    const visibleIds = visibleUsers.map((u) => u.id);
-    const allSelected = visibleIds.every((id) => assignments.users.includes(id));
-    setAssignments((prev) => {
-      const newUsers = allSelected
-        ? prev.users.filter((id) => !visibleIds.includes(id))
-        : Array.from(new Set([...prev.users, ...visibleIds]));
-      return {
-        ...prev,
-        users: newUsers,
-      };
-    });
+    if (allUsers.length === 0) return;
+    const allUserIds = allUsers.map((u) => u.id);
+    const allSelected = allUserIds.every((id) => assignments.users.includes(id));
+    setAssignments((prev) => ({
+      ...prev,
+      users: allSelected ? [] : allUserIds,
+    }));
     if (!allSelected) {
       setExpandedSections((prev) => ({ ...prev, users: true }));
     }
@@ -526,7 +500,7 @@ function SpiderWatcherConfig({
                 )}
               </div>
 
-              {/* 2. User Section (Dynamically filtered by selected Admin roles) */}
+              {/* 2. User Section (Lists all available users independently) */}
               <div className="rounded-lg border border-border/60 bg-surface-light transition-colors hover:border-border overflow-hidden">
                 <div className="flex items-center justify-between p-2.5 gap-2 select-none">
                   <div
@@ -538,13 +512,13 @@ function SpiderWatcherConfig({
                   >
                     <Checkbox
                       checked={
-                        someVisibleUsersSelected
+                        someUsersSelected
                           ? 'indeterminate'
-                          : allVisibleUsersSelected
+                          : allUsersSelected
                       }
                       onCheckedChange={toggleAllUsers}
-                      disabled={visibleUsers.length === 0}
-                      aria-label="Select all matching users"
+                      disabled={allUsers.length === 0}
+                      aria-label="Select all users"
                     />
                     <div className="flex items-center gap-2 min-w-0">
                       <User className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
@@ -552,7 +526,7 @@ function SpiderWatcherConfig({
                         User
                       </span>
                       <span className="text-[11px] text-text-soft hidden sm:inline truncate">
-                        ({visibleUsers.length} team member{visibleUsers.length === 1 ? '' : 's'} matching selected Admin roles)
+                        (Assign notifications directly to specific individual users)
                       </span>
                     </div>
                   </div>
@@ -561,12 +535,12 @@ function SpiderWatcherConfig({
                     <span
                       className={cn(
                         'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
-                        selectedVisibleUserCount > 0
+                        selectedUserCount > 0
                           ? 'bg-ai-50 text-ai-700 border border-ai-200'
                           : 'bg-surface-light text-text-soft border border-border'
                       )}
                     >
-                      {selectedVisibleUserCount}/{visibleUsers.length} selected
+                      {selectedUserCount}/{allUsers.length} selected
                     </span>
 
                     <Button
@@ -597,12 +571,12 @@ function SpiderWatcherConfig({
                 {/* Nested Users List */}
                 {expandedSections.users && (
                   <div className="border-t border-border/40 bg-background-light/50 px-3 py-2 space-y-1.5 animate-in slide-in-from-top-1 duration-150 max-h-56 overflow-y-auto">
-                    {visibleUsers.length === 0 ? (
+                    {allUsers.length === 0 ? (
                       <div className="py-4 text-center text-xs text-text-soft">
-                        No users match the selected Admin roles. Select roles above to show team members.
+                        No team members found.
                       </div>
                     ) : (
-                      visibleUsers.map((user) => {
+                      allUsers.map((user) => {
                         const isChecked = assignments.users.includes(user.id);
                         return (
                           <div
@@ -624,6 +598,14 @@ function SpiderWatcherConfig({
                                 onCheckedChange={() => toggleUser(user.id)}
                                 aria-label={user.name}
                               />
+                              <Avatar className="h-5 w-5 border border-border shrink-0">
+                                {user.avatar_url && (
+                                  <AvatarImage src={user.avatar_url} alt={user.name} />
+                                )}
+                                <AvatarFallback className="text-[9px] bg-ai-100 text-ai-700 font-bold">
+                                  {user.name.slice(0, 2).toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
                               <div className="min-w-0">
                                 <p className="text-xs font-semibold text-text-primary truncate">
                                   {user.name}
@@ -1077,6 +1059,17 @@ function SpiderWatcherConfig({
                                         {lead.serviceLocation || 'No service location specified'}
                                       </span>
                                     </div>
+                                    {(lead.assignedToName || getSpiderLeadOwnerName(lead)) && (
+                                      <div className="flex items-center gap-1 text-[10px] text-text-soft mt-0.5">
+                                        <User className="h-3 w-3 text-text-soft shrink-0" />
+                                        <span>
+                                          Assigned To:{' '}
+                                          <strong className="font-semibold text-text-secondary">
+                                            {lead.assignedToName || getSpiderLeadOwnerName(lead)}
+                                          </strong>
+                                        </span>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
 

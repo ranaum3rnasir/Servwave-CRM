@@ -49,6 +49,9 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         elapsedValue: 4,
         elapsedUnit: 'Day',
         elapsedSeconds: 4 * 86400,
+        assigned_to: 'usr-admin-1',
+        commission_owner_id: 'usr-admin-1',
+        assignedToName: 'Alex Morgan',
       },
       {
         id: 'l2',
@@ -61,6 +64,9 @@ const TEST_CUSTOMERS: WatcherCustomer[] = [
         elapsedUnit: 'Day',
         elapsedSeconds: 6 * 86400,
         contactedAt: new Date(Date.now() - 6 * 24 * 3600 * 1000).toISOString(),
+        assigned_to: 'usr-sales-owner',
+        commission_owner_id: 'usr-sales-owner',
+        assignedToName: 'Michael Scott',
       },
     ],
   },
@@ -849,7 +855,7 @@ describe('AiCenterModal', () => {
       expect(screen.getByText('Disabled')).toBeInTheDocument();
     });
 
-    it('dynamically filters User list based on selected Admin roles', () => {
+    it('renders User section listing all available users independently of Admin role selections', () => {
       renderSpiderDetail();
 
       // Expand Admin role and User
@@ -858,30 +864,19 @@ describe('AiCenterModal', () => {
       const toggleUser = screen.getByLabelText(/Toggle User options/i);
       fireEvent.click(toggleUser);
 
-      // Initially all 4 roles are selected, so all users appear
+      // All available users appear in the User list independently
       expect(screen.getByText('Alex Morgan')).toBeInTheDocument();
       expect(screen.getByText('Michael Scott')).toBeInTheDocument();
       expect(screen.getByText('Dwight Schrute')).toBeInTheDocument();
 
-      // Uncheck all Admin roles by clicking parent Admin role checkbox
+      // Deselect all Admin roles
       const adminRoleSelectAll = screen.getByLabelText(/Select all Admin roles/i);
       fireEvent.click(adminRoleSelectAll);
 
-      // User list now has 0 matching users
-      expect(screen.getByText(/No users match the selected Admin roles/i)).toBeInTheDocument();
-      expect(screen.queryByText('Alex Morgan')).toBeNull();
-      expect(screen.queryByText('Michael Scott')).toBeNull();
-
-      // Select ONLY 'Sales' role in Admin role
-      const salesRoleCheckbox = screen.getByLabelText(/^Sales$/i);
-      fireEvent.click(salesRoleCheckbox);
-
-      // Now only Sales users appear in the User list and they are ALL selected by default (2/2 selected)
+      // All users still remain accessible in the User list independently
+      expect(screen.getByText('Alex Morgan')).toBeInTheDocument();
       expect(screen.getByText('Michael Scott')).toBeInTheDocument();
-      expect(screen.getByText('Jim Halpert')).toBeInTheDocument();
-      expect(screen.getByText('2/2 selected')).toBeInTheDocument();
-      expect(screen.queryByText('Alex Morgan')).toBeNull();
-      expect(screen.queryByText('Dwight Schrute')).toBeNull();
+      expect(screen.getByText('Dwight Schrute')).toBeInTheDocument();
     });
 
     it('toggles assignments and saves to store', () => {
@@ -893,7 +888,7 @@ describe('AiCenterModal', () => {
       const toggleUser = screen.getByLabelText(/Toggle User options/i);
       fireEvent.click(toggleUser);
 
-      // Deselect Dwight Schrute
+      // Deselect Dwight Schrute in User section
       const dwightRow = screen.getByText('Dwight Schrute').closest('div[class*="cursor-pointer"]');
       expect(dwightRow).not.toBeNull();
       fireEvent.click(dwightRow!);
@@ -912,7 +907,7 @@ describe('AiCenterModal', () => {
       expect(savedAssignments.users).toContain('u-admin-1');
     });
 
-    it('resolves alert recipients according to Assignment configuration rules', () => {
+    it('resolves alert recipients according to independent Assignment configuration rules', () => {
       const mockLead = {
         id: 'l101',
         assigned_to: 'user-lead-owner',
@@ -925,7 +920,7 @@ describe('AiCenterModal', () => {
         { id: 'u-tech-1', name: 'Dwight Schrute', role: 'TECHNICIAN' },
       ];
 
-      // 1. Admin roles selected: alerts sent ONLY to those selected roles
+      // 1. Admin roles selected independently: alerts sent to users of those roles
       const adminRolesOnly = resolveSpiderAlertRecipients({
         assignments: {
           adminRoles: ['ADMIN', 'SALES'],
@@ -940,7 +935,19 @@ describe('AiCenterModal', () => {
       expect(adminRolesOnly).not.toContain('user-lead-owner');
       expect(adminRolesOnly).not.toContain('u-disp-1');
 
-      // 2. Owner selected: alerts sent ONLY to the owner of the lead
+      // 2. Specific individual users selected independently: alerts sent directly to those users
+      const usersOnly = resolveSpiderAlertRecipients({
+        assignments: {
+          adminRoles: [],
+          owner: false,
+          users: ['u-tech-1'],
+        },
+        lead: mockLead,
+        allUsers,
+      });
+      expect(usersOnly).toEqual(['u-tech-1']);
+
+      // 3. Owner selected independently: alerts sent ONLY to the owner of the lead
       const ownerOnly = resolveSpiderAlertRecipients({
         assignments: {
           adminRoles: [],
@@ -952,19 +959,20 @@ describe('AiCenterModal', () => {
       });
       expect(ownerOnly).toEqual(['user-lead-owner']);
 
-      // 3. Both Admin roles and Owner selected: alert sent to BOTH
-      const bothSelected = resolveSpiderAlertRecipients({
+      // 4. Combined: Admin roles + specific User + Owner all selected independently
+      const combined = resolveSpiderAlertRecipients({
         assignments: {
           adminRoles: ['ADMIN'],
           owner: true,
-          users: [],
+          users: ['u-tech-1'],
         },
         lead: mockLead,
         allUsers,
       });
-      expect(bothSelected).toContain('u-admin-1');
-      expect(bothSelected).toContain('user-lead-owner');
-      expect(bothSelected.length).toBe(2);
+      expect(combined).toContain('u-admin-1');
+      expect(combined).toContain('u-tech-1');
+      expect(combined).toContain('user-lead-owner');
+      expect(combined.length).toBe(3);
 
       // 4. Nothing selected: 0 recipients
       const noneSelected = resolveSpiderAlertRecipients({
@@ -1036,6 +1044,29 @@ describe('AiCenterModal', () => {
       });
       const notifsAdminActive = useSpiderWatcherStore.getState().getComputedNotifications(adminUser);
       expect(notifsAdminActive.length).toBeGreaterThan(0);
+
+      // Case 4: Only Owner selected -> alerts sent strictly to the assigned lead owner of that specific lead
+      useSpiderWatcherStore.setState({
+        assignments: {
+          adminRoles: [],
+          owner: true,
+          users: [],
+        },
+      });
+
+      // User 1 (usr-admin-1) is owner of lead l1
+      const notifsOwner1 = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-admin-1', role: 'TECHNICIAN' });
+      expect(notifsOwner1.length).toBe(1);
+      expect(notifsOwner1[0].leadId).toBe('l1');
+
+      // User 2 (usr-sales-owner) is owner of lead l2
+      const notifsOwner2 = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-sales-owner', role: 'TECHNICIAN' });
+      expect(notifsOwner2.length).toBe(1);
+      expect(notifsOwner2[0].leadId).toBe('l2');
+
+      // User 3 (unrelated user) is not the owner of any triggered lead
+      const notifsStranger = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-stranger-999', role: 'TECHNICIAN' });
+      expect(notifsStranger).toEqual([]);
     });
   });
 });
