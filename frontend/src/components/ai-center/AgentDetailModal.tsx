@@ -19,8 +19,6 @@ import {
   Square,
   MapPin,
   UserCheck,
-  Shield,
-  Briefcase,
   User,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
@@ -30,6 +28,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Heading } from '@/components/ui/heading';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectContent,
@@ -69,6 +68,7 @@ import {
   formatLeadServiceLocation,
   buildWatcherCustomersFromLive,
   getSpiderLeadOwnerName,
+  getDefaultFallbackDuration,
 } from '@/stores/spiderWatcherStore';
 
 interface AgentDetailModalProps {
@@ -389,7 +389,7 @@ function SpiderWatcherConfig({
 
           <div className="flex flex-col justify-between flex-1 space-y-2">
             <div className="space-y-2">
-              {/* 1. Admin role Section (Roles from Settings > Roles & Permissions) */}
+              {/* 1. System role Section (Roles from Settings > Roles & Permissions) */}
               <div className="rounded-lg border border-border/60 bg-surface-light transition-colors hover:border-border overflow-hidden">
                 <div className="flex items-center justify-between p-2.5 gap-2 select-none">
                   <div
@@ -404,17 +404,11 @@ function SpiderWatcherConfig({
                         someAdminRolesSelected ? 'indeterminate' : allAdminRolesSelected
                       }
                       onCheckedChange={toggleAllAdminRoles}
-                      aria-label="Select all Admin roles"
+                      aria-label="Select all System roles"
                     />
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Shield className="h-3.5 w-3.5 text-primary shrink-0" />
-                      <span className="text-xs font-bold text-text-primary">
-                        Admin role
-                      </span>
-                      <span className="text-[11px] text-text-soft hidden sm:inline truncate">
-                        (Settings &gt; Roles &amp; Permissions)
-                      </span>
-                    </div>
+                    <span className="text-xs font-bold text-text-primary">
+                      System role
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
@@ -428,7 +422,6 @@ function SpiderWatcherConfig({
                     >
                       {assignments.adminRoles.length}/{allRoles.length} selected
                     </span>
-
                     <Button
                       type="button"
                       variant="ghost"
@@ -441,7 +434,7 @@ function SpiderWatcherConfig({
                         }));
                       }}
                       className="h-6 w-6 text-text-soft hover:text-text-primary"
-                      aria-label="Toggle Admin role options"
+                      aria-label="Toggle System role options"
                       aria-expanded={expandedSections.adminRoles}
                     >
                       <ChevronDown
@@ -479,20 +472,10 @@ function SpiderWatcherConfig({
                               onCheckedChange={() => toggleAdminRole(role.id)}
                               aria-label={role.label}
                             />
-                            <div className="min-w-0">
-                              <p className="text-xs font-semibold text-text-primary truncate">
-                                {role.label}
-                              </p>
-                              {role.description && (
-                                <p className="text-[10px] text-text-soft truncate">
-                                  {role.description}
-                                </p>
-                              )}
-                            </div>
+                            <p className="text-xs font-semibold text-text-primary truncate">
+                              {role.label}
+                            </p>
                           </div>
-                          <span className="rounded bg-surface-light border border-border px-1.5 py-0.5 text-[9px] font-mono text-text-secondary shrink-0">
-                            {role.id}
-                          </span>
                         </div>
                       );
                     })}
@@ -520,15 +503,9 @@ function SpiderWatcherConfig({
                       disabled={allUsers.length === 0}
                       aria-label="Select all users"
                     />
-                    <div className="flex items-center gap-2 min-w-0">
-                      <User className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-                      <span className="text-xs font-bold text-text-primary">
-                        User
-                      </span>
-                      <span className="text-[11px] text-text-soft hidden sm:inline truncate">
-                        (Assign notifications directly to specific individual users)
-                      </span>
-                    </div>
+                    <span className="text-xs font-bold text-text-primary">
+                      User
+                    </span>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
@@ -542,7 +519,6 @@ function SpiderWatcherConfig({
                     >
                       {selectedUserCount}/{allUsers.length} selected
                     </span>
-
                     <Button
                       type="button"
                       variant="ghost"
@@ -598,14 +574,6 @@ function SpiderWatcherConfig({
                                 onCheckedChange={() => toggleUser(user.id)}
                                 aria-label={user.name}
                               />
-                              <Avatar className="h-5 w-5 border border-border shrink-0">
-                                {user.avatar_url && (
-                                  <AvatarImage src={user.avatar_url} alt={user.name} />
-                                )}
-                                <AvatarFallback className="text-[9px] bg-ai-100 text-ai-700 font-bold">
-                                  {user.name.slice(0, 2).toUpperCase()}
-                                </AvatarFallback>
-                              </Avatar>
                               <div className="min-w-0">
                                 <p className="text-xs font-semibold text-text-primary truncate">
                                   {user.name}
@@ -642,17 +610,10 @@ function SpiderWatcherConfig({
                     onCheckedChange={toggleOwner}
                     aria-label="Notify Lead Owner"
                   />
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Briefcase className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                    <span className="text-xs font-bold text-text-primary">
-                      Owner
-                    </span>
-                    <span className="text-[11px] text-text-soft hidden sm:inline truncate">
-                      (Directly notify the assigned lead &amp; account owner)
-                    </span>
-                  </div>
+                  <span className="text-xs font-bold text-text-primary">
+                    Owner
+                  </span>
                 </div>
-
                 <span
                   className={cn(
                     'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
@@ -675,12 +636,12 @@ function SpiderWatcherConfig({
         </div>
       </div>
 
-      {/* Middle Section — Distance (Lead Stages & Parallel Time Periods) */}
+      {/* Middle Section — Stage Thresholds (Lead Stages & Parallel Time Periods) */}
       <div className="rounded-card border border-border bg-surface-light p-4 shadow-card">
         <div className="mb-3 border-b border-border/60 pb-2 flex items-center justify-between">
           <Heading level={3} scale="sm" weight="bold" className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-ai-600 shrink-0" />
-            Distance
+            Stage Thresholds
           </Heading>
           <span className="text-[11px] text-text-secondary">
             Set threshold per stage to trigger watcher leads
@@ -690,103 +651,182 @@ function SpiderWatcherConfig({
         {/* Lead Stages rows — spacious and fully visible without cutting off long names */}
         <div className="flex flex-col justify-between flex-1 space-y-2">
           <div className="space-y-2">
-            {leadStages.map((stage) => (
-              <div
-                key={stage.id}
-                className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-surface-light p-2 transition-colors hover:border-border"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="h-2 w-2 rounded-full bg-ai-500 shrink-0" />
-                  <span className="text-xs font-semibold text-text-primary truncate">
-                    {stage.label}
-                  </span>
-                </div>
+            {leadStages.map((stage) => {
+              const isEnabled =
+                stage.enabled !== false &&
+                stage.duration !== undefined &&
+                stage.duration !== null &&
+                stage.duration >= 1;
 
-                {/* Parallel Time Period Stepper & Unit Inputs */}
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {/* Decrement Button */}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => {
-                      const currentVal =
-                        stage.duration && stage.duration >= 1 ? stage.duration : 0;
-                      const nextVal = currentVal - 1;
-                      updateLeadStage(stage.id, {
-                        duration: nextVal >= 1 ? nextVal : undefined,
-                      });
-                    }}
-                    disabled={!stage.duration || stage.duration < 1}
-                    className="h-7 w-7 disabled:opacity-40"
-                    aria-label={`Decrement time period for ${stage.label}`}
-                  >
-                    <Minus className="h-3 w-3" />
-                  </Button>
+              return (
+                <div
+                  key={stage.id}
+                  className={cn(
+                    'flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border p-2.5 transition-colors',
+                    isEnabled
+                      ? 'border-border/80 bg-surface-light hover:border-border'
+                      : 'border-border/40 bg-surface-light/50 opacity-80'
+                  )}
+                >
+                  {/* Stage Name & dot indicator */}
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    <span
+                      className={cn(
+                        'h-2 w-2 rounded-full shrink-0 transition-colors',
+                        isEnabled ? 'bg-ai-500' : 'bg-text-soft/40'
+                      )}
+                    />
+                    <span className="text-xs font-semibold text-text-primary truncate">
+                      {stage.label}
+                    </span>
+                  </div>
 
-                  {/* Numeric Input */}
-                  <input
-                    type="number"
-                    min="1"
-                    value={stage.duration && stage.duration >= 1 ? stage.duration : ''}
-                    onChange={(e) => {
-                      const raw = e.target.value.trim();
-                      if (raw === '') {
-                        updateLeadStage(stage.id, { duration: undefined });
-                        return;
+                  {/* Parallel Time Period Settings: Toggle, Stepper Controls, and Unit Select */}
+                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                    {/* Enable/Disable Toggle */}
+                    <div className="flex items-center gap-1.5">
+                      <Switch
+                        checked={isEnabled}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            const fallbackDuration =
+                              stage.duration && stage.duration >= 1
+                                ? stage.duration
+                                : getDefaultFallbackDuration(stage.id, stage.unit);
+                            updateLeadStage(stage.id, {
+                              duration: fallbackDuration,
+                              enabled: true,
+                            });
+                          } else {
+                            updateLeadStage(stage.id, {
+                              duration: undefined,
+                              enabled: false,
+                            });
+                          }
+                        }}
+                        aria-label={`Enable ${stage.label}`}
+                        className="scale-90"
+                      />
+                    </div>
+
+                    {/* Stepper Controls: Decrement, Input, Increment */}
+                    <div className="flex items-center gap-1">
+                      {/* Decrement Button */}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => {
+                          if (!isEnabled) return;
+                          const currentVal =
+                            stage.duration && stage.duration >= 1 ? stage.duration : 1;
+                          const nextVal = currentVal - 1;
+                          if (nextVal >= 1) {
+                            updateLeadStage(stage.id, { duration: nextVal });
+                          } else {
+                            updateLeadStage(stage.id, {
+                              duration: undefined,
+                              enabled: false,
+                            });
+                          }
+                        }}
+                        disabled={!isEnabled || !stage.duration || stage.duration < 1}
+                        className="h-7 w-7 disabled:opacity-30 disabled:cursor-not-allowed"
+                        aria-label={`Decrement time period for ${stage.label}`}
+                      >
+                        <Minus className="h-3 w-3" />
+                      </Button>
+
+                      {/* Numeric Input */}
+                      <input
+                        type="number"
+                        min="1"
+                        disabled={!isEnabled}
+                        value={isEnabled && stage.duration && stage.duration >= 1 ? stage.duration : ''}
+                        placeholder={isEnabled ? '' : 'None'}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          if (raw === '') {
+                            updateLeadStage(stage.id, {
+                              duration: undefined,
+                              enabled: false,
+                            });
+                            return;
+                          }
+                          const val = parseInt(raw, 10);
+                          if (!isNaN(val) && val >= 1) {
+                            updateLeadStage(stage.id, { duration: val, enabled: true });
+                          } else {
+                            updateLeadStage(stage.id, {
+                              duration: undefined,
+                              enabled: false,
+                            });
+                          }
+                        }}
+                        className={cn(
+                          'w-12 h-7 rounded-md border border-border bg-surface-light px-1 text-xs font-bold text-center outline-none transition-all',
+                          isEnabled
+                            ? 'text-text-primary focus-visible:ring-2 focus-visible:ring-ai-500'
+                            : 'text-text-soft bg-surface-light/40 border-border/40 cursor-not-allowed placeholder:text-text-soft/60 placeholder:text-[10px]'
+                        )}
+                        aria-label={`Time period for ${stage.label}`}
+                      />
+
+                      {/* Increment Button */}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => {
+                          if (!isEnabled) {
+                            const fallbackDuration = getDefaultFallbackDuration(stage.id, stage.unit);
+                            updateLeadStage(stage.id, {
+                              duration: fallbackDuration,
+                              enabled: true,
+                            });
+                            return;
+                          }
+                          const currentVal =
+                            stage.duration && stage.duration >= 1 ? stage.duration : 0;
+                          updateLeadStage(stage.id, { duration: currentVal + 1, enabled: true });
+                        }}
+                        className="h-7 w-7"
+                        aria-label={`Increment time period for ${stage.label}`}
+                      >
+                        <Plus className="h-3 w-3" />
+                      </Button>
+                    </div>
+
+                    {/* Unit Select */}
+                    <Select
+                      value={stage.unit}
+                      disabled={!isEnabled}
+                      onValueChange={(val) =>
+                        updateLeadStage(stage.id, { unit: val as TimeUnit })
                       }
-                      const val = parseInt(raw, 10);
-                      if (!isNaN(val) && val >= 1) {
-                        updateLeadStage(stage.id, { duration: val });
-                      } else {
-                        updateLeadStage(stage.id, { duration: undefined });
-                      }
-                    }}
-                    className="w-12 h-7 rounded-md border border-border bg-surface-light px-1 text-xs font-bold text-text-primary text-center outline-none focus-visible:ring-2 focus-visible:ring-ai-500"
-                    placeholder=""
-                    aria-label={`Time period for ${stage.label}`}
-                  />
-
-                  {/* Increment Button */}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => {
-                      const currentVal =
-                        stage.duration && stage.duration >= 1 ? stage.duration : 0;
-                      updateLeadStage(stage.id, { duration: currentVal + 1 });
-                    }}
-                    className="h-7 w-7"
-                    aria-label={`Increment time period for ${stage.label}`}
-                  >
-                    <Plus className="h-3 w-3" />
-                  </Button>
-
-                  {/* Unit Select */}
-                  <Select
-                    value={stage.unit}
-                    onValueChange={(val) =>
-                      updateLeadStage(stage.id, { unit: val as TimeUnit })
-                    }
-                  >
-                    <SelectTrigger
-                      className="w-24 h-7 px-2 py-0.5"
-                      aria-label={`Time unit for ${stage.label}`}
                     >
-                      <SelectValue placeholder={stage.unit} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {TIME_UNITS.map((unit) => (
-                        <SelectItem key={unit} value={unit}>
-                          {unit}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                      <SelectTrigger
+                        disabled={!isEnabled}
+                        className={cn(
+                          'w-24 h-7 px-2 py-0.5 text-xs',
+                          !isEnabled && 'opacity-50 cursor-not-allowed'
+                        )}
+                        aria-label={`Time unit for ${stage.label}`}
+                      >
+                        <SelectValue placeholder={stage.unit} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {TIME_UNITS.map((unit) => (
+                          <SelectItem key={unit} value={unit}>
+                            {unit}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="pt-2 border-t border-border/40">
@@ -805,13 +845,6 @@ function SpiderWatcherConfig({
               <Users className="h-4 w-4 text-ai-600 shrink-0" />
               Contacts for Watchers
             </Heading>
-            <p className="text-[11px] text-text-soft mt-0.5">
-              Customers and leads monitored for stage thresholds ({filteredCustomers.length} customers,{' '}
-              <span className={cn(totalTriggeredCount > 0 ? 'text-danger-strong font-semibold' : '')}>
-                {totalTriggeredCount} active trigger{totalTriggeredCount === 1 ? '' : 's'}
-              </span>
-              )
-            </p>
           </div>
 
           {/* Quick select / deselect buttons */}
@@ -900,12 +933,6 @@ function SpiderWatcherConfig({
                         aria-label={`Select customer ${customer.name} for watcher`}
                       />
                     </div>
-
-                    <Avatar className="h-7 w-7 shrink-0">
-                      <AvatarFallback tone="subtle">
-                        {customer.name[0]}
-                      </AvatarFallback>
-                    </Avatar>
 
                     {/* Customer info */}
                     <div className="min-w-0 flex-1">

@@ -14,6 +14,7 @@ export interface LeadStageConfig {
   toStage: string;
   duration?: number;
   unit: TimeUnit;
+  enabled?: boolean;
 }
 
 export interface WatcherLead {
@@ -254,7 +255,13 @@ export function resolveLeadStageAndElapsedTime(lead: {
 /** Check whether a lead has exceeded the stage threshold */
 export function isLeadOverdue(lead: WatcherLead, stageConfigs: LeadStageConfig[]): boolean {
   const config = stageConfigs.find((s) => s.id === lead.stageId || s.label === lead.stageLabel);
-  if (!config || config.duration === undefined || config.duration === null || isNaN(config.duration)) {
+  if (
+    !config ||
+    config.enabled === false ||
+    config.duration === undefined ||
+    config.duration === null ||
+    isNaN(config.duration)
+  ) {
     return false;
   }
 
@@ -265,6 +272,41 @@ export function isLeadOverdue(lead: WatcherLead, stageConfigs: LeadStageConfig[]
   const thresholdSeconds = timeUnitToSeconds(config.duration, config.unit);
 
   return leadSeconds >= thresholdSeconds;
+}
+
+/**
+ * Resolves the user-facing functional title for a stage
+ */
+export function getStageFunctionalTitle(stage: LeadStageConfig): string {
+  const id = (stage.id || '').toLowerCase();
+  const label = (stage.label || '').toLowerCase();
+  if (id.includes('new') || label.includes('new')) {
+    return 'Time to First Contact';
+  }
+  if (id.includes('walkthrough-scheduled-estimate') || (label.includes('walkthrough') && label.includes('estimate'))) {
+    return 'Time to Deliver Estimate';
+  }
+  if (id.includes('walkthrough') || label.includes('walkthrough')) {
+    return 'Time to Schedule Walkthrough';
+  }
+  return stage.label;
+}
+
+/**
+ * Returns the pipeline transition flow (e.g. "New → Contacted")
+ */
+export function getStagePipelineFlow(stage: LeadStageConfig): string {
+  if (stage.fromStage && stage.toStage) {
+    return `${stage.fromStage} → ${stage.toStage}`;
+  }
+  return stage.label;
+}
+
+/**
+ * Provides a sensible default fallback duration when enabling a stage
+ */
+export function getDefaultFallbackDuration(stageId?: string, unit: TimeUnit = 'Minute'): number {
+  return 1;
 }
 
 // Default 3 Lead Stages: New → Contacted, Contacted → Walkthrough Scheduled, Walkthrough Scheduled → Estimate

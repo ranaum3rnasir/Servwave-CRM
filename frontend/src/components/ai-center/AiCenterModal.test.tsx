@@ -183,8 +183,8 @@ describe('AiCenterModal', () => {
     // Store remains unchanged before saving
     expect(useSpiderWatcherStore.getState().notifications.redFrame).toBe(true);
 
-    // 1. Lead Stages section with 3 stages and default blank duration
-    expect(screen.getByText('Distance')).toBeInTheDocument();
+    // 1. Stage Thresholds section with 3 stages and default blank duration
+    expect(screen.getByText('Stage Thresholds')).toBeInTheDocument();
     expect(screen.getByText('New → Contacted')).toBeInTheDocument();
     expect(screen.getByText('Contacted → Walkthrough Scheduled')).toBeInTheDocument();
     expect(screen.getByText('Walkthrough Scheduled → Estimate')).toBeInTheDocument();
@@ -192,6 +192,10 @@ describe('AiCenterModal', () => {
     const stages = useSpiderWatcherStore.getState().leadStages;
     expect(stages.length).toBe(3);
     expect(stages.every((s) => s.duration === undefined && s.unit === 'Second')).toBe(true);
+
+    // Enable / disable switch toggles exist for each stage
+    const enableSwitches = screen.getAllByRole('switch');
+    expect(enableSwitches.length).toBeGreaterThanOrEqual(3);
 
     // Parallel time period & units inputs exist and default to blank
     const unitSelects = screen.getAllByLabelText(/^Time unit for/i);
@@ -811,7 +815,7 @@ describe('AiCenterModal', () => {
   });
 
   describe('Spider Watcher Assignment Section', () => {
-    it('renders the Assignment section with Admin role, Owner, and User categories', () => {
+    it('renders the Assignment section with System role, Owner, and User categories', () => {
       renderSpiderDetail();
 
       expect(screen.getByText('Assignment')).toBeInTheDocument();
@@ -819,20 +823,20 @@ describe('AiCenterModal', () => {
         screen.getByText('Assign watcher alerts to specific roles and team members')
       ).toBeInTheDocument();
 
-      expect(screen.getByText('Admin role')).toBeInTheDocument();
+      expect(screen.getByText('System role')).toBeInTheDocument();
       expect(screen.getByText('Owner')).toBeInTheDocument();
       expect(screen.getByText('User')).toBeInTheDocument();
     });
 
-    it('expands Admin role to show 4 roles from Settings > Roles & Permissions', () => {
+    it('expands System role to show 4 roles from Settings > Roles & Permissions', () => {
       renderSpiderDetail();
 
       // Initially collapsed
       expect(screen.queryByText('Administrator (Owner)')).toBeNull();
       expect(screen.queryByText('Dispatcher')).toBeNull();
 
-      // Expand Admin role
-      const toggleAdmin = screen.getByLabelText(/Toggle Admin role options/i);
+      // Expand System role
+      const toggleAdmin = screen.getByLabelText(/Toggle System role options/i);
       fireEvent.click(toggleAdmin);
       expect(screen.getByText('Administrator (Owner)')).toBeInTheDocument();
       expect(screen.getByText('Sales')).toBeInTheDocument();
@@ -845,21 +849,21 @@ describe('AiCenterModal', () => {
 
       const ownerCheckbox = screen.getByLabelText(/Notify Lead Owner/i);
       expect(ownerCheckbox).toBeInTheDocument();
-      expect(screen.getByText('Enabled')).toBeInTheDocument();
+      expect(ownerCheckbox).toHaveAttribute('data-state', 'checked');
 
       // No dropdown chevron for Owner
       expect(screen.queryByLabelText(/Toggle Owner options/i)).toBeNull();
 
       // Click Owner toggle
       fireEvent.click(ownerCheckbox);
-      expect(screen.getByText('Disabled')).toBeInTheDocument();
+      expect(ownerCheckbox).toHaveAttribute('data-state', 'unchecked');
     });
 
-    it('renders User section listing all available users independently of Admin role selections', () => {
+    it('renders User section listing all available users independently of System role selections', () => {
       renderSpiderDetail();
 
-      // Expand Admin role and User
-      const toggleAdmin = screen.getByLabelText(/Toggle Admin role options/i);
+      // Expand System role and User
+      const toggleAdmin = screen.getByLabelText(/Toggle System role options/i);
       fireEvent.click(toggleAdmin);
       const toggleUser = screen.getByLabelText(/Toggle User options/i);
       fireEvent.click(toggleUser);
@@ -869,8 +873,8 @@ describe('AiCenterModal', () => {
       expect(screen.getByText('Michael Scott')).toBeInTheDocument();
       expect(screen.getByText('Dwight Schrute')).toBeInTheDocument();
 
-      // Deselect all Admin roles
-      const adminRoleSelectAll = screen.getByLabelText(/Select all Admin roles/i);
+      // Deselect all System roles
+      const adminRoleSelectAll = screen.getByLabelText(/Select all System roles/i);
       fireEvent.click(adminRoleSelectAll);
 
       // All users still remain accessible in the User list independently
@@ -882,8 +886,8 @@ describe('AiCenterModal', () => {
     it('toggles assignments and saves to store', () => {
       renderSpiderDetail();
 
-      // Expand Admin role and User
-      const toggleAdmin = screen.getByLabelText(/Toggle Admin role options/i);
+      // Expand System role and User
+      const toggleAdmin = screen.getByLabelText(/Toggle System role options/i);
       fireEvent.click(toggleAdmin);
       const toggleUser = screen.getByLabelText(/Toggle User options/i);
       fireEvent.click(toggleUser);
