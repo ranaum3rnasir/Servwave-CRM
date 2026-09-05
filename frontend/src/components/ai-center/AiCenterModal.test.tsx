@@ -758,9 +758,9 @@ describe('AiCenterModal', () => {
 
       const customers = buildWatcherCustomersFromLive(apiLeads, apiCustomers);
       expect(customers).toHaveLength(1);
-      expect(customers[0].name).toBe('Steven Nguyen');
-      expect(customers[0].leads).toHaveLength(1);
-      expect(customers[0].leads[0].serviceLocation).toBe('1888 Main St, Clifton, NJ 07011');
+      expect(customers[0]!.name).toBe('Steven Nguyen');
+      expect(customers[0]!.leads).toHaveLength(1);
+      expect(customers[0]!.leads[0]!.serviceLocation).toBe('1888 Main St, Clifton, NJ 07011');
     });
 
     it('renders complete service location in Spider Contact Watchers dropdown', () => {
@@ -1061,12 +1061,12 @@ describe('AiCenterModal', () => {
       // User 1 (usr-admin-1) is owner of lead l1
       const notifsOwner1 = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-admin-1', role: 'TECHNICIAN' });
       expect(notifsOwner1.length).toBe(1);
-      expect(notifsOwner1[0].leadId).toBe('l1');
+      expect(notifsOwner1[0]!.leadId).toBe('l1');
 
       // User 2 (usr-sales-owner) is owner of lead l2
       const notifsOwner2 = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-sales-owner', role: 'TECHNICIAN' });
       expect(notifsOwner2.length).toBe(1);
-      expect(notifsOwner2[0].leadId).toBe('l2');
+      expect(notifsOwner2[0]!.leadId).toBe('l2');
 
       // User 3 (unrelated user) is not the owner of any triggered lead
       const notifsStranger = useSpiderWatcherStore.getState().getComputedNotifications({ id: 'usr-stranger-999', role: 'TECHNICIAN' });

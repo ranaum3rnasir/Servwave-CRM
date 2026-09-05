@@ -224,11 +224,15 @@ describe('POST /api/jobs/:id/visits - Job.scheduled_start mirrors the next upcom
 describe('POST /api/jobs/:id/visits - a later visit does not steal the mirror (D14)', () => {
   let tx: ReturnType<typeof wireJobVisitTx>;
 
+  const DAY = 24 * 60 * 60 * 1000;
+  const v1Start = new Date(Date.now() + 5 * DAY);
+  const v1End = new Date(v1Start.getTime() + 2.5 * 60 * 60 * 1000);
+
   const VISIT_1 = visitRow({
     id: 'v0000000-0000-0000-0000-000000000001',
     visit_seq: 1,
-    scheduled_at: new Date('2026-09-05T13:00:00Z'),
-    scheduled_end: new Date('2026-09-05T15:30:00Z'),
+    scheduled_at: v1Start,
+    scheduled_end: v1End,
   });
 
   beforeEach(() => {
@@ -241,11 +245,13 @@ describe('POST /api/jobs/:id/visits - a later visit does not steal the mirror (D
   });
 
   it('moves the mirror onto an EARLIER second visit', async () => {
+    const earlierStart = new Date(Date.now() + 2 * DAY);
+    const earlierEnd = new Date(earlierStart.getTime() + 2.5 * 60 * 60 * 1000);
     const earlier = visitRow({
       id: 'v0000000-0000-0000-0000-000000000002',
       visit_seq: 2,
-      scheduled_at: new Date('2026-09-01T13:00:00Z'),
-      scheduled_end: new Date('2026-09-01T15:30:00Z'),
+      scheduled_at: earlierStart,
+      scheduled_end: earlierEnd,
     });
     mockPrisma.visit.create.mockResolvedValue(earlier);
     mockPrisma.visit.findMany.mockResolvedValue([VISIT_1, earlier]);
@@ -253,23 +259,25 @@ describe('POST /api/jobs/:id/visits - a later visit does not steal the mirror (D
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/visits`)
       .set(authHeader('admin'))
-      .send({ scheduled_start: '2026-09-01T13:00:00Z', scheduled_end: '2026-09-01T15:30:00Z' });
+      .send({ scheduled_start: earlierStart.toISOString(), scheduled_end: earlierEnd.toISOString() });
 
     expect(res.status).toBe(201);
     // S8 (RATIFIED, A5): scheduled_start is DROPPED as a job column - the read-time projection,
     // asked over the same post-write visit set, is what now answers "which visit wins".
-    expect(projectedSchedule([VISIT_1, earlier]).scheduled_start?.toISOString()).toBe('2026-09-01T13:00:00.000Z');
+    expect(projectedSchedule([VISIT_1, earlier]).scheduled_start?.toISOString()).toBe(earlierStart.toISOString());
   });
 
   it('leaves the mirror on visit 1 when the new visit is LATER', async () => {
     // D14's stated failure: "Conflating them would silently hide every later visit from the board
     // until the repoint lands - a wrong-data window in prod." Repointing the board at visit 3
     // would drop visit 1 out of this week's date range while it is still the next trip.
+    const laterStart = new Date(Date.now() + 10 * DAY);
+    const laterEnd = new Date(laterStart.getTime() + 2.5 * 60 * 60 * 1000);
     const later = visitRow({
       id: 'v0000000-0000-0000-0000-000000000003',
       visit_seq: 2,
-      scheduled_at: new Date('2026-09-12T13:00:00Z'),
-      scheduled_end: new Date('2026-09-12T15:30:00Z'),
+      scheduled_at: laterStart,
+      scheduled_end: laterEnd,
     });
     mockPrisma.visit.create.mockResolvedValue(later);
     mockPrisma.visit.findMany.mockResolvedValue([VISIT_1, later]);
@@ -277,13 +285,13 @@ describe('POST /api/jobs/:id/visits - a later visit does not steal the mirror (D
     const res = await request(app)
       .post(`/api/jobs/${JOB_FIXTURE.id}/visits`)
       .set(authHeader('admin'))
-      .send({ scheduled_start: '2026-09-12T13:00:00Z', scheduled_end: '2026-09-12T15:30:00Z' });
+      .send({ scheduled_start: laterStart.toISOString(), scheduled_end: laterEnd.toISOString() });
 
     expect(res.status).toBe(201);
     const { data } = tx.txJobUpdate.mock.calls[0][0];
     // S8 (RATIFIED, A5): scheduled_start is DROPPED as a job column - the read-time projection
     // now answers "which visit wins", over the same post-write visit set.
-    expect(projectedSchedule([VISIT_1, later]).scheduled_start?.toISOString()).toBe('2026-09-05T13:00:00.000Z');
+    expect(projectedSchedule([VISIT_1, later]).scheduled_start?.toISOString()).toBe(v1Start.toISOString());
     // S2 asserted the status key was ABSENT here, because the mirror only ever promoted
     // UNSCHEDULED -> SCHEDULED. S4's D12 makes Job.status a DERIVED cache recomputed on every
     // visit write, so restating SCHEDULED is now the correct behaviour, not a stray write. What
