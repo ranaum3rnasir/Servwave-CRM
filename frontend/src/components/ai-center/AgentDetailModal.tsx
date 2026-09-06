@@ -416,7 +416,7 @@ function SpiderWatcherConfig({
                       className={cn(
                         'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
                         assignments.adminRoles.length > 0
-                          ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                          ? 'bg-ai-50 text-ai-600 border border-ai-200'
                           : 'bg-surface-light text-text-soft border border-border'
                       )}
                     >
@@ -513,7 +513,7 @@ function SpiderWatcherConfig({
                       className={cn(
                         'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
                         selectedUserCount > 0
-                          ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                          ? 'bg-ai-50 text-ai-600 border border-ai-200'
                           : 'bg-surface-light text-text-soft border border-border'
                       )}
                     >
@@ -585,7 +585,7 @@ function SpiderWatcherConfig({
                                 )}
                               </div>
                             </div>
-                            <span className="rounded bg-surface-light border border-border px-1.5 py-0.5 text-[9px] font-semibold text-ai-700 shrink-0">
+                            <span className="rounded bg-surface-light border border-border px-1.5 py-0.5 text-[9px] font-semibold text-ai-600 shrink-0">
                               {user.roleLabel || user.role}
                             </span>
                           </div>
@@ -618,7 +618,7 @@ function SpiderWatcherConfig({
                   className={cn(
                     'rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors',
                     assignments.owner
-                      ? 'bg-ai-50 text-ai-700 border border-ai-200'
+                      ? 'bg-ai-50 text-ai-600 border border-ai-200'
                       : 'bg-surface-light text-text-soft border border-border'
                   )}
                 >
