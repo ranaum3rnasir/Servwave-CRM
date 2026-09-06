@@ -1485,6 +1485,15 @@ describe('POST /api/jobs/:id/assign - moving one visit does not fan the job unio
   let crew: ReturnType<typeof jobCrewStore>;
   let visitCrew: ReturnType<typeof visitCrewStore>;
 
+  const DAY = 24 * 60 * 60 * 1000;
+  const pourStart = new Date(Date.now() + 2 * DAY);
+  const pourEnd = new Date(pourStart.getTime() + 2 * 60 * 60 * 1000);
+  const finishStart = new Date(Date.now() + 5 * DAY);
+  const finishEnd = new Date(finishStart.getTime() + 2 * 60 * 60 * 1000);
+
+  const moveStart = new Date(Date.now() + 2 * DAY + 1 * 60 * 60 * 1000);
+  const moveEnd = new Date(moveStart.getTime() + 2.5 * 60 * 60 * 1000);
+
   const crewOf = (visitId: string) =>
     visitCrew.rows.filter((r) => r.visit_id === visitId).map((r) => r.user_id).sort();
 
@@ -1505,7 +1514,7 @@ describe('POST /api/jobs/:id/assign - moving one visit does not fan the job unio
       { [VISIT_POUR]: JOB_ID, [VISIT_FINISH]: JOB_ID },
     );
 
-    serveJobFromStore(visitCrew, { status: 'SCHEDULED', scheduled_start: new Date('2026-09-05T13:00:00Z') });
+    serveJobFromStore(visitCrew, { status: 'SCHEDULED', scheduled_start: pourStart });
     mockPrisma.job.findFirst.mockResolvedValue({ id: JOB_ID });
     mockPrisma.job.findMany.mockResolvedValue([]);
     mockPrisma.lead.findMany.mockResolvedValue([]);
@@ -1513,14 +1522,14 @@ describe('POST /api/jobs/:id/assign - moving one visit does not fan the job unio
     mockPrisma.visit.findMany.mockResolvedValue([
       {
         id: VISIT_POUR, job_id: JOB_ID, visit_seq: 1, status: 'SCHEDULED',
-        scheduled_at: new Date('2026-09-05T13:00:00Z'),
-        scheduled_end: new Date('2026-09-05T15:00:00Z'),
+        scheduled_at: pourStart,
+        scheduled_end: pourEnd,
         created_at: new Date('2026-08-20T10:00:00Z'),
       },
       {
         id: VISIT_FINISH, job_id: JOB_ID, visit_seq: 2, status: 'SCHEDULED',
-        scheduled_at: new Date('2026-09-08T13:00:00Z'),
-        scheduled_end: new Date('2026-09-08T15:00:00Z'),
+        scheduled_at: finishStart,
+        scheduled_end: finishEnd,
         created_at: new Date('2026-08-20T10:05:00Z'),
       },
     ]);
@@ -1550,8 +1559,8 @@ describe('POST /api/jobs/:id/assign - moving one visit does not fan the job unio
       .send({
         // Exactly what AssignJobDialog posts: the crew it was seeded with, unchanged.
         assignee_ids: [TECH_A, TECH_B],
-        scheduled_start: '2026-09-05T14:00:00Z',
-        scheduled_end: '2026-09-05T16:30:00Z',
+        scheduled_start: moveStart.toISOString(),
+        scheduled_end: moveEnd.toISOString(),
       });
 
     expect(res.status).toBe(200);
@@ -1572,8 +1581,8 @@ describe('POST /api/jobs/:id/assign - moving one visit does not fan the job unio
       .set(authHeader('admin'))
       .send({
         assignee_ids: [TECH_A, TECH_B, TECH_C],
-        scheduled_start: '2026-09-05T14:00:00Z',
-        scheduled_end: '2026-09-05T16:30:00Z',
+        scheduled_start: moveStart.toISOString(),
+        scheduled_end: moveEnd.toISOString(),
         force: true,
       });
 
