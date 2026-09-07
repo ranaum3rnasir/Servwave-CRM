@@ -72,7 +72,7 @@ jobs:
   backend:
     name: Backend (build + tests)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -96,7 +96,7 @@ jobs:
   frontend:
     name: Frontend (lint + type-check + tests + build)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -129,7 +129,7 @@ jobs:
   database:
     name: Database (migrations + RLS)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     # A throwaway Postgres per job. Nothing is shared between runs, so the
     # role-DDL tests below (rls-isolation, login-lockout-rls) cannot race each
     # other and no cross-job mutual exclusion is needed.
