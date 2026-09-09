@@ -12,6 +12,7 @@ import { sendCtmSms } from '../../lib/ctm/sendSms';
 import { emit } from './notificationService';
 import { loadRoleHolders } from './roleHolders';
 import { resolveSpiderAlertRecipients, getSpiderLeadOwnerId } from './spiderAlerts';
+import { logSpiderNotification } from './spiderLogger';
 
 export interface SpiderDispatchAssignments {
   adminRoles?: string[];
@@ -276,12 +277,39 @@ export async function dispatchSpiderAlerts(
 
         if (emailResult.status === 'sent') {
           emailsSent++;
+          logSpiderNotification({
+            channel: 'EMAIL',
+            status: 'SUCCESS',
+            recipient: recipient.email,
+            leadNumber: leadNumberStr,
+            customerName,
+            stageName,
+            details: emailSubject,
+          });
         } else {
           emailsSkippedOrFailed++;
+          logSpiderNotification({
+            channel: 'EMAIL',
+            status: 'FAILED',
+            recipient: recipient.email,
+            leadNumber: leadNumberStr,
+            customerName,
+            stageName,
+            error: emailResult.error || 'Provider rejected email',
+          });
         }
-      } catch (err) {
+      } catch (err: any) {
         logger.warn('[spiderDispatch] Failed to dispatch Spider alert email', { error: err, to: recipient.email });
         emailsSkippedOrFailed++;
+        logSpiderNotification({
+          channel: 'EMAIL',
+          status: 'FAILED',
+          recipient: recipient.email,
+          leadNumber: leadNumberStr,
+          customerName,
+          stageName,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
@@ -294,11 +322,19 @@ export async function dispatchSpiderAlerts(
       const destinationPhone = recipient.phone || lead.customer.phone;
       if (!destinationPhone) {
         smsSkippedOrFailed++;
+        logSpiderNotification({
+          channel: 'SMS',
+          status: 'SKIPPED',
+          recipient: 'N/A',
+          leadNumber: leadNumberStr,
+          customerName,
+          stageName,
+          error: 'No valid phone number found for recipient or customer',
+        });
         continue;
       }
 
       try {
-        // Find or create customer message thread for SMS delivery
         let thread = await prisma.messageThread.findFirst({
           where: {
             customer_id: lead.customer_id,
@@ -339,12 +375,39 @@ export async function dispatchSpiderAlerts(
 
         if (delivery.delivered) {
           smsSent++;
+          logSpiderNotification({
+            channel: 'SMS',
+            status: 'SUCCESS',
+            recipient: destinationPhone,
+            leadNumber: leadNumberStr,
+            customerName,
+            stageName,
+            details: smsBody,
+          });
         } else {
           smsSkippedOrFailed++;
+          logSpiderNotification({
+            channel: 'SMS',
+            status: 'FAILED',
+            recipient: destinationPhone,
+            leadNumber: leadNumberStr,
+            customerName,
+            stageName,
+            error: (delivery as any).reason || 'CTM delivery failed',
+          });
         }
-      } catch (err) {
+      } catch (err: any) {
         logger.warn('[spiderDispatch] Failed to dispatch Spider alert SMS', { error: err, phone: destinationPhone });
         smsSkippedOrFailed++;
+        logSpiderNotification({
+          channel: 'SMS',
+          status: 'FAILED',
+          recipient: destinationPhone,
+          leadNumber: leadNumberStr,
+          customerName,
+          stageName,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
