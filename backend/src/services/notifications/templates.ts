@@ -103,6 +103,29 @@ const registry: Record<string, TemplateFactory> = {
       + (s(data, 'customer_name') ? ' — ' + s(data, 'customer_name') : ''),
   }),
 
+  // ── SPIDER AI AGENT ────────────────────────────────────────────────────────
+  'spider.alert': (data) => ({
+    category: 'LEAD',
+    object_type: 'LEAD',
+    priority: 'INTERRUPT',
+    action_type: null,
+    needs_action: false,
+    title: `[Spider Alert] ${s(data, 'object_label', 'Lead')} overdue in ${s(data, 'stage_name', 'stage')}`
+      + (s(data, 'customer_name') ? ` — ${s(data, 'customer_name')}` : ''),
+    body: s(data, 'body') || (s(data, 'time_in_stage') ? `Time in stage: ${s(data, 'time_in_stage')}` : undefined),
+  }),
+
+  'spider.lead_inactive': (data) => ({
+    category: 'LEAD',
+    object_type: 'LEAD',
+    priority: 'INTERRUPT',
+    action_type: null,
+    needs_action: false,
+    title: `[Spider Alert] ${s(data, 'object_label', 'Lead')} inactive`
+      + (s(data, 'customer_name') ? ` — ${s(data, 'customer_name')}` : ''),
+    body: s(data, 'body') || undefined,
+  }),
+
   // ── ESTIMATE ───────────────────────────────────────────────────────────────
 
   'estimate.approved': (data) => ({

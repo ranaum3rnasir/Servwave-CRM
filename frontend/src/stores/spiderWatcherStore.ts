@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import api from '@/lib/axios';
 import { customerDisplayName } from '@/lib/customer-name';
+import { dispatchSpiderAlertApi } from '@/lib/api/spider';
 
 export type TimeUnit = 'Second' | 'Minute' | 'Hour' | 'Day';
 
@@ -1162,7 +1163,8 @@ interface SpiderWatcherState {
   setIsRedBorderActive: (active: boolean) => void;
   setIsWindowOpen: (open: boolean) => void;
   toggleRedBorder: () => void;
-  clearRedBorder: () => void;
+  dispatchedAlertKeys: string[];
+  dispatchOverdueAlerts: () => Promise<void>;
 
   getComputedNotifications: (user?: { id?: string; role?: string } | null) => InAppNotification[];
 }
@@ -1462,6 +1464,83 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
 
         return result;
       },
+
+      dispatchedAlertKeys: [],
+
+      dispatchOverdueAlerts: async () => {
+        const state = get();
+        const {
+          notifications,
+          assignments,
+          leadStages,
+          customers,
+          selectedLeadIds,
+          readNotificationIds,
+          dispatchedAlertKeys,
+        } = state;
+
+        if (!notifications.email && !notifications.sms) {
+          return;
+        }
+
+        const newDispatchedKeys: string[] = [];
+
+        for (const customer of customers) {
+          if (!customer.leads || customer.leads.length === 0) continue;
+          for (const lead of customer.leads) {
+            if (!selectedLeadIds.includes(lead.id)) continue;
+
+            const overdue = isLeadOverdue(lead, leadStages);
+            const notifId = `notif-${lead.id}`;
+            const isRead =
+              readNotificationIds.includes(notifId) || readNotificationIds.includes(lead.id);
+
+            if (overdue && !isRead) {
+              const stageName = formatCurrentStageName(lead.stageLabel || lead.stageId);
+              // Cooldown bucket (30 minutes)
+              const bucket = Math.floor(Date.now() / 1800000);
+              const dispatchKey = `${lead.id}:${stageName}:${bucket}`;
+
+              if (
+                dispatchedAlertKeys.includes(dispatchKey) ||
+                newDispatchedKeys.includes(dispatchKey)
+              ) {
+                continue;
+              }
+
+              newDispatchedKeys.push(dispatchKey);
+
+              // Background dispatch
+              dispatchSpiderAlertApi({
+                leadId: lead.id,
+                stageLabel: stageName,
+                elapsedValue: lead.elapsedValue,
+                elapsedUnit: lead.elapsedUnit,
+                elapsedSeconds: lead.elapsedSeconds,
+                assignments: {
+                  adminRoles: assignments.adminRoles || [],
+                  users: assignments.users || [],
+                  owner: !!assignments.owner,
+                },
+                notifications: {
+                  email: !!notifications.email,
+                  sms: !!notifications.sms,
+                  inApp: !!notifications.inApp,
+                  redFrame: !!notifications.redFrame,
+                },
+              }).catch((err) =>
+                console.warn('[Spider Watcher] Dispatch error:', err)
+              );
+            }
+          }
+        }
+
+        if (newDispatchedKeys.length > 0) {
+          set({
+            dispatchedAlertKeys: [...dispatchedAlertKeys, ...newDispatchedKeys].slice(-200),
+          });
+        }
+      },
     }),
     {
       name: 'servwave_spider_watcher_settings',
@@ -1486,6 +1565,7 @@ export const useSpiderWatcherStore = create<SpiderWatcherState>()(
 /** Hook to sync real live API customers and leads into the Spider Watcher store */
 export function useSyncSpiderWatcherLive() {
   const setCustomers = useSpiderWatcherStore((s) => s.setCustomers);
+  const dispatchOverdueAlerts = useSpiderWatcherStore((s) => s.dispatchOverdueAlerts);
 
   const { data: leads } = useQuery({
     queryKey: ['spider-watcher-leads-real'],
@@ -1521,4 +1601,13 @@ export function useSyncSpiderWatcherLive() {
       }
     }
   }, [leads, customers, setCustomers]);
+
+  // Periodic alert check & dispatch for Email/SMS when enabled
+  useEffect(() => {
+    dispatchOverdueAlerts();
+    const interval = setInterval(() => {
+      dispatchOverdueAlerts();
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [dispatchOverdueAlerts]);
 }

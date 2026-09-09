@@ -10,5 +10,6 @@ const router = Router();
 router.use(authenticate);
 
 router.post('/bookings', validate(ctrl.bookCallSchema), ctrl.bookCall);
+router.post('/spider/dispatch-alert', validate(ctrl.dispatchSpiderAlertSchema), ctrl.dispatchSpiderAlert);
 
 export default router;
