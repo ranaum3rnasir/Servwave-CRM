@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { sendAiFarmBookingEmails } from '../lib/email';
 import { logger } from '../lib/logger';
+import { dispatchSpiderAlerts } from '../services/notifications/spiderDispatch.service';
 
 export const bookCallSchema = z
   .object({
@@ -73,7 +74,6 @@ export async function dispatchSpiderAlert(req: Request, res: Response) {
   const body = req.body;
 
   try {
-    const { dispatchSpiderAlerts } = await import('../services/notifications/spiderDispatch.service');
     const result = await dispatchSpiderAlerts({
       organizationId: user.organization_id,
       leadId: body.leadId,

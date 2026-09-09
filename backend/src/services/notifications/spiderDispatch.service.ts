@@ -124,10 +124,7 @@ export async function dispatchSpiderAlerts(
     },
     lead: {
       id: lead.id,
-      assigned_to: lead.assigned_to,
-      assigned_to_user_id: lead.assigned_to_user_id,
       commission_owner_id: lead.commission_owner_id,
-      owner_id: lead.owner_id,
       lead_number: lead.lead_number,
     },
     roleHolders,
@@ -188,7 +185,7 @@ export async function dispatchSpiderAlerts(
   }
 
   const customerName = `${lead.customer.first_name || ''} ${lead.customer.last_name || ''}`.trim() ||
-    lead.customer.company ||
+    lead.customer.company_name ||
     'Customer';
   const stageName = params.stageLabel || 'Current Stage';
   const timeInStageStr = params.elapsedValue !== undefined && params.elapsedUnit
@@ -324,6 +321,7 @@ export async function dispatchSpiderAlerts(
         const msg = await prisma.message.create({
           data: {
             thread_id: thread.id,
+            organization_id: organizationId,
             direction: 'out',
             body: smsBody,
             ts: new Date(),
