@@ -860,6 +860,8 @@ describe('PATCH /api/jobs/:id/visits/:visitId - pushing the current visit later 
   const VISIT_1_MOVED = { ...VISIT_1, scheduled_at: new Date('2026-09-12T13:00:00Z'), scheduled_end: new Date('2026-09-12T15:30:00Z') };
 
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T12:00:00.000Z'));
     vi.clearAllMocks();
     clearPermissionCache();
     mockAuthAs('admin');
@@ -870,6 +872,10 @@ describe('PATCH /api/jobs/:id/visits/:visitId - pushing the current visit later 
     // The post-update live set: visit 1 has moved out to Sep 12, visit 2 is untouched on Sep 9.
     mockPrisma.visit.findMany.mockResolvedValue([VISIT_1_MOVED, VISIT_2]);
     tx = wireJobVisitTx();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('mirrors visit 2, not the row that was just edited', async () => {
