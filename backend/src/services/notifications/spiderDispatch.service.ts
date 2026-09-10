@@ -295,7 +295,7 @@ export async function dispatchSpiderAlerts(
             leadNumber: leadNumberStr,
             customerName,
             stageName,
-            error: emailResult.error || 'Provider rejected email',
+            error: emailResult.status === 'failed' ? emailResult.error : `Skipped: ${emailResult.reason}`,
           });
         }
       } catch (err: any) {
